@@ -19,6 +19,7 @@ backend/artifacts/
 backend/video/remotion/artifacts/
 backend/video/remotion/build/
 backend/video/remotion/public/generated/
+backend/video/remotion/public/*-[0-9][0-9][0-9].png
 backend/qa-viewport-*.png
 backend/**/*.mp4
 backend/**/*.webm
