@@ -1,0 +1,63 @@
+from datetime import UTC, datetime
+
+from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind, Rect, Target
+from productlens.presentation.director import build_presentation_plan
+
+
+def test_small_target_keeps_native_scale_by_default():
+    trace = DemoTrace(
+        run_id="run",
+        objective="Open profile",
+        started_at=datetime.now(UTC),
+        events=[
+            InteractionEvent(
+                operation_id="op",
+                kind=OperationKind.CLICK,
+                intent="Open profile",
+                target=Target(name="Profile"),
+                target_rect=Rect(x=1330, y=12, width=24, height=24),
+                before={},
+                after={},
+                success=True,
+                duration_ms=10,
+            )
+        ],
+    )
+    plan = build_presentation_plan(trace)
+    assert plan.camera[0].zoom == 1.0
+    assert "native browser scale" in plan.camera[0].reason
+    assert plan.cursor_event_ids
+    assert plan.cursor_paths[0]["destination"] == {"x": 1342.0, "y": 24.0}
+    assert plan.cursor_paths[0]["source"] == {"x": 720.0, "y": 450.0}
+    assert 0.22 <= plan.cursor_paths[0]["travel_seconds"] <= 0.8
+
+
+def test_form_interaction_gets_bounded_focus_zoom_when_enabled():
+    trace = DemoTrace(
+        run_id="form", objective="Fill form", started_at=datetime.now(UTC),
+        events=[InteractionEvent(
+            operation_id="fill", kind=OperationKind.FILL_TEXT, intent="Enter name",
+            target=Target(name="Name"), target_rect=Rect(x=400, y=350, width=360, height=48),
+            before={}, after={}, success=True, duration_ms=10,
+        )],
+    )
+    decision = build_presentation_plan(trace, allow_camera_zoom=True).camera[0]
+    assert decision.zoom == 1.12
+    assert "form control" in decision.reason
+
+
+def test_cursor_direction_has_a_natural_bounded_waypoint_but_keeps_exact_target():
+    trace = DemoTrace(
+        run_id="cursor", objective="Open settings", started_at=datetime.now(UTC),
+        events=[InteractionEvent(
+            operation_id="settings", kind=OperationKind.CLICK, intent="Open settings",
+            target=Target(name="Settings"), target_rect=Rect(x=1000, y=200, width=80, height=40),
+            before={}, after={}, success=True, duration_ms=10,
+        )],
+    )
+    path = build_presentation_plan(trace).cursor_paths[0]
+    assert path["destination"] == {"x": 1040.0, "y": 220.0}
+    assert path["waypoints"]
+    assert path["cursor_style"] == "productlens-pointer-v1"
+    assert 0 <= path["waypoints"][0]["x"] <= 1440
+    assert 0 <= path["waypoints"][0]["y"] <= 900

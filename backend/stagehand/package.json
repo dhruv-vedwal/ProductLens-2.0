@@ -1,0 +1,9 @@
+{
+  "name": "productlens-stagehand-bridge",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22.18.0"},
+  "dependencies": {
+    "@browserbasehq/stagehand": "^4.0.0"
+  }
+}

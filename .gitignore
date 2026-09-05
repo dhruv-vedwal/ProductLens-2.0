@@ -1,0 +1,68 @@
+# ProductLens 2.0 — generated/runtime files
+# Keep source, migrations, tests, docs, and deployment definitions tracked.
+
+# Secrets and local configuration
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Run artifacts, recordings, renders, screenshots, and temporary exports
+/artifacts/
+/.ruff_cache/
+/.pytest_cache/
+/samples/
+/productlens-test-htmls/
+backend/artifacts/
+backend/video/remotion/artifacts/
+backend/video/remotion/build/
+backend/video/remotion/public/generated/
+backend/qa-viewport-*.png
+backend/**/*.mp4
+backend/**/*.webm
+backend/**/*.mkv
+backend/**/*.wav
+backend/**/*.mp3
+
+# Local databases and database journal/lock files
+backend/*.sqlite3
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3-*
+backend/**/*.sqlite3-shm
+backend/**/*.sqlite3-wal
+
+# Python tooling and caches
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/.mypy_cache/
+backend/.coverage
+backend/htmlcov/
+backend/.stagehand-cache/
+backend/*.egg-info/
+
+# JavaScript/Next/Remotion build output and dependencies
+**/node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
+backend/video/remotion/node_modules/
+backend/stagehand/node_modules/
+backend/video/remotion/.cache/
+backend/video/remotion/tsconfig.tsbuildinfo
+
+# Logs, temporary files, and editor/OS metadata
+**/*.log
+**/*.tmp
+**/*.temp
+.DS_Store
+**/.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

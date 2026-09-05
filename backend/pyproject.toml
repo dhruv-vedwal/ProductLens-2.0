@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "productlens-generation-engine"
+version = "0.1.0"
+description = "ProductLens 2.0 reliability-first generation engine"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.12,<3",
+  "structlog>=25.4,<26",
+  "httpx>=0.28,<1",
+  "playwright>=1.55,<2",
+  "fastapi>=0.128,<1",
+  "uvicorn[standard]>=0.40,<1",
+  "dramatiq[rabbitmq]>=1.17,<2",
+  "SQLAlchemy>=2.0,<3",
+  "alembic>=1.17,<2",
+  "psycopg[binary]>=3.2,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8"]
+storage = ["boto3>=1.35,<2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["integration: runs a real local browser against supplied fixtures"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# FastAPI declares dependency injection through these evaluated defaults.
+# They are framework contracts rather than mutable application defaults.
+ignore = ["B008"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/productlens"]
