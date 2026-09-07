@@ -109,10 +109,11 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
         success_criteria=["requested content is visibly established", "each selected page is explored before transition"],
         minimum_duration_seconds=110 if full else 60,
         target_duration_seconds=180 if full else 120,
-        # A complete walkthrough is allowed the full 2–3 minute delivery
-        # envelope.  Discovery must not reject a faithful story merely because
-        # Browserbase capture includes readable transition/dwell time.
-        maximum_duration_seconds=300 if full else 180,
+        # A complete walkthrough targets three minutes with a bounded repair
+        # envelope. Discovery must not accept an old route-sweep artifact that
+        # merely accumulated remote idle time; an overlong capture is returned
+        # to planning for selective, evidence-backed coverage.
+        maximum_duration_seconds=240 if full else 180,
     )
 
 

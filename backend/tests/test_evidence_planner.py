@@ -7,11 +7,33 @@ from productlens.contracts.models import (
     ProductContext,
 )
 from productlens.planning.candidates import (
+    _editorial_landmark_groups,
     _page_landmarks,
     build_page_complete_proposal,
     candidate_flows_from_evidence,
     select_candidate_flow,
 )
+
+
+def test_editorial_landmark_groups_preserve_every_heading_without_one_action_per_card():
+    landmarks = [
+        ObservedElement(tag="h1", name="Portfolio", selector="#portfolio"),
+        ObservedElement(tag="h2", name="Featured work", selector="#work"),
+        *[
+            ObservedElement(tag="h3", name=f"Project {index}", selector=f"#project-{index}")
+            for index in range(1, 7)
+        ],
+        ObservedElement(tag="h2", name="Impact", selector="#impact"),
+        *[
+            ObservedElement(tag="h4", name=f"Metric {index}", selector=f"#metric-{index}")
+            for index in range(1, 5)
+        ],
+    ]
+    groups = _editorial_landmark_groups(landmarks)
+    flattened = [item.name for group in groups for item in group]
+    assert flattened == [item.name for item in landmarks]
+    assert len(groups) < len(landmarks)
+    assert all(group for group in groups)
 from productlens.planning.production import ProductionPlanningService
 
 

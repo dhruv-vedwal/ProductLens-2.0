@@ -31,6 +31,25 @@ class Adapter:
         return None
 
 
+class ScrollTraceAdapter(Adapter):
+    def __init__(self):
+        self.page = ReactivePage()
+        self.after_scroll = False
+
+    async def view_state(self):
+        return Viewport(width=1440, height=900), {"x": 0.0, "y": 600.0 if self.after_scroll else 0.0}
+
+    async def execute(self, operation):
+        self.after_scroll = True
+        return {
+            "start_y": 0.0,
+            "target_y": 600.0,
+            "duration_ms": 1200.0,
+            "steps": 4.0,
+            "path": [{"x": 0, "y": 0}, {"x": 0, "y": 180}, {"x": 0, "y": 420}, {"x": 0, "y": 600}],
+        }
+
+
 @pytest.mark.asyncio
 async def test_engine_executes_a_validated_plan():
     plan = DemoPlan(
@@ -56,6 +75,17 @@ async def test_engine_executes_a_validated_plan():
     result = await ExecutionEngine(Adapter(), trace).run_plan(plan)
     assert result.outcome_verified and len(result.events) == 1
     assert result.events[0].viewport.width == 1440
+
+
+@pytest.mark.asyncio
+async def test_engine_persists_intermediate_scroll_positions_in_trace():
+    trace = DemoTrace(run_id="scroll", objective="Reveal details", started_at=datetime.now(UTC))
+    event = await ExecutionEngine(ScrollTraceAdapter(), trace).run(
+        SemanticOperation(kind=OperationKind.SCROLL_TO, intent="Reveal details", target={"name": "Details"})
+    )
+    assert len(event.scroll_path) == 4
+    assert event.scroll_path[1]["y"] == 180
+    assert event.after["scroll_motion"]["steps"] == 4
 
 
 class ReactivePage:

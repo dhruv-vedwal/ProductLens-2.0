@@ -19,6 +19,37 @@ class PlaywrightAdapter:
         self.page = page
         self.cloud_mode = cloud_mode
 
+    def ensure_page(self) -> Any:
+        """Reconnect to the live page after a remote navigation replacement.
+
+        Some CDP providers replace the target page object when an SPA performs
+        a hard navigation. Playwright normally hides that detail, but a remote
+        session can briefly expose the old object as ``TargetClosedError``.
+        Prefer the newest still-open page in the same context; never invent a
+        new URL or silently continue without a browser target.
+        """
+        closed = self._page_is_closed(self.page)
+        if not closed:
+            return self.page
+        context = getattr(self.page, "context", None)
+        pages = getattr(context, "pages", []) if context is not None else []
+        for candidate in reversed(list(pages)):
+            if self._page_is_closed(candidate):
+                continue
+            self.page = candidate
+            return candidate
+        raise GroundingError("The active browser page was closed and no replacement target is available")
+
+    @staticmethod
+    def _page_is_closed(page: Any) -> bool:
+        is_closed = getattr(page, "is_closed", None)
+        if not callable(is_closed):
+            return False
+        try:
+            return bool(is_closed())
+        except (PlaywrightError, AttributeError, TypeError, RuntimeError):
+            return True
+
     def locator(self, target: Target) -> Any:
         """Return the preferred deterministic locator for compatibility callers."""
         return self.locator_candidates(target)[0][1]
@@ -29,6 +60,7 @@ class PlaywrightAdapter:
         Coordinates are deliberately absent. Each candidate remains a normal
         Playwright locator, so actionability is still enforced at execution.
         """
+        self.ensure_page()
         candidates: list[tuple[str, Any]] = []
         # DOM innerText and accessible names may normalize newlines differently
         # at a responsive production viewport. Preserve the observed words,
@@ -129,11 +161,13 @@ class PlaywrightAdapter:
     async def target_rect(self, target: Target | None) -> Rect | None:
         if target is None:
             return None
+        self.ensure_page()
         locator, _ = await self.grounded_locator(target)
         box = await locator.bounding_box()
         return Rect(**box) if box else None
 
     async def execute(self, operation: SemanticOperation) -> Any:
+        self.ensure_page()
         if operation.kind == OperationKind.NAVIGATE:
             response = await self.page.goto(str(operation.value), wait_until="domcontentloaded")
             try:
@@ -200,36 +234,37 @@ class PlaywrightAdapter:
                 # scroll continuity rather than an anchor jump.
                 steps = max(8, min(24, int(abs(distance) / 120) + 1))
                 duration_ms = int(min(3_000, max(1_200, steps * 100)))
-                await self.page.evaluate(
+                motion = await self.page.evaluate(
                     """async ({top, duration, steps}) => {
                         const start = window.scrollY;
                         const delta = top - start;
+                        const path = [{x: window.scrollX, y: start}];
                         if (Math.abs(delta) < 2) return;
                         const ease = value => 1 - Math.pow(1 - value, 3);
                         const pause = duration / steps;
                         for (let index = 1; index <= steps; index += 1) {
                             window.scrollTo(0, start + delta * ease(index / steps));
+                            path.push({x: window.scrollX, y: window.scrollY});
                             await new Promise(resolve => setTimeout(resolve, pause));
                         }
+                        return {start_y: start, target_y: window.scrollY, duration_ms: duration, steps, path};
                     }""",
                     {"top": desired_top, "duration": duration_ms, "steps": steps},
                 )
                 await self.page.wait_for_timeout(450)
-                return {
-                    "start_y": float(geometry["currentTop"]),
-                    "target_y": desired_top,
-                    "duration_ms": float(duration_ms),
-                    "steps": float(steps),
-                }
+                return motion or {"start_y": float(geometry["currentTop"]), "target_y": desired_top, "duration_ms": float(duration_ms), "steps": float(steps), "path": []}
             # Use enough wheel samples for visible continuity without making a
             # remote CDP run spend several seconds on every landmark. Browser
             # sessions add command latency to each wheel event; a 30-sample
             # cap turned a three-minute story into a five-minute cloud run.
             # This remains a real, gradual scroll rather than an anchor jump.
             steps = max(3, min(14, int(abs(distance) / 180) + 1))
+            path = [{"x": 0.0, "y": float(geometry["currentTop"])}]
             for _ in range(steps):
                 await self.page.mouse.wheel(0, distance / steps)
                 await self.page.wait_for_timeout(70)
+                _, current_scroll = await self.view_state()
+                path.append({"x": float(current_scroll.get("x", 0)), "y": float(current_scroll.get("y", 0))})
             # Do not call scroll_into_view_if_needed here: it can undo the
             # directed wheel path with an abrupt anchor jump. The requested
             # target is intentionally positioned inside the reading region.
@@ -241,6 +276,7 @@ class PlaywrightAdapter:
                 "target_y": desired_top,
                 "duration_ms": float(steps * 70 + 450),
                 "steps": float(steps),
+                "path": path,
             }
         if operation.kind == OperationKind.WAIT_FOR_STATE:
             return await locator.wait_for(state="visible", timeout=operation.value or 5_000)
@@ -269,6 +305,7 @@ class PlaywrightAdapter:
         raise GroundingError(f"Unsupported primitive operation: {operation.kind}")
 
     async def snapshot(self, target: Target | None) -> dict[str, Any]:
+        self.ensure_page()
         if target is None:
             return {"url": self.page.url}
         locator, strategy = await self.grounded_locator(target)
@@ -300,6 +337,7 @@ class PlaywrightAdapter:
             return {"url": self.page.url, "target_available": False}
 
     async def view_state(self) -> tuple[Viewport, dict[str, float]]:
+        self.ensure_page()
         state = await self.page.evaluate(
             "() => ({width: window.innerWidth, height: window.innerHeight, "
             "deviceScaleFactor: window.devicePixelRatio || 1, x: window.scrollX, y: window.scrollY})"

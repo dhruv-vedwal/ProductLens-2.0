@@ -20,7 +20,8 @@ async def test_close_session_treats_already_closed_browserbase_session_as_succes
         async def __aexit__(self, *args):
             return False
 
-        async def delete(self, *args, **kwargs):
+        async def post(self, _url, **kwargs):
+            assert kwargs["json"] == {"status": "REQUEST_RELEASE"}
             return Response()
 
     monkeypatch.setattr("productlens.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client())
@@ -44,7 +45,8 @@ async def test_close_session_retries_transient_transport_failure(monkeypatch):
         async def __aexit__(self, *args):
             return False
 
-        async def delete(self, *args, **kwargs):
+        async def post(self, _url, **kwargs):
+            assert kwargs["json"] == {"status": "REQUEST_RELEASE"}
             self.attempts += 1
             if self.attempts == 1:
                 raise httpx.ConnectError("temporary DNS failure")

@@ -44,8 +44,19 @@ const BrowserMotion: React.FC<{ video: string; sourceWidth: number; sourceHeight
   } : undefined;
   const x = curve ? curve(cursorProgress, 'x') : cursorPath ? interpolate(cursorProgress, [0, 1], [cursorPath.source.x, cursorPath.destination.x]) : fallbackX;
   const y = curve ? curve(cursorProgress, 'y') : cursorPath ? interpolate(cursorProgress, [0, 1], [cursorPath.source.y, cursorPath.destination.y]) : fallbackY;
-  const activeCaption = captions.find(item => frame / frameRate >= item.start && frame / frameRate < item.end);
+  const captionTime = frame / frameRate;
+  const activeCaptionIndex = captions.findIndex(item => captionTime >= item.start && captionTime < item.end);
+  const fadingCaptionIndex = activeCaptionIndex === -1
+    ? captions.findIndex(item => captionTime >= item.end && captionTime < item.end + 0.18)
+    : activeCaptionIndex;
+  const activeCaption = fadingCaptionIndex >= 0 ? captions[fadingCaptionIndex] : undefined;
   const activeScene = scenes.find(item => item.event_id === beat?.eventId) ?? scenes[beatIndex];
+  const captionFadeSeconds = 0.18;
+  const captionOpacity = activeCaption ? Math.min(
+    1,
+    Math.max(0, (captionTime - activeCaption.start) / captionFadeSeconds),
+    Math.max(0, (activeCaption.end - captionTime) / captionFadeSeconds),
+  ) : 0;
   // Keep the source website full-frame. Decorative browser cards and scaling
   // make real product chrome, sidebars, and edge animations disappear.
   const sourceScale = Math.min(1920 / sourceWidth, 1080 / sourceHeight);
@@ -69,10 +80,12 @@ const BrowserMotion: React.FC<{ video: string; sourceWidth: number; sourceHeight
   const scaledHeight = sourceHeight * sourceScale * zoom;
   const translateX = Math.min(1920 - videoLeft - scaledWidth, Math.max(-videoLeft, rawTranslateX));
   const translateY = Math.min(1080 - videoTop - scaledHeight, Math.max(-videoTop, rawTranslateY));
-  const sourcePointX = videoLeft + x * sourceScale;
-  const sourcePointY = videoTop + y * sourceScale;
-  const cursorLeft = sourcePointX * zoom + translateX;
-  const cursorTop = sourcePointY * zoom + translateY;
+  // Apply the same transform as the source video: the letterbox offset is an
+  // already-composited origin and must not itself be multiplied by zoom.
+  // Multiplying ``videoLeft``/``videoTop`` again made the pointer drift away
+  // from real click targets on non-16:9 captures and during focus moves.
+  const cursorLeft = videoLeft + x * sourceScale * zoom + translateX;
+  const cursorTop = videoTop + y * sourceScale * zoom + translateY;
   const clickKinds = new Set(['Click', 'OpenNavigationItem', 'OpenModal', 'CloseModal', 'Submit', 'ApplyFilter', 'Check', 'Uncheck', 'ChooseRadio', 'SelectOption']);
   const clickAge = frame - (beat?.clickFrame ?? (beat?.start ?? frame) + transitionFrames);
   const clickActive = Boolean(beat && clickKinds.has(beat.kind) && clickAge >= 0 && clickAge < 15);
@@ -81,7 +94,7 @@ const BrowserMotion: React.FC<{ video: string; sourceWidth: number; sourceHeight
   return <AbsoluteFill style={{ background: '#080b12', overflow: 'hidden', fontFamily: 'Inter,Arial,sans-serif' }}>
     <OffthreadVideo src={staticFile(video)} playbackRate={playbackRate} style={{ position: 'absolute', left: videoLeft, top: videoTop, width: sourceWidth * sourceScale, height: sourceHeight * sourceScale, objectFit: 'fill', transform: `translate(${translateX}px, ${translateY}px) scale(${zoom})`, transformOrigin: '0 0' }} />
     {beat && activeScene?.show_cursor !== false && activeScene?.cursor?.visible !== false && <>{clickActive && activeScene?.cursor?.click_ripple !== false && <div aria-hidden style={{ position: 'absolute', left: Math.max(10, Math.min(1890, cursorLeft)) - rippleSize / 2, top: Math.max(10, Math.min(1050, cursorTop)) - rippleSize / 2, width: rippleSize, height: rippleSize, borderRadius: '50%', border: '3px solid #fff', boxShadow: '0 0 14px rgba(0,0,0,.7)', opacity: rippleOpacity, pointerEvents: 'none' }} />}<DirectedCursor x={Math.max(10, Math.min(1890, cursorLeft))} y={Math.max(10, Math.min(1050, cursorTop))} /></>}
-    {activeCaption && <div style={{ position: 'absolute', left: '28%', right: '28%', ...(activeScene?.caption_safe_zone === 'top' ? { top: 18 } : { bottom: 18 }), display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ maxWidth: 720, background: 'rgba(8,12,20,.70)', border: '1px solid rgba(255,255,255,.15)', borderRadius: 9, boxShadow: '0 5px 16px rgba(0,0,0,.24)', padding: '7px 13px 8px', textAlign: 'center', color: '#fff', backdropFilter: 'blur(10px)' }}><div style={{ fontSize: 18, lineHeight: 1.3, fontWeight: 600, letterSpacing: .05, textShadow: '0 1px 2px #000' }}>{activeCaption.text}</div></div></div>}
+    {activeCaption && <div style={{ position: 'absolute', left: '28%', right: '28%', ...(activeScene?.caption_safe_zone === 'top' ? { top: 18 } : { bottom: 18 }), display: 'flex', justifyContent: 'center', pointerEvents: 'none', opacity: captionOpacity }}><div style={{ maxWidth: 720, background: 'rgba(8,12,20,.88)', border: '1px solid rgba(255,255,255,.15)', borderRadius: 9, boxShadow: '0 5px 16px rgba(0,0,0,.24)', padding: '7px 13px 8px', textAlign: 'center', color: '#fff' }}><div style={{ fontSize: 18, lineHeight: 1.3, fontWeight: 600, letterSpacing: .05, textShadow: '0 1px 2px #000' }}>{activeCaption.text}</div></div></div>}
   </AbsoluteFill>;
 };
 

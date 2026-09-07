@@ -54,6 +54,23 @@ def build_scene_plan(trace: DemoTrace, *, storyboard: EditorialStoryboard | None
             target_center_y = event.target_rect.y + event.target_rect.height / 2
             if target_center_y >= event.viewport.height * 0.58:
                 caption_safe_zone = "top"
+        # A directed scroll often reveals a compact card or capability whose
+        # text is otherwise needlessly small inside a wide, source-faithful
+        # desktop capture. It earns a modest editorial reframe only when the
+        # recorded geometry proves that it is a bounded, visible reading
+        # target. Page navigation, broad sections, and off-canvas geometry
+        # deliberately retain the complete frame.
+        compact_reading_target = bool(
+            kind is OperationKind.SCROLL_TO
+            and event.target_rect is not None
+            and event.viewport is not None
+            and 96 <= event.target_rect.width <= event.viewport.width * 0.55
+            and event.target_rect.height <= min(112, event.viewport.height * 0.16)
+            and event.target_rect.x >= 0
+            and event.target_rect.y >= 0
+            and event.target_rect.x + event.target_rect.width <= event.viewport.width
+            and event.target_rect.y + event.target_rect.height <= event.viewport.height
+        )
         scenes.append({
             "event_id": event.id, "scene_id": editorial.id if editorial else f"trace-{event.id}",
             "intent": event.intent, "phase": phase, "page_stage": page_stage, "page_key": page_key,
@@ -79,17 +96,18 @@ def build_scene_plan(trace: DemoTrace, *, storyboard: EditorialStoryboard | None
                 # Focus is an editorial exception. A form field being filled
                 # is compact, actionable evidence; headings, page transitions
                 # and ordinary reading retain the source-faithful full frame.
-                "mode": "target-focus" if kind in {
+                "mode": "target-focus" if compact_reading_target or kind in {
                     OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE,
                     OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE,
                     OperationKind.SELECT_DATE_RANGE,
                 } else "full-frame",
-                "reason": "compact actionable control is being demonstrated" if kind in {
+                "reason": "compact evidence region is being explained with surrounding context preserved" if compact_reading_target else "compact actionable control is being demonstrated" if kind in {
                     OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE,
                     OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE,
                     OperationKind.SELECT_DATE_RANGE,
                 } else "page context is more valuable than target magnification",
                 "duration_seconds": 0.45,
+                "zoom": 1.10 if compact_reading_target else 1.0,
                 "easing": "out-cubic",
                 "safety_bounds": "preserve-browser-frame",
             },

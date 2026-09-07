@@ -165,6 +165,32 @@ def test_evidence_timed_captions_handoff_before_the_next_action_dispatch():
     assert timed[0]["end"] <= 4.8
 
 
+def test_scroll_caption_uses_the_visible_reveal_interval_not_remote_verification_tail():
+    recorded_at = datetime.now(UTC)
+    first = InteractionEvent(
+        operation_id="first", kind=OperationKind.SCROLL_TO, intent="Inspect feature",
+        action_at=recorded_at + timedelta(seconds=2),
+        occurred_at=recorded_at + timedelta(seconds=8),
+        before={}, after={"scroll_motion": {"duration_ms": 1200}}, success=True, duration_ms=1,
+    )
+    second = InteractionEvent(
+        operation_id="second", kind=OperationKind.SCROLL_TO, intent="Inspect outcome",
+        action_at=recorded_at + timedelta(seconds=6),
+        occurred_at=recorded_at + timedelta(seconds=12),
+        before={}, after={"scroll_motion": {"duration_ms": 1200}}, success=True, duration_ms=1,
+    )
+    trace = DemoTrace(run_id="reveal-slot", objective="Demo", started_at=recorded_at, recording_started_at=recorded_at, events=[first, second])
+    timed = _evidence_timed_captions(
+        trace,
+        [{"scene_id": first.id, "text": "The feature result is now visible."}, {"scene_id": second.id, "text": "The outcome confirms the workflow."}],
+        screen_seconds=12,
+    )
+    assert timed is not None
+    assert timed[0]["start"] < 4
+    assert timed[0]["end"] - timed[0]["start"] >= 1.4
+    assert timed[0]["end"] <= timed[1]["start"]
+
+
 def test_render_rejects_narration_that_would_outlast_real_capture(monkeypatch, tmp_path: Path):
     artifacts = RunArtifacts(tmp_path, "sync")
     raw = artifacts.execution / "browser-recording.webm"

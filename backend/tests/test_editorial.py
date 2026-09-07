@@ -16,7 +16,19 @@ from productlens.contracts.models import (
     WorkflowProposal,
 )
 from productlens.planning.production import ProductionPlanningService
-from productlens.presentation.editorial import _summary_from_collection
+from productlens.presentation.editorial import _observed_narration, _summary_from_collection, _viewer_ready
+
+
+def test_viewer_ready_allows_an_explanatory_named_feature_but_not_a_title_dump():
+    assert _viewer_ready(
+        "Chit Chat Connect is a real-time messaging product with synchronized presence and typing state.",
+        "Chit Chat Connect",
+    )
+    assert not _viewer_ready("Chit Chat Connect", "Chit Chat Connect")
+    assert not _viewer_ready(
+        "System Designs is a visual exploration of the core system designs.",
+        "System Designs",
+    )
 
 
 def test_collection_fallback_is_domain_neutral_for_non_study_products():
@@ -27,6 +39,66 @@ def test_collection_fallback_is_domain_neutral_for_non_study_products():
 
     assert "Core Engineering Capabilities" in narration
     assert "problem-solving" not in narration
+
+
+def test_grouped_scroll_narration_explains_each_visible_subject():
+    root = "https://example.test/"
+    context = ProductContext(
+        url=root,
+        title="Example portfolio",
+        application_type="portfolio",
+        page_knowledge=[PageKnowledge(
+            url=root,
+            title="Example portfolio",
+            purpose="featured work",
+            visible_facts=[
+                "Project Alpha :: A realtime collaboration workspace for distributed teams.",
+                "Project Beta :: An analytics dashboard that turns event streams into clear reports.",
+            ],
+            fingerprint="home",
+        )],
+        elements=[
+            ObservedElement(tag="h3", name="Project Alpha", selector="#alpha", source_url=root, text="A realtime collaboration workspace for distributed teams."),
+            ObservedElement(tag="h3", name="Project Beta", selector="#beta", source_url=root, text="An analytics dashboard that turns event streams into clear reports."),
+        ],
+        confidence=1,
+    )
+    operation = SemanticOperation(
+        kind=OperationKind.SCROLL_TO,
+        intent="Explore the featured projects",
+        target=Target(name="Project Beta", selector="#beta", source_url=root),
+        covered_content_groups=["Project Alpha", "Project Beta"],
+    )
+    narration = _observed_narration(context, operation, "Project Beta")
+    assert "Project Alpha" in narration
+    assert "Project Beta" in narration
+    assert "realtime collaboration" in narration
+    assert "analytics dashboard" in narration
+
+
+def test_editorial_script_preserves_the_approved_opening_instead_of_rebuilding_it():
+    context = ProductContext(
+        url="https://example.test/", title="Example", application_type="dashboard",
+        visible_text="Example workspace", confidence=1,
+        page_knowledge=[PageKnowledge(
+            url="https://example.test/", title="Example", purpose="workspace",
+            visible_facts=["Workspace :: A shared place to review account activity."], fingerprint="opening",
+        )],
+    )
+    operation = SemanticOperation(
+        kind=OperationKind.SCROLL_TO, intent="Review activity",
+        target=Target(name="Activity", text="Account activity", source_url=context.url),
+    )
+    plan = __import__("productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]).DemoPlan(
+        objective="walkthrough", narrative_goal="explain", audience="prospect", target_duration_seconds=60,
+        selected_workflow="demo", workflow_steps=[__import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(id="one", intent=operation.intent, operation=operation)],
+        expected_outcomes=["activity"], viewport_strategy="native", stop_conditions=["done"],
+    )
+    board = build_editorial_storyboard(context, plan)
+    approved = "Here is the shared workspace and why it matters for reviewing activity."
+    board = board.model_copy(update={"scenes": [board.scenes[0].model_copy(update={"narration": approved}), board.scenes[1]]})
+    script = editorial_script(board, {operation.id: "event-1"})
+    assert script[0]["text"].startswith(approved)
 from productlens.presentation.editorial import (
     _readable_fact,
     build_editorial_storyboard,

@@ -46,6 +46,13 @@ class ExecutionEngine:
         self.capture_event_screenshots = capture_event_screenshots
         self.recovery_budget = RecoveryBudget()
 
+    def _active_page(self):
+        # Keep lightweight adapter fakes and third-party compatibility callers
+        # working while real Playwright adapters can refresh a replaced CDP
+        # target after remote navigation.
+        ensure = getattr(self.adapter, "ensure_page", None)
+        return ensure() if callable(ensure) else self.adapter.page
+
     async def _stabilize_light_theme(self) -> None:
         """Wait for hydration, then use the site's real theme control once."""
         page = self.adapter.page
@@ -75,7 +82,7 @@ class ExecutionEngine:
         rect = None
         action_at = None
         scroll_before: dict[str, float] | None = None
-        scroll_motion: dict[str, float] | None = None
+        scroll_motion: dict[str, object] | None = None
         # This is deliberately captured *before* the editorial reading hold.
         # ``occurred_at`` is the moment the verified state became visible; a
         # hold preserves that state for the viewer, it is not part of the
@@ -100,9 +107,13 @@ class ExecutionEngine:
                     action_result = await self.adapter.execute(operation)
                     if operation.kind is OperationKind.SCROLL_TO and isinstance(action_result, dict):
                         scroll_motion = {
-                            key: float(value)
+                            key: (
+                                [{"x": float(point.get("x", 0)), "y": float(point.get("y", 0))} for point in value]
+                                if key == "path" and isinstance(value, list)
+                                else float(value)
+                            )
                             for key, value in action_result.items()
-                            if key in {"start_y", "target_y", "duration_ms", "steps"}
+                            if key in {"start_y", "target_y", "duration_ms", "steps", "path"}
                         }
                     if self.force_light_theme and operation.kind is OperationKind.NAVIGATE:
                         await self._stabilize_light_theme()
@@ -118,7 +129,7 @@ class ExecutionEngine:
                         await self.verify(condition)
                     occurred_at = datetime.now(UTC)
                     if self.adapter.page is not None:
-                        await self.adapter.page.wait_for_timeout(
+                        await self._active_page().wait_for_timeout(
                             max(self.beat_hold_ms, self.scene_hold_ms.get(operation.id, 0))
                         )
                     success = True
@@ -173,7 +184,9 @@ class ExecutionEngine:
                 required_content_groups=list(operation.required_content_groups),
                 covered_content_groups=list(operation.covered_content_groups),
                 scroll_path=(
-                    [
+                    list(scroll_motion.get("path", []))
+                    if operation.kind is OperationKind.SCROLL_TO and scroll_motion and scroll_motion.get("path")
+                    else [
                         {"x": float((scroll_before or {}).get("x", 0)), "y": float((scroll_before or {}).get("y", 0))},
                         {"x": float(scroll.get("x", 0)), "y": float(scroll.get("y", 0))},
                     ]
@@ -185,7 +198,7 @@ class ExecutionEngine:
                 event.after["scroll_motion"] = scroll_motion
             if self.artifacts and self.capture_event_screenshots:
                 screenshot = self.artifacts.screenshot_path(len(self.trace.events) + 1)
-                await self.adapter.page.screenshot(path=str(screenshot), full_page=False)
+                await self._active_page().screenshot(path=str(screenshot), full_page=False)
                 event.screenshot_path = str(screenshot.relative_to(self.artifacts.root))
             self.trace.events.append(event)
             # Keep a compact page-state index on the trace in addition to the

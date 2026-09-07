@@ -2,6 +2,8 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
 from productlens.video.render import _editorial_cut_windows
 from productlens.video.source_timing import align_trace_to_recording
@@ -81,3 +83,29 @@ def test_editorial_cut_windows_expand_native_context_to_story_duration_floor():
     assert sum(end - start for start, end in windows) >= 89.9
     assert windows[0][0] >= 0
     assert windows[-1][1] <= 120
+
+
+def test_cloud_scroll_cut_uses_recorded_motion_not_remote_verification_latency():
+    started = datetime.now(UTC)
+    event = InteractionEvent(
+        operation_id="scroll",
+        kind=OperationKind.SCROLL_TO,
+        intent="Reveal the projects",
+        action_at=started + timedelta(seconds=10),
+        occurred_at=started + timedelta(seconds=30),
+        before={},
+        after={"scroll_motion": {"duration_ms": 2_000, "steps": 12}},
+        success=True,
+        duration_ms=20_000,
+    )
+    trace = DemoTrace(
+        run_id="cloud-scroll",
+        objective="Demo",
+        started_at=started,
+        recording_started_at=started,
+        events=[event],
+    )
+    windows = _editorial_cut_windows(trace, 40.0)
+    # The retained source contains the physical two-second scroll and settle,
+    # not the eighteen seconds spent waiting on remote postcondition queries.
+    assert windows == [(pytest.approx(4.55), pytest.approx(12.55))]

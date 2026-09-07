@@ -34,7 +34,11 @@ from productlens.discovery.live import LiveDiscovery
 from productlens.evaluation.completion_audit import audit_run
 from productlens.execution.engine import ExecutionEngine
 from productlens.execution.playwright_adapter import PlaywrightAdapter
-from productlens.narration.script import captions_from_duration, script_from_trace
+from productlens.narration.script import (
+    captions_from_duration,
+    recommended_caption_duration,
+    script_from_trace,
+)
 from productlens.narration.service import NarrationService, SpeechProvider
 from productlens.observability.logging import get_logger
 from productlens.orchestration.lifecycle import RunStage
@@ -517,12 +521,11 @@ class UrlGenerationService:
                         # only a short post-action settle hold so complete
                         # walkthroughs fit the 2–3 minute delivery envelope
                         # without compressing or freezing source footage.
-                        cloud_hold_ms = 700 if remote is not None else 3_000
-                        if remote is not None:
-                            scene_holds = {
-                                operation_id: min(hold, cloud_hold_ms)
-                                for operation_id, hold in scene_holds.items()
-                            }
+                        # Provider command latency is not a substitute for a
+                        # scene's viewer-facing reading dwell.  Keep the
+                        # storyboard holds unchanged in cloud capture and cut
+                        # only separately proven transport idle time later.
+                        cloud_hold_ms = 3_000
                         engine = ExecutionEngine(
                             PlaywrightAdapter(page, cloud_mode=remote is not None), trace, artifacts, beat_hold_ms=cloud_hold_ms, scene_hold_ms=scene_holds,
                             force_light_theme="light theme" in objective.lower() or "light themed" in objective.lower(),
@@ -748,7 +751,7 @@ class UrlGenerationService:
             raise GenerationPreconditionError(
                 f"EDITORIAL_QA_REJECTED: {editorial['hard_failures']}"
             )
-        captions = captions_from_duration(script, max(3.0, len(trace.events) * 1.35))
+        captions = captions_from_duration(script, recommended_caption_duration(script))
         narration = None
         if self.speech_provider:
             try:
@@ -827,14 +830,28 @@ class UrlGenerationService:
         captions_path = artifacts.presentation / "rendered-captions.json"
         captions = json.loads((captions_path if captions_path.exists() else artifacts.presentation / "captions.json").read_text(encoding="utf-8"))
         plan = DemoPlan.model_validate(json.loads((artifacts.root / "plan.json").read_text(encoding="utf-8")))
+        source_video = artifacts.browser_video_path()
+        source_edit_path = artifacts.presentation / "source-edit-plan.json"
+        if source_edit_path.exists():
+            try:
+                source_edit = json.loads(source_edit_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                source_edit = {}
+            rendered_source = source_edit.get("rendered_source") if isinstance(source_edit, dict) else None
+            if isinstance(rendered_source, str):
+                candidate_source = artifacts.root / rendered_source
+                if candidate_source.is_file():
+                    source_video = candidate_source
+        # Compatibility for artifacts created before content-addressed source
+        # edits. New runs always use the exact rendered_source above.
+        if source_video == artifacts.browser_video_path() and (artifacts.root / "render" / "editorial-source.mp4").is_file():
+            source_video = artifacts.root / "render" / "editorial-source.mp4"
         video = inspect_video(
             artifacts.root / "final" / "demo.mp4",
             execution_verified=trace.outcome_verified,
             minimum_duration_seconds=self._duration_floor(plan),
             maximum_duration_seconds=plan.maximum_duration_seconds,
-            source_video=(artifacts.root / "render" / "editorial-source.mp4")
-            if (artifacts.root / "render" / "editorial-source.mp4").is_file()
-            else artifacts.browser_video_path(),
+            source_video=source_video,
         )
         # A CDP screencast is useful diagnostic evidence, but it is not an
         # acceptable production source for a Browserbase run.  If native
@@ -912,6 +929,11 @@ class UrlGenerationService:
             )
         )
         artifacts.write_json("qa/multimodal-report.json", multimodal)
+        # Materialize the manifest before computing delivery requirements. The
+        # manifest is itself a required URL-delivery artifact; computing the
+        # report first made a valid run self-reject with
+        # ``artifact_manifest=false`` and only then create the file.
+        artifacts.write_manifest()
         report = delivery_report(
             artifacts=artifacts.required_url_delivery_artifacts(),
             execution={"execution_score": 1.0}, story=story, video=video,
@@ -919,6 +941,43 @@ class UrlGenerationService:
             viewport_score=viewport.score,
         )
         artifacts.write_json("qa/delivery-report.json", report)
+        # A delivery decision alone is too terse for an operator deciding
+        # whether to publish, repair, or wait for an optional provider. Keep
+        # an explicit, evidence-derived gap report beside every run. It never
+        # invents a limitation: blockers come from hard QA failures and
+        # caveats come only from reports that actually emitted a warning.
+        report_sources = {
+            "story": story,
+            "video": video,
+            "presentation": presentation,
+            "synchronization": synchronization,
+            "multimodal": multimodal,
+        }
+        artifacts.write_json(
+            "qa/gap-report.json",
+            {
+                "status": "ready_with_caveats" if report["deliverable"] else "repair_required",
+                "deliverable": bool(report["deliverable"]),
+                "blockers": list(dict.fromkeys(
+                    failure
+                    for source in report_sources.values()
+                    for failure in source.get("hard_failures", [])
+                )),
+                "caveats": list(dict.fromkeys(
+                    warning
+                    for source in report_sources.values()
+                    for warning in source.get("warnings", [])
+                )),
+                "optional_layers": {
+                    "tts": "not generated" if not (artifacts.root / "audio" / "narration.mp3").exists() else "generated",
+                    "multimodal_review": str(multimodal.get("status", "unavailable")),
+                },
+                "evidence_reports": {
+                    name: f"qa/{name}-report.json"
+                    for name in ("video", "presentation", "synchronization", "editorial", "delivery")
+                },
+            },
+        )
         # The delivery report is part of the manifest. Hash it before running
         # the completion audit so the audit verifies the same immutable set of
         # artifacts that the worker will hand off.
@@ -929,6 +988,14 @@ class UrlGenerationService:
         if not report["deliverable"]:
             artifacts.write_json("qa/repair-decision.json", classify_repair(report["hard_failures"]).model_dump(mode="json"))
             raise RuntimeError(f"Delivery QA rejected render: {report['hard_failures']}")
+        # A targeted QA repair may have inherited a failure decision from an
+        # earlier attempt.  Leaving that stale marker beside a successful
+        # delivery causes operators and API clients to report a false retry
+        # state, so remove it before publishing the final manifest.
+        stale_repair = artifacts.qa / "repair-decision.json"
+        if stale_repair.exists():
+            stale_repair.unlink()
+            artifacts.write_manifest()
         return report
 
     @staticmethod
@@ -1234,7 +1301,7 @@ class UrlGenerationService:
         )
         if render:
             narration = None
-            captions = captions_from_duration(script, max(3.0, len(result.events) * 1.35))
+            captions = captions_from_duration(script, recommended_caption_duration(script))
             if self.speech_provider:
                 try:
                     narration = await NarrationService().create(

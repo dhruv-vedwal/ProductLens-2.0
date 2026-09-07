@@ -13,7 +13,11 @@ from productlens.contracts.models import (
     PresentationPlan,
 )
 from productlens.narration.audio import audio_duration_seconds
-from productlens.narration.script import captions_from_duration, script_from_trace
+from productlens.narration.script import (
+    captions_from_duration,
+    recommended_caption_duration,
+    script_from_trace,
+)
 from productlens.narration.service import NarrationService, SpeechProvider
 from productlens.observability.logging import (
     bind_run_context,
@@ -128,7 +132,7 @@ class DemoJobService:
         elif stage == "NARRATION":
             trace = self._load_trace(artifacts)
             script = script_from_trace(trace)
-            captions = captions_from_duration(script, max(3.0, len(trace.events) * 1.35))
+            captions = captions_from_duration(script, recommended_caption_duration(script))
             narration = None
             if self.speech_provider:
                 try:

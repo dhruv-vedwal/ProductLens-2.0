@@ -32,3 +32,15 @@ def test_scene_plan_moves_caption_above_a_lower_active_target():
     )])
 
     assert build_scene_plan(trace)[0]["caption_safe_zone"] == "top"
+
+
+def test_scene_plan_requests_bounded_focus_for_a_compact_visible_scroll_target():
+    trace = DemoTrace(run_id="focus", objective="Demo", started_at=datetime.now(UTC), events=[InteractionEvent(
+        operation_id="feature", kind=OperationKind.SCROLL_TO, intent="Explain a compact feature card",
+        target_rect=Rect(x=320, y=260, width=360, height=48), viewport=Viewport(width=1440, height=900),
+        before={}, after={}, success=True, duration_ms=1,
+    )])
+
+    camera = build_scene_plan(trace)[0]["camera"]
+    assert camera["mode"] == "target-focus"
+    assert camera["zoom"] == 1.10

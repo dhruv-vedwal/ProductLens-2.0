@@ -122,6 +122,12 @@ def main() -> None:
         presentation = PresentationPlan.model_validate(
             json.loads((artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8"))
         )
+    storyboard_path = artifacts.presentation / "storyboard.json"
+    storyboard = (
+        EditorialStoryboard.model_validate(json.loads(storyboard_path.read_text(encoding="utf-8")))
+        if storyboard_path.exists()
+        else None
+    )
     # A narration-only repair writes a new authoritative caption timeline.
     # Read it after that repair rather than accidentally rendering stale copy.
     captions = json.loads((artifacts.presentation / "captions.json").read_text(encoding="utf-8"))
@@ -155,6 +161,7 @@ def main() -> None:
             captions=captions,
             target_duration_seconds=target_duration,
             maximum_duration_seconds=(int(maximum_duration) if maximum_duration is not None else None),
+            storyboard=storyboard,
         )
     if args.verify or args.verify_only:
         # QA reads only retained trace/presentation evidence and the local MP4.

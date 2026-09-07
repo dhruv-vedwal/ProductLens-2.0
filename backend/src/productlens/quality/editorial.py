@@ -74,6 +74,9 @@ def inspect_editorial(
         if not any(item.kind in exploration_kinds for item in chapter):
             failures.append("TRACE_NAVIGATED_PAGE_NOT_EXPLORED")
     script_by_event = {str(line.get("event_id")): str(line.get("text", "")) for line in script}
+    opening_event_ids = {
+        str(line.get("event_id")) for line in script if bool(line.get("opening", False))
+    }
     first_executed_operation = next(
         (scene.operation_id for scene in storyboard.scenes if scene.operation_id is not None), None
     )
@@ -98,15 +101,16 @@ def inspect_editorial(
             caption_words = set(re.findall(r"[a-z0-9]{4,}", text.lower()))
             generic_words = {"explored", "context", "gives", "viewer", "concrete", "evidence", "next", "part", "walkthrough"}
             title_only = bool(target_words) and not (caption_words - target_words - generic_words)
-            # The first proved page scene carries the bounded presenter
-            # welcome authored from the opening evidence.  It is intentionally
-            # connective rather than a route-label sentence, and must not be
-            # rejected by a helper designed for later factual scenes.
+            # The first proved page scene carries the approved presenter
+            # introduction authored from opening evidence.  Its wording is
+            # intentionally provider/style agnostic; requiring the old
+            # literal "Welcome to" prefix made model-authored introductions
+            # fail even when they were grounded and useful.
             presenter_opening = (
                 scene.operation_id == first_executed_operation
-                and text.lower().startswith("welcome to ")
                 and len(text.split()) >= 12
-                and bool(target_words & caption_words)
+                and event.id in opening_event_ids
+                and len(opening_words & caption_words) >= 2
             )
             boilerplate = (
                 "is explored in context",

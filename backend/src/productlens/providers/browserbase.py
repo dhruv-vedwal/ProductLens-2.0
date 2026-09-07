@@ -65,16 +65,21 @@ class BrowserbaseProvider:
     async def close_session(self, session_id: str) -> None:
         """Release a remote session after CDP disconnect, including failed discovery runs."""
         # DNS and transient transport loss must not turn an otherwise complete
-        # exploration into a failed run on the first close attempt. DELETE is
-        # idempotent, so a small bounded retry is safe and does not repeat any
+        # exploration into a failed run on the first close attempt. Browserbase
+        # releases sessions through the Sessions API update endpoint (rather
+        # than DELETE); the request is idempotent and does not repeat any
         # browser action or user-side effect.
         last_error: httpx.HTTPError | None = None
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
-                    response = await client.delete(
+                    response = await client.post(
                         f"https://api.browserbase.com/v1/sessions/{session_id}",
-                        headers={"x-bb-api-key": self.api_key},
+                        headers={"x-bb-api-key": self.api_key, "Content-Type": "application/json"},
+                        json={
+                            "status": "REQUEST_RELEASE",
+                            **({"projectId": self.project_id} if self.project_id else {}),
+                        },
                     )
                     # Session termination is idempotent: Stagehand or a timed-out
                     # browser process may already have released it before the

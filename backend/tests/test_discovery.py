@@ -43,7 +43,7 @@ def test_complete_every_primary_section_is_full_walkthrough_intent():
 def test_punctuated_complete_duration_request_is_a_full_walkthrough():
     objective = _objective_spec("Create a complete, evidence-backed 2 to 3 minute walkthrough")
     assert objective.demo_type == "full_walkthrough"
-    assert objective.maximum_duration_seconds >= 240
+    assert objective.maximum_duration_seconds == 240
 
 
 def test_objective_spec_does_not_privilege_a_known_application_label():

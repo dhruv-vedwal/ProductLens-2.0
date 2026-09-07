@@ -14,6 +14,7 @@ from productlens.artifacts.store import RunArtifacts
 from productlens.contracts.models import (
     DemoTrace,
     EditorialStoryboard,
+    InteractionEvent,
     OperationKind,
     PresentationPlan,
 )
@@ -61,6 +62,21 @@ def _completed_segment_after_timeout(command: list[str]) -> bool:
         duration = float(json.loads(probe.stdout).get("format", {}).get("duration", 0))
         return probe.returncode == 0 and duration >= max(0.5, expected_seconds - 0.35)
     except (IndexError, StopIteration, ValueError, json.JSONDecodeError, OSError):
+        return False
+
+
+def _segment_is_complete(path: Path, *, expected_frames: int, frame_rate: int) -> bool:
+    """Recognize a fully muxed segment after a post-encode bookkeeping crash."""
+    try:
+        if not path.is_file() or path.stat().st_size < 10_000:
+            return False
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
+            capture_output=True, text=True, check=False,
+        )
+        duration = float(json.loads(probe.stdout).get("format", {}).get("duration", 0))
+        return probe.returncode == 0 and duration >= max(0.5, expected_frames / frame_rate - 0.35)
+    except (OSError, ValueError, json.JSONDecodeError):
         return False
 
 
@@ -134,16 +150,23 @@ def _remotion_setup_timeout_ms() -> int:
     return min(300_000, max(30_000, requested))
 
 
+def _remotion_hardware_acceleration() -> str:
+    """Select hardware encoding opportunistically without requiring it."""
+    value = os.getenv("PRODUCTLENS_REMOTION_HARDWARE_ACCELERATION", "if-possible").strip().lower()
+    return value if value in {"disable", "if-possible", "required"} else "if-possible"
+
+
 def _render_chunk_frames() -> int:
     """Bound one resumable compositor segment for long product demos."""
     try:
-        requested = int(os.getenv("PRODUCTLENS_REMOTION_CHUNK_FRAMES", "1800"))
+        requested = int(os.getenv("PRODUCTLENS_REMOTION_CHUNK_FRAMES", "3600"))
     except ValueError:
-        requested = 900
-    # At 30fps the default is a 60-second segment. This keeps long demo
-    # renders resumable while avoiding a costly fresh Chromium setup for every
-    # 30 seconds of an otherwise healthy two-to-three-minute composition.
-    return min(1_800, max(150, requested))
+        requested = 3600
+    # At 30fps the default is a two-minute segment. This keeps long demo
+    # renders resumable while avoiding repeated Chromium setup for every short
+    # scene block in an otherwise healthy walkthrough. The environment can
+    # lower this for constrained workers without changing presentation data.
+    return min(7_200, max(150, requested))
 
 
 class NarrationTimingError(RuntimeError):
@@ -279,7 +302,27 @@ def _editorial_cut_windows(
         # the trace contained no additional evidence during those tails.
         # This is an evidence-backed cut, never a speed change: scroll frames
         # and the action/reveal edges remain at native cadence.
-        if event.kind is OperationKind.SCROLL_TO or reveal - action <= 3.8:
+        if event.kind is OperationKind.SCROLL_TO:
+            # ``occurred_at`` includes remote DOM verification round trips.
+            # For cloud scrolls the browser records the actual compositor
+            # duration in ``after.scroll_motion``; keep that physical motion
+            # plus a short settle, rather than carrying several seconds of
+            # invisible CDP latency into the final edit. Older traces without
+            # this evidence retain the conservative action→reveal window.
+            motion = event.after.get("scroll_motion") if isinstance(event.after, dict) else None
+            motion_ms = motion.get("duration_ms") if isinstance(motion, dict) else None
+            if isinstance(motion_ms, (int, float)) and motion_ms > 0:
+                motion_end = min(source_seconds, action + float(motion_ms) / 1000.0 + 0.55)
+                windows.append((
+                    max(0.0, action - (0.1 if compact_tour else 0.6)),
+                    max(action + 0.2, motion_end),
+                ))
+            else:
+                windows.append((
+                    max(0.0, action - (0.1 if compact_tour else 0.6)),
+                    min(source_seconds, reveal + (0.35 if compact_tour else 2.9)),
+                ))
+        elif reveal - action <= 3.8:
             windows.append((
                 max(0.0, action - (0.1 if compact_tour else 0.6)),
                 min(source_seconds, reveal + (0.35 if compact_tour else 2.9)),
@@ -374,7 +417,22 @@ def _remap_trace_for_cuts(trace: DemoTrace, windows: list[tuple[float, float]]) 
 
 def _build_editorial_source(raw: Path, *, render_dir: Path, windows: list[tuple[float, float]]) -> Path:
     """Concatenate deliberate cuts without altering the speed of retained footage."""
-    clips_dir = render_dir / "editorial-clips"
+    # A timing repair can change the retained source windows while keeping the
+    # same run id. Ordinal names such as ``000.mp4`` are therefore unsafe as a
+    # cache key: they can silently compose a new caption/trace plan over old
+    # footage. Bind every reusable clip set to both the exact raw recording
+    # fingerprint and the exact native-speed cut list.
+    raw_stat = raw.stat()
+    cut_key = hashlib.sha256(json.dumps(
+        {
+            "raw": str(raw.resolve()),
+            "size": raw_stat.st_size,
+            "mtime_ns": raw_stat.st_mtime_ns,
+            "windows": [[round(start, 3), round(end, 3)] for start, end in windows],
+        },
+        sort_keys=True,
+    ).encode("utf-8")).hexdigest()[:16]
+    clips_dir = render_dir / "editorial-clips" / cut_key
     clips_dir.mkdir(exist_ok=True)
     clips: list[Path] = []
     for index, (start, end) in enumerate(windows):
@@ -390,7 +448,7 @@ def _build_editorial_source(raw: Path, *, render_dir: Path, windows: list[tuple[
     listing.write_text("ffconcat version 1.0\n" + "".join(
         f"file '{clip.resolve().as_posix()}'\n" for clip in clips
     ), encoding="utf-8")
-    output = render_dir / "editorial-source.mp4"
+    output = render_dir / f"editorial-source-{cut_key}.mp4"
     subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(listing),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
@@ -479,17 +537,52 @@ def _evidence_timed_captions(
     # approved line a small sequential reading slot instead of emitting
     # overlapping captions at the same source timestamp. This is timeline
     # layout only; it never changes capture, scene order, or evidence IDs.
-    minimum_dwell = min(0.9, screen_seconds / max(1, len(captions)))
+    #
+    # ``occurred_at`` is intentionally recorded as the verified result, but
+    # cloud traces can contain an asynchronous DOM round trip after the
+    # visible scroll has already finished. Starting *every* caption there
+    # squeezed the available post-result window to a sub-second flash. For a
+    # scroll or form, the viewer can see the result during the verified action
+    # interval, so the caption begins after its physical reveal and remains
+    # until the next action. Navigation is different: its destination must
+    # still wait for the verified route/result state.
+    minimum_dwell = min(1.45, screen_seconds / max(1, len(captions)))
+    navigation_kinds = {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
+
+    def visible_start(index: int, event: InteractionEvent) -> float:
+        action = action_positions[index]
+        result = positions[index]
+        if event.kind in navigation_kinds:
+            return max(0.0, result - 0.1)
+        if event.kind is OperationKind.SCROLL_TO:
+            motion = event.after.get("scroll_motion") if isinstance(event.after, dict) else None
+            duration_ms = motion.get("duration_ms") if isinstance(motion, dict) else None
+            if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+                # Apply the same trace-to-screen scale as the event position.
+                return min(result, action + float(duration_ms) / 1000.0 * scale + 0.12)
+        # A typed/focused control is visible as soon as its action has begun;
+        # keep a short lead so the overlay never covers the gesture itself.
+        return min(result, action + 0.22)
+
     starts: list[float] = []
-    for index, (caption, position) in enumerate(zip(captions, positions, strict=True)):
+    for index, (caption, event) in enumerate(zip(captions, ordered, strict=True)):
+        assert event is not None
         # The first line is the presenter's welcome and establishes the very
         # first stable product frame.  It must begin with that frame, not only
         # after the initial establish/scroll event has completed; otherwise a
         # viewer sees an unexplained silent opening and then hears the welcome
         # after the story has already started.  Later lines still wait for the
         # verified visible result they describe.
-        is_presenter_opening = index == 0 and str(caption.get("text", "")).lstrip().lower().startswith("welcome to ")
-        desired_start = 0.0 if is_presenter_opening else max(0.0, position - 0.2)
+        # Captions are already ordered and validated against the storyboard;
+        # the first line is the opening beat regardless of the provider's
+        # wording.  Detecting a literal greeting here delayed model-authored
+        # introductions until after the first browser action, creating an
+        # unexplained silent opening.
+        is_presenter_opening = index == 0 and (
+            bool(caption.get("opening", False))
+            or str(caption.get("text", "")).lstrip().lower().startswith("welcome to ")
+        )
+        desired_start = 0.0 if is_presenter_opening else visible_start(index, event)
         latest_start = max(0.0, screen_seconds - minimum_dwell * (len(captions) - index))
         start = min(desired_start, latest_start)
         if starts:
@@ -508,7 +601,14 @@ def _evidence_timed_captions(
         # Beat ranges begin 0.65 seconds before the following event. End the
         # outgoing line inside that range so the incoming caption never
         # narrates a state that is already on screen.
-        end = max(start + minimum_dwell, min(next_start - 0.1, next_action - 0.2))
+        if index == 0 and bool(caption.get("opening", False)):
+            # A welcome should establish the product, not monopolise a long
+            # opening hold. Keep enough time for a calm read while allowing
+            # the first page-local explanation to start promptly.
+            reading_seconds = len(str(caption.get("text", "")).split()) / 2.8 + 0.7
+            end = min(next_action - 0.2, max(start + minimum_dwell, min(7.5, reading_seconds)))
+        else:
+            end = max(start + minimum_dwell, min(next_start - 0.1, next_action - 0.2))
         end = min(screen_seconds, end)
         if end <= start:
             start = max(0.0, min(start, screen_seconds - 0.1))
@@ -638,10 +738,27 @@ def render_remotion(
                 "native capture exceeds the approved final duration envelope even after native-speed editorial cuts"
             )
         render_source = _build_editorial_source(raw, render_dir=render_dir, windows=windows)
+        source_edit_path = artifacts.presentation / "source-edit-plan.json"
+        try:
+            source_edit_payload = json.loads(source_edit_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            source_edit_payload = {}
+        artifacts.write_json(
+            "presentation/source-edit-plan.json",
+            {
+                **source_edit_payload,
+                "rendered_source": str(render_source.relative_to(artifacts.root.resolve())),
+            },
+        )
         trace = _remap_trace_for_cuts(trace, windows)
         artifacts.write_json("presentation/render-trace.json", trace.model_dump(mode="json"))
         source_seconds = editorial_seconds
     source_asset = _prepare_remotion_source(render_source, public, current_run_id)
+    # The public asset name is stable per run, but its bytes can change after
+    # a timing/source-edit repair. Include that content identity in Remotion
+    # props so durable frame segments cannot be reused against a replaced
+    # source file with the same URL.
+    source_sha256 = hashlib.sha256(render_source.read_bytes()).hexdigest()
     source_stream = next(
         (stream for stream in source_probe.get("streams", []) if stream.get("width") and stream.get("height")),
         {},
@@ -739,9 +856,17 @@ def render_remotion(
         "title": storyboard.brief.title if storyboard else concise_demo_title(
             trace.objective, action_labels=[event.intent for event in trace.events if event.success]
         ),
-        "subtitle": "A verified product workflow, captured in real interaction time.",
+        # Keep the title card aligned with the approved editorial brief.  A
+        # generic subtitle made unrelated products look like the same demo and
+        # duplicated no evidence from the actual opening page.
+        "subtitle": (
+            " ".join(str(storyboard.brief.opening_message).split())[:180]
+            if storyboard is not None and storyboard.brief.opening_message.strip()
+            else "A verified workflow, captured in real interaction time."
+        ),
         "targetDurationSeconds": target_duration_seconds,
         "screenVideo": source_asset,
+        "screenVideoSha256": source_sha256,
         "sourceWidth": source_width,
         "sourceHeight": source_height,
         "screenFrames": screen_frames,
@@ -791,6 +916,8 @@ def render_remotion(
             str(_render_concurrency()),
             "--timeout",
             str(_remotion_setup_timeout_ms()),
+            "--hardware-acceleration",
+            _remotion_hardware_acceleration(),
             # PNG intermediate frames dominate long browser-demo renders on
             # Windows workers. High-quality JPEG intermediates are visually
             # transparent for an already raster browser source while avoiding
@@ -819,20 +946,15 @@ def render_remotion(
     # absolute just like the candidate path, otherwise a provider-free retry
     # with a relative artifact root writes files under the renderer project and
     # ProductLens subsequently reports a completed-but-missing segment.
-    segments_dir = (render_dir / "segments").resolve()
-    segments_dir.mkdir(exist_ok=True)
+    # Segment files are only reusable for the exact presentation props that
+    # produced them. A caption, camera, or source-edit repair must never
+    # silently concatenate an older completed frame range merely because its
+    # frame numbers happen to match the new render.
+    segments_dir = (render_dir / "segments" / props_sha256[:16]).resolve()
+    segments_dir.mkdir(parents=True, exist_ok=True)
     chunk_frames = _render_chunk_frames()
     segment_outputs: list[Path] = []
     manifest: list[dict[str, object]] = []
-    manifest_path = render_dir / "segment-manifest.json"
-    try:
-        previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        previous_manifest = {}
-    reusable_segments = (
-        previous_manifest.get("props_sha256") == props_sha256
-        and previous_manifest.get("frame_rate") == frame_rate
-    )
     for start in range(0, screen_frames, chunk_frames):
         end = min(screen_frames - 1, start + chunk_frames - 1)
         segment = segments_dir / f"{start:07d}-{end:07d}.mp4"
@@ -840,7 +962,10 @@ def render_remotion(
         # this also keeps the final promotion atomic. Long renders use durable
         # segment files and therefore resume independently.
         segment_output = candidate_output if screen_frames <= chunk_frames else segment
-        if not reusable_segments or not segment_output.exists() or segment_output.stat().st_size == 0:
+        segment_complete = _segment_is_complete(
+            segment_output, expected_frames=end - start + 1, frame_rate=frame_rate
+        )
+        if not segment_complete:
             command = [
                 str(segment_output) if value == str(candidate_output) else value
                 for value in command_prefix
@@ -854,10 +979,19 @@ def render_remotion(
         if not segment_output.exists() or segment_output.stat().st_size == 0:
             raise RuntimeError(f"Remotion completed without segment {start}-{end}")
         segment_outputs.append(segment_output)
-        manifest.append({"start_frame": start, "end_frame": end, "path": str(segment_output.relative_to(artifacts.root))})
+        manifest.append({
+            "start_frame": start,
+            "end_frame": end,
+            "path": str(segment_output.relative_to(artifacts.root.resolve())),
+        })
         artifacts.write_json(
             "render/segment-manifest.json",
-            {"frame_rate": frame_rate, "props_sha256": props_sha256, "segments": manifest},
+            {
+                "frame_rate": frame_rate,
+                "props_sha256": props_sha256,
+                "chunk_frames": chunk_frames,
+                "segments": manifest,
+            },
         )
     if len(segment_outputs) == 1 and segment_outputs[0] == candidate_output:
         candidate_output.replace(output)

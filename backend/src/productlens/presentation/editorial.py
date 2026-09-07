@@ -198,6 +198,35 @@ def _viewer_fact(value: str) -> str:
     return visible
 
 
+def _subject_fact(subject: str, value: str) -> str:
+    """Turn one observed card fact into a natural, subject-led sentence."""
+    fact = _viewer_fact(value).strip()
+    if not fact:
+        return ""
+    if re.match(r"^The role focuses on\b", fact, flags=re.IGNORECASE):
+        return _human_sentence(f"{subject} is where {fact[0].lower() + fact[1:]}")
+    bare = _without_repeated_subject(fact, subject).strip()
+    bare = _human_sentence(bare)
+    lowered = bare[:1].lower() + bare[1:] if bare else ""
+    if re.match(r"^(?:an?|the)\s+", bare, flags=re.IGNORECASE):
+        return _human_sentence(f"{subject} is {lowered}")
+    if re.match(r"^(?:building|designing|integrating|translating|optimizing)\b", bare, flags=re.IGNORECASE):
+        return _human_sentence(f"{subject} focuses on {lowered}")
+    if re.match(r"^(?:built|designed|developed|engineered|architecting)\b", bare, flags=re.IGNORECASE):
+        return fact
+    return bare or fact
+
+
+def _needs_heading_rewrite(text: str, subject: str) -> bool:
+    """True only for a copied heading, not a grammatical subject sentence."""
+    normalized = " ".join(text.split()).casefold()
+    heading = " ".join(subject.split()).casefold()
+    if not heading or not normalized.startswith(heading):
+        return False
+    remainder = normalized[len(heading):].lstrip(" :—-.")
+    return not re.match(r"^(?:is|was|has|shows|focuses|highlights|provides|documents)\b", remainder)
+
+
 def _grounded_scene_fallback(target: str, evidence: str) -> str:
     """Create a readable sentence from the current scene's evidence only.
 
@@ -312,7 +341,20 @@ def _viewer_ready(text: str, title: str = "") -> bool:
         return False
     title_words = re.findall(r"[a-z0-9]{3,}", title.lower())
     words = re.findall(r"[a-z0-9]{3,}", normalized.lower())
-    return not (len(title_words) >= 2 and words[: len(title_words)] == title_words)
+    if len(title_words) >= 2 and words[: len(title_words)] == title_words:
+        # Naming a project, company, or feature is useful when it is followed
+        # by a real explanation. Reject only a title dump, not the natural
+        # grammatical form "Feature X is ..." which prevents a presenter
+        # from ever identifying the work being discussed.
+        title_prefix = " ".join(title.split()).lower()
+        remainder = normalized.lower()[len(title_prefix):].lstrip(" :—-.")
+        remainder_words = re.findall(r"[a-z0-9]{3,}", remainder)
+        return (
+            len(remainder_words) >= 5
+            and bool(re.match(r"^(?:is|are|was|were|focuses|provides|documents|combines|uses|connects)\b", remainder.strip()))
+            and "visual exploration" not in normalized.lower()
+        )
+    return True
 
 
 def _readable_fact(value: str) -> str:
@@ -330,7 +372,9 @@ def _readable_fact(value: str) -> str:
         r"Proxies\s+|Webhooks\s+|Fill\s+out\s+|Here\s+is\s+how|Learn\s+how|How\s+to\s+|"
         r"Explore\s+(?:a|an)\s+|Open\s+(?:a|an|the)\s+|Tap\s+(?:the|a|an)\s+|"
         r"Saved\s+|Auto[- ]calculated\s+|Tracks\s+|Shows\s+|Provides\s+|"
-        r"Instead\s+of\s+|Architecting\s+)",
+        r"Instead\s+of\s+|Architecting\s+|Building\s+|Designing\s+|"
+        r"Integrating\s+|Translating\s+|Optimized\s+|Direct\s+|"
+        r"Engineered\s+|Developed\s+|Improved\s+)",
         value,
     )
     if explanatory_start:
@@ -365,7 +409,8 @@ def _readable_fact(value: str) -> str:
         return _human_sentence(descriptive)
     embedded = re.search(
         r"(?:^|[.!?]\s+)((?:An|A|This|Built|Designed|Engineered|I\s+(?:engineer|build|design|focus)|"
-        r"Architecting|Developed|Improved|Integrating)\s+[A-Z]?[\s\S]{25,}?[.!?])",
+        r"Architecting|Developed|Improved|Integrating|Building|Designing|"
+        r"Translating|Optimized|Direct)\s+[A-Z]?[\s\S]{25,}?[.!?])",
         value,
         re.IGNORECASE,
     )
@@ -382,14 +427,38 @@ def _readable_fact(value: str) -> str:
     return ""
 
 
+def _concise_scene_subject(value: str) -> str:
+    """Reduce a verbose accessible card label to its human-readable heading.
+
+    A semantic target may legitimately contain a card's category, date, read
+    time, description, and call to action. That is useful execution evidence,
+    but using all of it as a narration subject creates an unreadable caption.
+    Prefer the richest non-metadata line without inventing a replacement.
+    """
+    normalized = " ".join(value.split())
+    if len(normalized) <= 96 and "\n" not in value:
+        return normalized
+    candidates = [" ".join(line.split()) for line in value.splitlines()]
+    candidates = [
+        line for line in candidates
+        if 3 <= len(line.split()) <= 12
+        and not re.fullmatch(r"[\d\s./-]+", line)
+        and not re.search(r"\b(?:min|read)\b", line, flags=re.IGNORECASE)
+        and not re.match(r"^(?:read|open|view)\b", line, flags=re.IGNORECASE)
+    ]
+    return max(candidates, key=len, default=normalized[:96])
+
+
 def _observed_narration(context: ProductContext, operation, target: str) -> str:
     """Deterministic safe narration for when editorial generation is unavailable.
 
     It deliberately uses a visible fact, then says why this chapter matters. This
     means a provider outage cannot regress delivery to a route-label slideshow.
     """
+    raw_target = target
+    target = _concise_scene_subject(target)
     page = _page_for_operation(context, operation)
-    source = _element_text(context, target)
+    source = _element_text(context, raw_target)
     facts = list(getattr(page, "visible_facts", []) or [])
     sections = list(getattr(page, "visible_sections", []) or [])
     target_words = re.findall(r"[a-z0-9]{4,}", target.lower())
@@ -404,6 +473,60 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
         return _human_sentence(
             f"The form records {subject or target}, providing the information required for the next verified step"
         )
+    # A grouped section is a single continuous browser movement, but its
+    # narration must still explain the meaningful cards/roles that the viewer
+    # passes on the way to the final target. Build a compact, page-local digest
+    # from the exact observed heading/fact pairs instead of repeating a title
+    # or borrowing the page's first paragraph.
+    covered_groups = [
+        " ".join(str(item).split())
+        for item in (getattr(operation, "covered_content_groups", None) or [])
+        if str(item).strip()
+    ]
+    if operation.kind is OperationKind.SCROLL_TO and len(covered_groups) > 1 and page is not None:
+        summaries: list[tuple[str, str]] = []
+        for group_name in covered_groups:
+            matching = next(
+                (
+                    raw for raw in facts
+                    if raw.split("::", 1)[0].strip().casefold() == group_name.casefold()
+                    or raw.casefold().startswith(f"{group_name.casefold()} ::")
+                ),
+                None,
+            )
+            prose = _readable_fact(matching) if matching else ""
+            if not prose:
+                element = next(
+                    (
+                        item for item in context.elements
+                        if (item.source_url or context.url).rstrip("/") == page.url.rstrip("/")
+                        and item.name.strip().casefold() == group_name.casefold()
+                    ),
+                    None,
+                )
+                prose = _readable_fact(element.text or "") if element else ""
+            if prose:
+                summaries.append((group_name, prose))
+        if summaries:
+            # Section headers often describe the collection while the first
+            # card supplies the useful viewer-facing fact. Prefer that card
+            # over reading a parent label or concatenating a DOM inventory.
+            # The planner gives later cards their own beat when they carry an
+            # independent explanation, so this remains complete without
+            # forcing a caption to race through a list of titles.
+            specific = [
+                (name, fact) for name, fact in summaries
+                if not re.match(r"^(?:explore|a selection|featured|this section)\b", fact, flags=re.IGNORECASE)
+            ]
+            selected = specific or summaries
+            if len(selected) == 2:
+                combined = " ".join(_subject_fact(name, fact) for name, fact in selected)
+                if _viewer_ready(combined):
+                    return combined
+            name, fact = selected[0]
+            narrated = _subject_fact(name, fact)
+            if narrated:
+                return narrated
     if operation.kind is OperationKind.SELECT_OPTION:
         options = getattr(getattr(operation, "target", None), "text", "") or target
         readable_options = ", ".join(re.findall(r"[A-Z][A-Za-z]+", options)[:3])
@@ -457,7 +580,7 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
                 f"The {week_match.group(1).title()} card shows the daily plan checkpoint{progress}, "
                 "so the viewer can choose a focused week before reviewing its details."
             )
-    _, scene_prose = _scene_fact(context, operation, target)
+    _, scene_prose = _scene_fact(context, operation, raw_target)
     category_summary = _summary_from_categories(target_fact or "", target)
     repeated_summary = _summary_from_repeated_items(target_fact or "", target)
     schedule_summary = _summary_from_schedule(target_fact or "", target)
@@ -484,6 +607,14 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
     # The operation target is the visible scene subject. Using a page heading
     # here can incorrectly replace a card or section's actual subject.
     section_hint = target or (sections[0] if sections else "this section")
+    if visible and "visual exploration" in visible.casefold():
+        # This phrase is a common accessibility-summary fallback, not a
+        # viewer-facing explanation. Retain only the observed architectural
+        # nouns and turn them into the purpose of the current evidence.
+        observed_words = set(re.findall(r"[a-z]{4,}", visible.casefold()))
+        if {"interactive", "diagrams", "specifications"} & observed_words:
+            return "Interactive diagrams and specifications make the system structure and implementation choices easier to inspect."
+        return "The visible components connect the product's system structure to the implementation choices behind it."
     if not visible and category_summary:
         return category_summary
     if not visible and repeated_summary:
@@ -517,7 +648,7 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
                     return _human_sentence(
                         f"This view explains {target}, including {remainder}"
                     )
-            return _viewer_fact(visible)
+            return _subject_fact(section_hint, visible)
         return _human_sentence(
             f"The visible {section_hint} section opens {page_purpose} for the next part of the walkthrough."
         )
@@ -581,6 +712,18 @@ def _editorial_evidence(context: ProductContext) -> str:
     )
 
 
+def _fallback_presenter_intro(product: str, opening: str) -> str:
+    """Create a grounded fallback intro when no editorial model is configured.
+
+    The inputs are observed identity and opening evidence; no product, route,
+    person, or workflow is embedded in this function.  Model-approved prose is
+    preferred and replaces this fallback before rendering whenever available.
+    """
+    product = _clean(product) or "this product"
+    opening = (_clean(opening) or "the opening experience").rstrip(".")
+    return f"Welcome to {product}. This walkthrough begins with the product's own opening experience: {opening}."
+
+
 def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> EditorialStoryboard:
     """Build a deterministic story from observed text and the validated plan.
 
@@ -619,7 +762,7 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
             # name comes from the observed browser title and the following
             # sentence is the evidence-grounded opening message; this avoids
             # dropping viewers into a page with a bare DOM description.
-            narration=f"Welcome to {purpose}. Today I’ll show how it works. {opening}",
+            narration=_fallback_presenter_intro(purpose, opening),
             evidence=[f"page:{context.url}"],
             interaction="opening",
             required_dwell_seconds=5.0,
@@ -654,7 +797,7 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
         # captions. Lead with a viewer-oriented explanation whenever the
         # observed prose starts with the exact scene title.
         narration_normalized = " ".join(narration.split())
-        if target_words and narration_normalized.lower().startswith(normalized_target):
+        if target_words and _needs_heading_rewrite(narration_normalized, target):
             remainder = narration_normalized[len(normalized_target):].lstrip(" :—-.")
             if remainder:
                 narration = _human_sentence(
@@ -662,7 +805,15 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
                 )
         page = _page_for_operation(context, operation)
         fact_id, cited_prose = _scene_fact(context, operation, target)
-        scene_evidence = [f"operation:{operation.id}", f"element:{target}"]
+        # The planner has already selected the exact facts and intermediate
+        # headings this continuous scroll covers.  Preserve that provenance in
+        # the editorial contract; retaining only the final target caused a
+        # grouped project/career scene to narrate one arbitrary card.
+        scene_evidence = [
+            f"operation:{operation.id}",
+            *operation.evidence_refs,
+            f"element:{target}",
+        ]
         if page is not None:
             scene_evidence.append(f"page:{page.url}")
         if fact_id:
@@ -670,7 +821,7 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
         provisional = EditorialScene(
             id=f"scene-{index}", operation_id=operation.id, title=_clean(target, 120),
             purpose=_clean(operation.intent), narration=narration,
-            evidence=scene_evidence, interaction=interaction,
+            evidence=list(dict.fromkeys(scene_evidence)), interaction=interaction,
             required_dwell_seconds=dwell,
             completion_criteria=["target state is visible", "caption evidence is readable"],
         )
@@ -685,7 +836,7 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
             if len(narration.split()) < 10:
                 narration = _grounded_scene_fallback(target, _scene_source(context, provisional))
             normalized_fallback = " ".join(narration.split())
-            if target_words and normalized_fallback.lower().startswith(normalized_target):
+            if target_words and _needs_heading_rewrite(normalized_fallback, target):
                 remainder = normalized_fallback[len(normalized_target):].lstrip(" :—-.")
                 if remainder:
                     narration = _human_sentence(
@@ -695,7 +846,7 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
         # Apply the same guard after evidence recovery, which may replace the
         # initial narration with a cited heading-plus-description fragment.
         normalized_final = " ".join(provisional.narration.split())
-        if target_words and normalized_final.lower().startswith(normalized_target):
+        if target_words and _needs_heading_rewrite(normalized_final, target):
             remainder = normalized_final[len(normalized_target):].lstrip(" :—-.")
             if remainder:
                 provisional = provisional.model_copy(update={
@@ -772,6 +923,8 @@ async def enrich_editorial_brief(context: ProductContext, storyboard: EditorialS
     source = _editorial_evidence(context)
     prompt = (
         "Extract a concise product-demo editorial brief from this observed website evidence. "
+        "Write opening_message as a natural presenter introduction: greet the viewer, identify the observed product or experience, "
+        "and preview the value of the walkthrough in one or two sentences. Do not merely copy a heading or screen transcript. "
         "Return only the supplied schema. Every fact must cite an evidence string using page:<url>, element:<name>, or source:<url>. "
         "Do not add facts that cannot be supported by at least two meaningful words from the evidence. "
         f"Evidence:\n{source[:12000]}"
@@ -798,7 +951,10 @@ async def enrich_editorial_brief(context: ProductContext, storyboard: EditorialS
         or not _supported(candidate.product_purpose, source)
     ):
         return storyboard
-    return storyboard.model_copy(update={"brief": candidate})
+    scenes = list(storyboard.scenes)
+    if scenes and scenes[0].operation_id is None:
+        scenes[0] = scenes[0].model_copy(update={"narration": candidate.opening_message})
+    return storyboard.model_copy(update={"brief": candidate, "scenes": scenes})
 
 
 async def enrich_editorial_storyboard(context: ProductContext, storyboard: EditorialStoryboard, provider: object) -> EditorialStoryboard:
@@ -817,9 +973,11 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
     prompt = (
         "Write a polished product-demo narration for the supplied immutable scenes. Return only {lines:[{id,narration}]}. "
         "Return exactly one line for every non-opening scene id; do not return a brief, timing, evidence, operation, title, or any other field. "
-        "Use only visible evidence. Every line must be one or two complete sentences (at least 10 words): explain what is visible, why it matters, and what the viewer learns next. Never output a route label, project name, click instruction, or generic phrase by itself. "
-        "Good: 'This project is described as a real-time collaboration tool, showing how the product supports end-to-end teamwork.' "
-        "Bad: 'Project name.' Bad: 'The Projects section is now visible.' Bad: 'Open Timeline.' "
+        "Use only visible evidence. Write exactly one complete, conversational sentence of 10 to 22 words for every line: briefly synthesize what is visible, why it matters, and the viewer takeaway. "
+        "Do not recite screen copy, start with 'The ... section', or use filler such as 'highlights', 'showcases', 'details', or 'is now visible'. "
+        "Never output a route label, project name, click instruction, or generic phrase by itself. "
+        "Good: 'This communication platform pairs real-time presence with low-latency messaging, demonstrating the kind of end-to-end product delivery on display.' "
+        "Bad: 'Project name.' Bad: 'The Projects section is now visible.' Bad: 'Open Timeline.' Bad: 'The Timeline section highlights experience.' "
         "Every narration must share at least two meaningful words with ITS OWN scene evidence, never another page's evidence. "
         "Do not describe a fact from a different scene even if it appears elsewhere in the product. "
         f"Scenes: {json.dumps({key: value for key, value in scene_evidence.items() if key != 'opening'}, ensure_ascii=False)}\nEvidence: {source[:12000]}"
@@ -855,15 +1013,20 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
     # scene ids. Validate each proposed line against its *own* immutable scene
     # id, rather than zipping array positions; position-based validation can
     # approve a grounded line and then attach it to another scene by id.
-    if (
-        set(original_by_id) != set(proposed_by_id)
-        or any(
-            not _supported(proposed_by_id[scene_id], _scene_source(context, original_scene))
-            or not _viewer_ready(proposed_by_id[scene_id], original_scene.title)
-            or repeats_opening(original_scene)
-            for scene_id, original_scene in original_by_id.items()
-        )
-    ):
+    if set(original_by_id) != set(proposed_by_id):
+        return storyboard
+    # Scene provenance is independent.  A valid model sentence should improve
+    # its own scene even when another line is too long or insufficiently
+    # grounded; rejecting the entire editorial pass in that case previously
+    # restored a crawler-like deterministic script for every page.
+    accepted_ids = {
+        scene_id
+        for scene_id, original_scene in original_by_id.items()
+        if _supported(proposed_by_id[scene_id], _scene_source(context, original_scene))
+        and _viewer_ready(proposed_by_id[scene_id], original_scene.title)
+        and not repeats_opening(original_scene)
+    }
+    if not accepted_ids:
         return storyboard
     # The model is an editorial writer, not a workflow editor. Keep the
     # validated evidence, scene timing, action semantics, and completion
@@ -871,7 +1034,7 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
     narration_by_id = proposed_by_id
     scenes = [
         scene.model_copy(update={"narration": narration_by_id[scene.id]})
-        if scene.operation_id is not None
+        if scene.id in accepted_ids
         else scene
         for scene in storyboard.scenes
     ]
@@ -929,16 +1092,23 @@ def editorial_script(storyboard: EditorialStoryboard, event_by_operation: dict[s
                 # *and* tells the viewer why the visible opening state matters.
                 # Otherwise evidence QA correctly sees a welcome attached to
                 # (for example) a Users navigation event with no Users facts.
-                intro = (
-                    f"Welcome to {storyboard.brief.product_purpose}. "
-                    f"We begin with {scene.title}, the first visible area in this story."
-                )
-                # The opening scene and first proved scene frequently share
-                # the same hero evidence. Keep the welcome, but do not make a
-                # silent video repeat its first sentence word-for-word.
-                text = intro if scene.narration.casefold() in intro.casefold() else f"{intro} {scene.narration}"
+                # The opening scene is the single source of truth for the
+                # presenter introduction. Do not reconstruct a fixed greeting
+                # here: doing so discards model-approved, evidence-grounded
+                # prose and makes every product sound identical.
+                intro = opening.narration.strip()
+                # Let the welcome stand on the fully established opening
+                # frame.  Appending the first target here made introductions
+                # sound like route instructions ("the next view is ...") and
+                # encouraged the viewer to leave Home before it was properly
+                # explained.  The next scene retains its own evidence-bound
+                # thought and begins only after the opening dwell.
+                text = intro
                 facts = [*opening.evidence, *facts]
                 scene_id = opening.id
                 first_bound = False
-            lines.append({"event_id": event_id, "text": text, "facts": facts, "scene_id": scene_id})
+            lines.append({
+                "event_id": event_id, "text": text, "facts": facts,
+                "scene_id": scene_id, "opening": first_bound is False and scene_id == opening.id,
+            })
     return lines

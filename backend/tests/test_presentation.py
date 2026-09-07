@@ -43,7 +43,21 @@ def test_form_interaction_gets_bounded_focus_zoom_when_enabled():
     )
     decision = build_presentation_plan(trace, allow_camera_zoom=True).camera[0]
     assert decision.zoom == 1.12
-    assert "form control" in decision.reason
+
+
+def test_scene_requested_zoom_is_honoured_but_capped_to_safe_envelope():
+    trace = DemoTrace(
+        run_id="scene-zoom", objective="Focus control", started_at=datetime.now(UTC),
+        events=[InteractionEvent(
+            operation_id="click", kind=OperationKind.CLICK, intent="Open details",
+            target=Target(name="Details"), target_rect=Rect(x=500, y=300, width=120, height=40),
+            before={}, after={}, success=True, duration_ms=10,
+        )],
+    )
+    scene = [{"event_id": trace.events[0].id, "camera": {"mode": "target-focus", "zoom": 1.35}}]
+    decision = build_presentation_plan(trace, allow_camera_zoom=True, scene_plan=scene).camera[0]
+    assert decision.zoom == 1.2
+    assert "safe full-frame" in decision.reason
 
 
 def test_cursor_direction_has_a_natural_bounded_waypoint_but_keeps_exact_target():

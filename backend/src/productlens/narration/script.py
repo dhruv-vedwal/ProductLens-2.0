@@ -78,6 +78,7 @@ def captions_from_duration(
             "end": round((index + 1) * step, 3),
             "text": item["text"],
             "scene_id": item["event_id"],
+            **({"opening": True} if item.get("opening", False) else {}),
         }
         for index, item in enumerate(script)
     ]
@@ -88,6 +89,25 @@ def captions_from_audio_duration(
 ) -> list[dict[str, object]]:
     """Compatibility alias for callers with a synthesized narration track."""
     return captions_from_duration(script, duration_seconds)
+
+
+def recommended_caption_duration(script: list[dict[str, object]], *, minimum_scene_seconds: float = 2.4) -> float:
+    """Return a readable fallback track length for caption-only delivery.
+
+    Caption timing is normally replaced by verified browser-event timestamps
+    during rendering, but local/synthetic traces do not always have a usable
+    recorder clock.  A fixed per-event duration made multi-sentence editorial
+    copy flash by too quickly.  Allocate from word count at a conservative
+    speaking/reading rate, with a minimum dwell for every scene and a small
+    transition allowance.  Measured audio remains the source of truth.
+    """
+    if not script:
+        return 0.0
+    words = sum(len(str(item.get("text", "")).split()) for item in script)
+    reading_seconds = words / 2.6
+    scene_floor = len(script) * max(1.0, float(minimum_scene_seconds))
+    transition_seconds = max(0.0, (len(script) - 1) * 0.35)
+    return round(max(3.0, reading_seconds, scene_floor + transition_seconds), 2)
 
 
 def captions_from_measured_segments(
@@ -119,6 +139,7 @@ def captions_from_measured_segments(
                 "end": round(end, 3),
                 "text": line["text"],
                 "scene_id": line["event_id"],
+                **({"opening": True} if line.get("opening", False) else {}),
             }
         )
         cursor = end
