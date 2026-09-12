@@ -7,10 +7,21 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
+
+
+def _canonical_product_key(value: str) -> str:
+    """Normalize equivalent product URLs before indexing reusable knowledge."""
+    parsed = urlsplit(str(value).strip())
+    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)), doseq=True)
+    return urlunsplit((
+        parsed.scheme.casefold(), parsed.netloc.casefold(),
+        unquote(parsed.path).rstrip("/") or "/", query, "",
+    ))
 
 
 class _DatabaseRow(Mapping[str, Any]):
@@ -218,7 +229,8 @@ class RunRepository:
             );
             CREATE TABLE IF NOT EXISTS provider_calls (
               id TEXT PRIMARY KEY, run_id TEXT REFERENCES demo_runs(id), provider TEXT NOT NULL,
-              operation TEXT NOT NULL, status TEXT NOT NULL, duration_ms INTEGER, error_code TEXT, created_at TEXT NOT NULL
+              operation TEXT NOT NULL, status TEXT NOT NULL, duration_ms INTEGER, error_code TEXT,
+              model TEXT, cost_class TEXT, created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_demo_runs_created_at ON demo_runs(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_demo_runs_request_id ON demo_runs(request_id);
@@ -264,6 +276,11 @@ class RunRepository:
             self.connection.execute("ALTER TABLE users ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
         if "updated_at" not in user_columns:
             self.connection.execute("ALTER TABLE users ADD COLUMN updated_at TEXT")
+        provider_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(provider_calls)")}
+        if provider_columns and "model" not in provider_columns:
+            self.connection.execute("ALTER TABLE provider_calls ADD COLUMN model TEXT")
+        if provider_columns and "cost_class" not in provider_columns:
+            self.connection.execute("ALTER TABLE provider_calls ADD COLUMN cost_class TEXT")
 
     def close(self) -> None:
         """Release SQLite handles for short-lived workers and test processes."""
@@ -418,13 +435,30 @@ class RunRepository:
         """
         paths: dict[str, str] = {
             "objective": "objective.json",
+            "objective_understanding": "discovery/objective-understanding.json",
             "exploration_report": "exploration-report.json",
+            "product_knowledge": "discovery/product-knowledge.json",
             "feature_graph": "feature-graph.json",
+            "relevance_graph": "discovery/relevance-graph.json",
             "candidate_flows": "candidate-flows.json",
+            "stagehand_observation": "discovery/stagehand-observation.json",
+            "viewport_decision": "discovery/viewport-decision.json",
+            "demo_brief": "planning/demo-brief.json",
+            "validated_state_graph": "planning/validated-state-graph.json",
             "demo_plan": "plan.json",
+            "editorial_brief": "presentation/editorial-brief.json",
+            "storyboard": "presentation/storyboard.json",
             "validated_scene_plan": "presentation/validated-scene-plan.json",
+            "actual_flow_storyboard": "presentation/actual-flow-storyboard.json",
+            "editorial_script": "presentation/narration-script.json",
             "demo_trace": "execution/trace.json",
+            "source_timing_alignment": "execution/source-timing-alignment.json",
+            "source_edit_plan": "presentation/source-edit-plan.json",
             "repair_decision": "qa/repair-decision.json",
+            "delivery_report": "qa/delivery-report.json",
+            "editorial_report": "qa/editorial-report.json",
+            "journey_report": "quality/journey-report.json",
+            "gap_report": "qa/gap-report.json",
             "artifact_manifest": "artifact-manifest.json",
         }
         persisted: list[str] = []
@@ -494,13 +528,17 @@ class RunRepository:
         status: str,
         duration_ms: int | None = None,
         error_code: str | None = None,
+        model: str | None = None,
+        cost_class: str | None = None,
     ) -> None:
         """Store non-secret provider telemetry for diagnostics and cost review."""
         self.connection.execute(
-            "INSERT INTO provider_calls VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO provider_calls "
+            "(id, run_id, provider, operation, status, duration_ms, error_code, model, cost_class, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(uuid4()), run_id, provider, operation, status, duration_ms, error_code,
-                datetime.now(UTC).isoformat(),
+                model, cost_class, datetime.now(UTC).isoformat(),
             ),
         )
         self.connection.commit()
@@ -858,6 +896,7 @@ class RunRepository:
             "artifacts", "demo_attempts", "demo_plans", "workflow_steps", "browser_sessions",
             "interaction_events", "presentation_plans", "narration_scripts", "quality_reports",
             "form_schemas", "synthetic_datasets", "audio_assets", "video_renders", "provider_calls",
+            "run_artifact_documents",
         )
         if any(
             self.connection.execute(f"SELECT 1 FROM {table} WHERE run_id=? LIMIT 1", (run_id,)).fetchone()
@@ -867,6 +906,18 @@ class RunRepository:
         # Lineage is an audit record. Do not remove a run that has children.
         if self.connection.execute("SELECT 1 FROM run_lineage WHERE parent_run_id=? LIMIT 1", (run_id,)).fetchone():
             raise ValueError("run has retry descendants and cannot be removed")
+        # Database rows are not the complete retention boundary: a worker can
+        # crash before registering files in the ledger. Refuse to remove the
+        # run row while its exact artifact directory still contains anything,
+        # including an unregistered crash artifact. This keeps cleanup from
+        # creating orphaned evidence and makes the operation reversible by
+        # the caller until the directory is explicitly archived/removed.
+        artifact_root = Path(str(run.get("artifact_root") or "")).resolve()
+        run_directory = (artifact_root / "runs" / run_id).resolve()
+        if run_directory.parent != (artifact_root / "runs").resolve():
+            raise ValueError("run artifact directory is outside configured artifact root")
+        if run_directory.exists() and any(path.is_file() for path in run_directory.rglob("*")):
+            raise ValueError("run artifact directory contains unregistered evidence")
         self.connection.execute("DELETE FROM run_lineage WHERE retry_run_id=?", (run_id,))
         self.connection.execute("DELETE FROM generation_stage_jobs WHERE run_id=?", (run_id,))
         self.connection.execute("DELETE FROM generation_jobs WHERE run_id=?", (run_id,))
@@ -893,12 +944,24 @@ class RunRepository:
     def prepare_targeted_retry(self, run_id: str, start_stage: str) -> None:
         """Mark inherited stages complete and queue only the safe repair boundary."""
         stage = self.stage_job(run_id, start_stage)
+        now = datetime.now(UTC).isoformat()
         self.connection.execute(
             """UPDATE generation_stage_jobs
             SET status=CASE WHEN ordinal < ? THEN 'COMPLETE' ELSE 'QUEUED' END,
                 error_code=NULL, claimed_at=NULL, completed_at=CASE WHEN ordinal < ? THEN completed_at ELSE NULL END,
                 updated_at=? WHERE run_id=?""",
-            (stage["ordinal"], stage["ordinal"], datetime.now(UTC).isoformat(), run_id),
+            (stage["ordinal"], stage["ordinal"], now, run_id),
+        )
+        # A targeted retry may start from a previously terminal run.  Restore
+        # the run lease before stage claiming; otherwise the compare-and-set
+        # correctly refuses the queued stage because the parent still says
+        # COMPLETE/FAILED, and a supervisor can silently report success with
+        # no QA artifact produced.
+        self.connection.execute(
+            """UPDATE demo_runs
+            SET stage='QUEUED', status='QUEUED', error_code=NULL, updated_at=?
+            WHERE id=? AND status NOT IN ('CANCELLED')""",
+            (now, run_id),
         )
         self.connection.commit()
 
@@ -1219,6 +1282,12 @@ class RunRepository:
             "presentation_plans": payloads("presentation_plans"),
             "narration_scripts": payloads("narration_scripts"),
             "quality_reports": payloads("quality_reports"),
+            # The document ledger is the canonical, version-neutral view of
+            # every architecture artifact. Keep the legacy typed collections
+            # above for API compatibility, while exposing the newer
+            # objective/knowledge/storyboard documents to resumable workers
+            # and future clients without filesystem enumeration.
+            "artifact_documents": self.run_artifact_documents(run_id),
             "form_schemas": payloads("form_schemas"),
             "synthetic_datasets": payloads("synthetic_datasets"),
             "attempts": [
@@ -1297,6 +1366,7 @@ class RunRepository:
     def upsert_knowledge(
         self, product_key: str, evidence: dict[str, Any], confidence: float
     ) -> None:
+        product_key = _canonical_product_key(product_key)
         now = datetime.now(UTC).isoformat()
         row = self.connection.execute(
             "SELECT version FROM product_knowledge WHERE product_key=?", (product_key,)
@@ -1327,6 +1397,7 @@ class RunRepository:
         reusable, freshness-stamped index used only after discovery has
         re-grounded it on the live product.
         """
+        product_key = _canonical_product_key(product_key)
         product = self.connection.execute(
             "SELECT id FROM product_knowledge WHERE product_key=?", (product_key,)
         ).fetchone()
@@ -1334,7 +1405,7 @@ class RunRepository:
             raise KeyError(f"product knowledge has not been created: {product_key}")
         now = datetime.now(UTC).isoformat()
         for page in pages:
-            url = str(page.get("url", "")).strip()
+            url = _canonical_product_key(str(page.get("url", "")).strip())
             if not url:
                 continue
             self.connection.execute(
@@ -1349,6 +1420,7 @@ class RunRepository:
 
     def record_successful_actions(self, product_key: str, events: list[dict[str, Any]]) -> None:
         """Cache compact, non-secret action evidence for later DOM re-grounding."""
+        product_key = _canonical_product_key(product_key)
         row = self.connection.execute(
             "SELECT evidence_json, confidence FROM product_knowledge WHERE product_key=?", (product_key,)
         ).fetchone()
@@ -1383,6 +1455,7 @@ class RunRepository:
     def fresh_knowledge(
         self, product_key: str, max_age_seconds: int = 86_400
     ) -> dict[str, Any] | None:
+        product_key = _canonical_product_key(product_key)
         row = self.connection.execute(
             "SELECT evidence_json, confidence, last_verified_at FROM product_knowledge WHERE product_key=?",
             (product_key,),
@@ -1404,6 +1477,7 @@ class RunRepository:
         Immutable run artifacts remain untouched; the next discovery is therefore
         forced to re-ground live knowledge rather than reusing stale cache data.
         """
+        product_key = _canonical_product_key(product_key)
         row = self.connection.execute(
             "SELECT id FROM product_knowledge WHERE product_key=?", (product_key,)
         ).fetchone()

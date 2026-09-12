@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -121,11 +122,19 @@ def _run_remotion_segment(command: list[str], *, renderer: Path, timeout_seconds
 
 
 def _render_concurrency() -> int:
-    """Use a conservative compositor fan-out for long browser walkthroughs."""
+    """Use a safe but practical compositor fan-out for browser walkthroughs.
+
+    A single Chromium compositor serialises every 1080p frame and makes an
+    otherwise healthy, evidence-backed demo take hours on a normal developer
+    workstation.  Two workers keep memory pressure bounded while allowing
+    decode and JPEG/encode work to overlap.  Deployments which are genuinely
+    constrained can still explicitly select one worker through the provider
+    configuration.
+    """
     try:
-        requested = int(os.getenv("PRODUCTLENS_REMOTION_CONCURRENCY", "1"))
+        requested = int(os.getenv("PRODUCTLENS_REMOTION_CONCURRENCY", "2"))
     except ValueError:
-        requested = 1
+        requested = 2
     # High parallelism regularly destabilises long 1080p browser captures on
     # constrained workers. This controls only parallel compositor pages; it
     # never reduces frame rate, resolution, source duration, or video quality.
@@ -184,7 +193,29 @@ def _prepare_remotion_source(raw: Path, public: Path, run_id: str) -> str:
     conversion, never a timing, resolution, or frame-rate transformation.
     """
     source_asset = f"{run_id}.mp4"
+    public.mkdir(parents=True, exist_ok=True)
     destination = public / source_asset
+    # Editorial cuts are already emitted as H.264/yuv420p MP4. Re-encoding
+    # them again before Remotion costs several minutes on a CPU worker and
+    # can subtly soften UI text without adding compatibility.  Probe rather
+    # than trusting an extension: Browserbase WebM and unusual MP4 codecs
+    # still use the conservative conversion path below.
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name,pix_fmt", "-of", "json", str(raw),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        stream = json.loads(probe.stdout).get("streams", [{}])[0]
+    except (TypeError, ValueError, json.JSONDecodeError, IndexError):
+        stream = {}
+    if stream.get("codec_name") == "h264" and stream.get("pix_fmt") in {"yuv420p", "yuvj420p"}:
+        shutil.copy2(raw, destination)
+        return source_asset
     subprocess.run(
         [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(raw),
@@ -205,6 +236,137 @@ def _frame_rate(value: object) -> float:
         return float(numerator) / max(1.0, float(denominator))
     except (TypeError, ValueError, ZeroDivisionError):
         return 0.0
+
+
+_PRESENTATION_SECRET_TERMS = re.compile(
+    r"\b(?:email|e-mail|password|passcode|otp|one[ -]?time|token|secret|api[ -]?key|access[ -]?key)\b",
+    re.IGNORECASE,
+)
+
+
+def _presentation_secret_redactions(
+    trace: DemoTrace,
+    beats: list[dict[str, object]],
+    *,
+    frame_rate: float,
+) -> list[dict[str, object]]:
+    """Return source-coordinate masks for credentials visible in browser video.
+
+    Trace/log redaction is not sufficient: a native browser recording can
+    still show a credential while it is typed or remains in a form field.
+    This intentionally relies on generic operation/field semantics, never on
+    an application, user, URL, or known credential value.  A mask stays on a
+    field until the first proven navigation away from that page, so the value
+    cannot reappear while another authentication field is completed.
+    """
+    if not beats:
+        return []
+    beat_by_event = {str(item.get("eventId", "")): item for item in beats}
+    redactions: list[dict[str, object]] = []
+    for index, event in enumerate(trace.events):
+        target = event.target
+        semantic_text = " ".join(
+            value for value in (
+                event.kind.value if hasattr(event.kind, "value") else str(event.kind),
+                event.intent,
+                target.name if target else "",
+                getattr(target, "autocomplete", "") if target else "",
+            ) if value
+        )
+        if not _PRESENTATION_SECRET_TERMS.search(semantic_text):
+            continue
+        beat = beat_by_event.get(event.id)
+        if beat is None:
+            # A presentation event without a beat is not visible product
+            # evidence, therefore it cannot expose an on-screen value.
+            continue
+        start = int(beat.get("start", 0))
+        end = int(beat.get("end", start + 1))
+        current_url = event.page_url
+        # The editorial source may begin with a stable login frame in which a
+        # value was already present before Playwright emitted the corresponding
+        # observer event (cloud recording and trace clocks are independent).
+        # If this is the first credential-bearing event on that page, protect
+        # the whole rendered prelude while keeping the mask field-local. This
+        # prevents a typed value from appearing during the opening cut without
+        # falling back to an opaque full-frame security card.
+        if not any(
+            prior.page_url == current_url
+            and beat_by_event.get(prior.id) is not None
+            and _PRESENTATION_SECRET_TERMS.search(
+                " ".join(value for value in (
+                    prior.kind.value if hasattr(prior.kind, "value") else str(prior.kind),
+                    prior.intent,
+                    prior.target.name if prior.target else "",
+                    getattr(prior.target, "autocomplete", "") if prior.target else "",
+                ) if value)
+            )
+            for prior in trace.events[:index]
+        ):
+            start = 0
+        for later in trace.events[index + 1:]:
+            later_beat = beat_by_event.get(later.id)
+            if later_beat is None:
+                continue
+            if current_url and later.page_url and later.page_url != current_url:
+                end = int(later_beat.get("start", end))
+                break
+            end = max(end, int(later_beat.get("end", end)))
+        # A minimum avoids a one-frame flash at the action boundary.  The
+        # terminal bound remains the proven source timeline.
+        end = max(start + max(1, round(frame_rate * 0.2)), end)
+        if event.target_rect is None:
+            # Legacy/cloud traces may lack one action's DOM box despite a
+            # recorded authentication screen. A full-frame, explicitly
+            # labelled secure-sign-in card is the only non-fabricated way to
+            # preserve a human-readable login transition without leaking the
+            # credential. New captures are expected to use geometry masks.
+            # The value may already be present before the browser adapter
+            # reports the fill action (autofill and a delayed cloud snapshot
+            # are both common).  With no grounded field box there is no safe
+            # way to mask only the preceding pixels, so protect the complete
+            # authentication prelude rather than risk a single-frame leak.
+            # This is deliberately semantic: it applies to any credential
+            # field, not a known login page, product, or provider.
+            redactions.append({
+                "eventId": event.id,
+                "start": 0,
+                "end": end,
+                "mode": "secure-full-frame",
+                "label": "Signing in securely",
+            })
+            continue
+        redactions.append({
+            "eventId": event.id,
+            "start": start,
+            "end": end,
+            "mode": "target-mask",
+            # Use the exact recording-space geometry already supplied to the
+            # cursor/camera beat.  Cloud recordings often differ from the CSS
+            # viewport, so raw DOM coordinates would mask the wrong field.
+            "x": float(beat.get("x", event.target_rect.x)),
+            "y": float(beat.get("y", event.target_rect.y)),
+            "width": float(beat.get("width", event.target_rect.width)),
+            "height": float(beat.get("height", event.target_rect.height)),
+            "label": "Sensitive value redacted",
+        })
+    return redactions
+
+
+def _outro_copy(trace: DemoTrace, storyboard: EditorialStoryboard | None) -> tuple[str, str]:
+    """Return a product-specific close from the approved editorial story."""
+    if storyboard is not None:
+        product = re.sub(r"\bwalkthrough\b", "", storyboard.brief.title, flags=re.IGNORECASE).strip(" -:|")
+        product = product or concise_demo_title(trace.objective)
+        final_scene = next(
+            (scene for scene in reversed(storyboard.scenes) if scene.operation_id is not None),
+            storyboard.scenes[-1] if storyboard.scenes else None,
+        )
+        takeaway = " ".join((final_scene.narration if final_scene else storyboard.brief.product_purpose).split())[:180]
+    else:
+        product = concise_demo_title(trace.objective)
+        takeaway = " ".join(trace.objective.split())[:180]
+    return (f"That concludes the {product} walkthrough.", takeaway)
 
 
 def _recording_space_rect(rect, *, viewport, source_width: int, source_height: int):
@@ -250,7 +412,11 @@ def _recording_space_cursor_paths(presentation: PresentationPlan, trace: DemoTra
 
 
 def _editorial_cut_windows(
-    trace: DemoTrace, source_seconds: float, *, minimum_seconds: float = 0.0,
+    trace: DemoTrace,
+    source_seconds: float,
+    *,
+    minimum_seconds: float = 0.0,
+    reading_holds_seconds: dict[str, float] | None = None,
 ) -> list[tuple[float, float]]:
     """Keep native action/reveal evidence while removing remote idle gaps.
 
@@ -284,11 +450,20 @@ def _editorial_cut_windows(
     windows: list[tuple[float, float]] = (
         [(opening_start, opening_end)] if opening_end - opening_start >= 1.0 else [(0.0, min(5.0, source_seconds))]
     )
+    reading_holds_seconds = reading_holds_seconds or {}
     for event in trace.events:
         if not event.success or event.action_at is None:
             continue
         action = max(0.0, min(source_seconds, (event.action_at - trace.recording_started_at).total_seconds()))
         reveal = max(action, min(source_seconds, (event.occurred_at - trace.recording_started_at).total_seconds()))
+        # A selected caption owns a reader-sized native dwell after the state
+        # it describes becomes visible. Unnarrated trace events retain the
+        # compact evidence tail, so this increases time only for the actual
+        # editorial story rather than returning to an uncut browser recording.
+        post_reveal_hold = max(
+            0.35 if compact_tour else 2.9,
+            float(reading_holds_seconds.get(event.id, 0.0)),
+        )
         # A directed scroll is itself viewer-facing evidence.  Even if a cloud
         # compositor or CDP call reports a long elapsed interval, cutting its
         # middle turns a natural page movement into the exact teleport this
@@ -298,7 +473,7 @@ def _editorial_cut_windows(
         # between them.
         # Keep the complete motion itself, but retain only a short, readable
         # settle after the target is visible.  The old 2.9s tail on every
-        # landmark accumulated into 6+ minute portfolio renders even though
+        # landmark accumulated into 6+ minute product renders even though
         # the trace contained no additional evidence during those tails.
         # This is an evidence-backed cut, never a speed change: scroll frames
         # and the action/reveal edges remain at native cadence.
@@ -312,7 +487,16 @@ def _editorial_cut_windows(
             motion = event.after.get("scroll_motion") if isinstance(event.after, dict) else None
             motion_ms = motion.get("duration_ms") if isinstance(motion, dict) else None
             if isinstance(motion_ms, (int, float)) and motion_ms > 0:
-                motion_end = min(source_seconds, action + float(motion_ms) / 1000.0 + 0.55)
+                # A scroll's physical motion is followed by a short settle.
+                # Caption-selected scrolls may own a longer reader dwell, but
+                # an uncaptioned scroll must not inherit the focused-demo
+                # interaction tail (2.9s) merely because it is the only event
+                # in a fixture trace.
+                scroll_settle = max(
+                    0.55,
+                    float(reading_holds_seconds.get(event.id, 0.0)),
+                )
+                motion_end = min(source_seconds, action + float(motion_ms) / 1000.0 + scroll_settle)
                 windows.append((
                     max(0.0, action - (0.1 if compact_tour else 0.6)),
                     max(action + 0.2, motion_end),
@@ -320,12 +504,12 @@ def _editorial_cut_windows(
             else:
                 windows.append((
                     max(0.0, action - (0.1 if compact_tour else 0.6)),
-                    min(source_seconds, reveal + (0.35 if compact_tour else 2.9)),
+                    min(source_seconds, reveal + post_reveal_hold),
                 ))
         elif reveal - action <= 3.8:
             windows.append((
                 max(0.0, action - (0.1 if compact_tour else 0.6)),
-                min(source_seconds, reveal + (0.35 if compact_tour else 2.9)),
+                min(source_seconds, reveal + post_reveal_hold),
             ))
         else:
             # Preserve a visibly complete navigation dispatch and immediate
@@ -337,7 +521,7 @@ def _editorial_cut_windows(
             ))
             windows.append((
                 max(0.0, reveal - (0.3 if compact_tour else 1.9)),
-                min(source_seconds, reveal + (0.35 if compact_tour else 2.9)),
+                min(source_seconds, reveal + post_reveal_hold),
             ))
     windows.sort()
     merged: list[tuple[float, float]] = []
@@ -432,8 +616,18 @@ def _build_editorial_source(raw: Path, *, render_dir: Path, windows: list[tuple[
         },
         sort_keys=True,
     ).encode("utf-8")).hexdigest()[:16]
+    output = render_dir / f"editorial-source-{cut_key}.mp4"
+    # The source identity above includes the immutable recording fingerprint
+    # and every retained native-speed window. Reusing a complete result is
+    # therefore safe across caption/camera/redaction repairs and avoids
+    # repeatedly decoding a long cloud recording for presentation-only work.
+    if output.is_file() and output.stat().st_size >= 10_000:
+        return output
     clips_dir = render_dir / "editorial-clips" / cut_key
-    clips_dir.mkdir(exist_ok=True)
+    # A first render on a fresh run has no render directory yet.  Create the
+    # complete cache path so content-addressed source assembly is independent
+    # of whether an earlier failed attempt happened to materialize parents.
+    clips_dir.mkdir(parents=True, exist_ok=True)
     clips: list[Path] = []
     for index, (start, end) in enumerate(windows):
         clip = clips_dir / f"{index:03d}.mp4"
@@ -448,7 +642,6 @@ def _build_editorial_source(raw: Path, *, render_dir: Path, windows: list[tuple[
     listing.write_text("ffconcat version 1.0\n" + "".join(
         f"file '{clip.resolve().as_posix()}'\n" for clip in clips
     ), encoding="utf-8")
-    output = render_dir / f"editorial-source-{cut_key}.mp4"
     subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(listing),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
@@ -546,7 +739,21 @@ def _evidence_timed_captions(
     # interval, so the caption begins after its physical reveal and remains
     # until the next action. Navigation is different: its destination must
     # still wait for the verified route/result state.
-    minimum_dwell = min(1.45, screen_seconds / max(1, len(captions)))
+    # Caption-only output is the narration product until TTS is enabled. A
+    # fixed 1.45-second slot made evidence-rich 16–22 word lines unreadable.
+    # Allocate a normal silent-reading dwell for each approved editorial beat;
+    # if the native recording cannot contain those beats, QA rejects it rather
+    # than silently speeding the viewer through the story.
+    minimum_dwells = [
+        max(2.4, len(str(caption.get("text", "")).split()) / 3.2 + 0.25)
+        for caption in captions
+    ]
+    if sum(minimum_dwells) > screen_seconds:
+        # The renderer must not manufacture reading time by freezing source
+        # footage. Let the existing timing path preserve native evidence; the
+        # synchronization gate will report the insufficient capture/story
+        # envelope and route repair to planning or execution.
+        return None
     navigation_kinds = {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
 
     def visible_start(index: int, event: InteractionEvent) -> float:
@@ -582,12 +789,25 @@ def _evidence_timed_captions(
             bool(caption.get("opening", False))
             or str(caption.get("text", "")).lstrip().lower().startswith("welcome to ")
         )
-        desired_start = 0.0 if is_presenter_opening else visible_start(index, event)
-        latest_start = max(0.0, screen_seconds - minimum_dwell * (len(captions) - index))
+        # A narrator may introduce the *first product scene*, while the raw
+        # recording still begins with an authentication transition.  Starting
+        # that welcome at frame zero would narrate the product over a login
+        # form (and, worse, hold it over unrelated intervening footage). Only
+        # start at zero when the attached evidence is genuinely the first
+        # visible trace event. Otherwise the welcome starts at its own proven
+        # product state exactly like every other scene.
+        is_first_visible_event = bool(trace.events) and event.id == trace.events[0].id
+        # If authentication is the first visible production event, its
+        # credential-free presenter line must begin at frame zero. Waiting for
+        # the input's DOM result creates an unexplained opening silence even
+        # though the trace already proves the login interaction is on screen.
+        first_is_authentication = str(event.operation_id or "").startswith("auth:")
+        desired_start = 0.0 if is_first_visible_event and (is_presenter_opening or first_is_authentication) else visible_start(index, event)
+        latest_start = max(0.0, screen_seconds - sum(minimum_dwells[index:]))
         start = min(desired_start, latest_start)
         if starts:
-            start = max(start, starts[-1] + minimum_dwell)
-        starts.append(min(screen_seconds - minimum_dwell, start))
+            start = max(start, starts[-1] + minimum_dwells[index - 1])
+        starts.append(min(screen_seconds - minimum_dwells[index], start))
     timed: list[dict] = []
     for index, (caption, start) in enumerate(zip(captions, starts, strict=True)):
         next_start = starts[index + 1] if index + 1 < len(starts) else screen_seconds
@@ -601,14 +821,50 @@ def _evidence_timed_captions(
         # Beat ranges begin 0.65 seconds before the following event. End the
         # outgoing line inside that range so the incoming caption never
         # narrates a state that is already on screen.
-        if index == 0 and bool(caption.get("opening", False)):
+        if index == 0 and (
+            bool(caption.get("opening", False))
+            or str(caption.get("text", "")).lstrip().lower().startswith("welcome to ")
+        ):
             # A welcome should establish the product, not monopolise a long
             # opening hold. Keep enough time for a calm read while allowing
             # the first page-local explanation to start promptly.
             reading_seconds = len(str(caption.get("text", "")).split()) / 2.8 + 0.7
-            end = min(next_action - 0.2, max(start + minimum_dwell, min(7.5, reading_seconds)))
+            # A stable opening may legitimately precede the first deliberate
+            # scroll by several seconds. Keep its grounded welcome visible
+            # through that setup rather than leaving a silent, unexplained
+            # gap, while capping the hold so one line never monopolises the
+            # page. The subsequent caption still waits for its own visible
+            # evidence.
+            # Keep the opening caption on the established frame until the
+            # first deliberate reveal.  A hard cap here made a long,
+            # presenter-style welcome disappear while the browser was still
+            # holding the opening page, creating both an unexplained silence
+            # gap and a reader-dwell failure.  The next verified action is the
+            # natural hand-off boundary; it is already bounded by the source
+            # recording and the storyboard minimums.
+            bridge_hold = max(reading_seconds, next_action - start - 0.2)
+            # The next caption's allocated start is the authoritative
+            # hand-off boundary.  Navigation/action clocks can lag that
+            # editorial slot; using them alone allowed the welcome to overlap
+            # the first scene caption and made the rendered timeline invalid.
+            handoff = next_start - 0.1 if index + 1 < len(starts) else screen_seconds
+            # The first event is the opening-page establish/scroll beat. Keep
+            # its presenter line through that deliberate opening motion; the
+            # next caption's allocated start is the authoritative handoff,
+            # so a pre-dispatch cap would create a silent gap and truncate a
+            # valid welcome whenever the first gesture begins early.
+            end = min(handoff, max(start + minimum_dwells[index], bridge_hold))
         else:
-            end = max(start + minimum_dwell, min(next_start - 0.1, next_action - 0.2))
+            end = max(start + minimum_dwells[index], min(next_start - 0.1, next_action - 0.2))
+            # Remote authentication and SPA transitions can leave a several-
+            # second interval between the outgoing action clock and the next
+            # readable state.  Caption-only delivery must not go silent while
+            # the same witnessed scene is still on screen: extend the
+            # outgoing, evidence-backed explanation to the next scene handoff
+            # (without overlapping it).  This preserves the real browser
+            # footage and avoids synthetic filler or speed changes.
+            if index + 1 < len(starts) and next_start - end > 6.0:
+                end = min(screen_seconds, next_start - 0.1)
         end = min(screen_seconds, end)
         if end <= start:
             start = max(0.0, min(start, screen_seconds - 0.1))
@@ -708,8 +964,58 @@ def render_remotion(
         duration_floor = max(0.0, float(storyboard.minimum_duration_seconds) - presentation_chrome_seconds)
     if target_duration_seconds is not None and target_duration_seconds >= 180:
         duration_floor = max(duration_floor, 120.0 - presentation_chrome_seconds)
-    windows = _editorial_cut_windows(trace, source_seconds, minimum_seconds=duration_floor)
+    caption_reading_holds = {
+        str(item.get("scene_id", "")): max(
+            2.4,
+            len(str(item.get("text", "")).split()) / 3.2 + 0.25,
+        )
+        for item in (captions or [])
+        if str(item.get("scene_id", "")).strip()
+    }
+    # A focused 1–2 minute demo must contain enough *real* footage for its
+    # approved story.  The old editor only used the storyboard floor, which
+    # could be shorter than the reader dwell implied by the approved script;
+    # captions then fell back to an artificial timeline and the product felt
+    # rushed.  Derive the floor from the requested envelope and the measured
+    # caption holds instead of from a site-specific constant.  This expands
+    # native source windows; it never freezes or slows browser footage.
+    if target_duration_seconds is not None and target_duration_seconds >= 90:
+        duration_floor = max(
+            duration_floor,
+            # ``screenFrames`` is the actual browser-footage duration in the
+            # composition; title/close layers do not add hidden time to it.
+            # Keep focused 1–2 minute requests at a true 60-second minimum,
+            # while still deriving the value from the requested envelope.
+            min(120.0, float(target_duration_seconds) * 0.5),
+        )
+    if caption_reading_holds:
+        # Keep a small native margin for frame rounding and the title/close
+        # composition chrome; equality at the floating-point boundary would
+        # otherwise make evidence timing fall back to evenly spread captions.
+        duration_floor = max(duration_floor, sum(caption_reading_holds.values()) + 1.0)
+    windows = _editorial_cut_windows(
+        trace,
+        source_seconds,
+        minimum_seconds=duration_floor,
+        reading_holds_seconds=caption_reading_holds,
+    )
     removes_unestablished_prelude = bool(windows and windows[0][0] > 0.1)
+    editorial_window_seconds = sum(end - start for start, end in windows)
+    # Provider/browser command latency can create long, content-free gaps in
+    # an otherwise short capture. Editing only when the maximum duration is
+    # exceeded left those gaps in final videos, where they read as lag. The
+    # cut list is already evidence-backed and retains each native action,
+    # transition, scroll path, reveal, and reading dwell, so apply it whenever
+    # it removes a material proven-dead interval—not merely under duration
+    # pressure.
+    # Very short sources are already governed by their explicit trace/caption
+    # timing. Avoid an additional container rewrite for sub-30-second clips;
+    # the material lag this guard repairs occurs in longer cloud recordings,
+    # where provider command gaps would otherwise be plainly visible.
+    removes_proven_dead_time = (
+        source_seconds >= 30.0
+        and editorial_window_seconds + 0.75 < source_seconds
+    )
     needs_duration_edit = (
         maximum_duration_seconds is not None
         and source_seconds + presentation_chrome_seconds > maximum_duration_seconds + 0.25
@@ -718,8 +1024,8 @@ def render_remotion(
     # the page is stable. Apply the same evidence-backed cut list whenever it
     # removes that prelude; duration pressure is not the only reason an edit
     # is editorially necessary.
-    if needs_duration_edit or removes_unestablished_prelude:
-        editorial_seconds = sum(end - start for start, end in windows)
+    if needs_duration_edit or removes_unestablished_prelude or removes_proven_dead_time:
+        editorial_seconds = editorial_window_seconds
         artifacts.write_json(
             "presentation/source-edit-plan.json",
             {
@@ -747,7 +1053,7 @@ def render_remotion(
             "presentation/source-edit-plan.json",
             {
                 **source_edit_payload,
-                "rendered_source": str(render_source.relative_to(artifacts.root.resolve())),
+                "rendered_source": str(render_source.resolve().relative_to(artifacts.root.resolve())),
             },
         )
         trace = _remap_trace_for_cuts(trace, windows)
@@ -831,6 +1137,13 @@ def render_remotion(
             click_frame = min(end - 1, start + min(18, max(1, end - start)))
         else:
             start, end, click_frame = timed_ranges[index]
+        # Multiple verified events can share a source timestamp (especially
+        # the final scroll and its takeaway).  Their native beat range may
+        # therefore collapse to one frame even though the cursor witness is
+        # a few frames later. Extend only that beat to include its recorded
+        # witness; never move the cursor onto an invented target/time.
+        if click_frame >= end:
+            end = min(screen_frames, click_frame + 1)
         beats.append(
             {
                 "intent": event.intent,
@@ -846,12 +1159,28 @@ def render_remotion(
                 "zoom": decision.zoom if decision else 1.0,
             }
         )
+    presentation_redactions = _presentation_secret_redactions(
+        trace, beats, frame_rate=frame_rate,
+    )
+    artifacts.write_json(
+        "presentation/secret-redactions.json",
+        {
+            "mode": "trace-geometry-mask",
+            "count": len(presentation_redactions),
+            "full_frame_fallback_count": sum(
+                item.get("mode") == "secure-full-frame" for item in presentation_redactions
+            ),
+            "redactions": presentation_redactions,
+            "source": "credential-like operation semantics and captured target geometry",
+        },
+    )
     # Cursor beats begin before dispatch and transition as the next action is
     # prepared. Captions describe the readable *result*, so a navigation
     # caption may correctly begin after its click beat.  The stable scene/event
     # id joins the two layers; clamping caption timing to a cursor-only range
     # would narrate the old page or yield an invalid negative-duration line.
     artifacts.write_json("presentation/rendered-captions.json", scaled_captions)
+    outro_title, outro_subtitle = _outro_copy(trace, storyboard)
     props = {
         "title": storyboard.brief.title if storyboard else concise_demo_title(
             trace.objective, action_labels=[event.intent for event in trace.events if event.success]
@@ -864,6 +1193,8 @@ def render_remotion(
             if storyboard is not None and storyboard.brief.opening_message.strip()
             else "A verified workflow, captured in real interaction time."
         ),
+        "outroTitle": outro_title,
+        "outroSubtitle": outro_subtitle,
         "targetDurationSeconds": target_duration_seconds,
         "screenVideo": source_asset,
         "screenVideoSha256": source_sha256,
@@ -874,6 +1205,7 @@ def render_remotion(
         "sourceFrameRate": round(source_frame_rate, 3),
         "playbackRate": playback_rate,
         "beats": beats,
+        "redactions": presentation_redactions,
         "cursorPaths": rendered_cursor_paths,
         "eventViewports": {
             event.id: event.viewport.model_dump(mode="json")
@@ -884,14 +1216,18 @@ def render_remotion(
         "scenes": scenes or [],
     }
     props_path = (artifacts.presentation / "remotion-props.json").resolve()
-    props_path.write_text(json.dumps(props), encoding="utf-8")
+    # Remotion props are part of the durable presentation contract. Write
+    # them through the same atomic artifact writer as every other checkpoint;
+    # a worker interruption must never leave a truncated JSON file that a
+    # resumed render mistakes for a valid camera/caption plan.
+    artifacts.write_json("presentation/remotion-props.json", props)
     props_sha256 = hashlib.sha256(props_path.read_bytes()).hexdigest()
     # Remotion writes the candidate atomically only after ffmpeg has completed.
     # A worker can be interrupted after the compositor has finished but before
     # this Python process promotes the output. Reuse that run-scoped candidate
     # on a resumed render instead of re-encoding minutes of identical evidence.
     if candidate_output.exists() and candidate_output.stat().st_size >= 10_000:
-        candidate_output.replace(output)
+        _promote_render(candidate_output, output)
         return output
     # Use the project-pinned CLI directly. ``npx`` can block before the
     # compositor is even started (for example while resolving its launcher),
@@ -994,7 +1330,7 @@ def render_remotion(
             },
         )
     if len(segment_outputs) == 1 and segment_outputs[0] == candidate_output:
-        candidate_output.replace(output)
+        _promote_render(candidate_output, output)
         return output
     concat = render_dir / "segments.ffconcat"
     concat.write_text(
@@ -1023,5 +1359,28 @@ def render_remotion(
         raise RuntimeError(f"RENDER_SEGMENT_CONCAT_FAILED: {concat_result.stderr[-500:]}")
     if not candidate_output.exists() or candidate_output.stat().st_size == 0:
         raise RuntimeError("Remotion completed without a candidate video artifact")
-    candidate_output.replace(output)
+    _promote_render(candidate_output, output)
     return output
+
+
+def _promote_render(candidate: Path, output: Path) -> None:
+    """Promote a completed render without failing on a viewer-held MP4.
+
+    Windows media players and antivirus/indexing processes can briefly hold
+    the previous delivery open.  ``Path.replace`` is atomic but raises
+    ``PermissionError`` in that situation, leaving a valid candidate stranded
+    and the durable job incorrectly failed.  Keep the atomic path first; the
+    copy fallback preserves the exact encoded bytes and is safe because the
+    candidate was already fully written and validated by the renderer.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        candidate.replace(output)
+        return
+    except PermissionError:
+        pass
+    # A direct copy is intentionally the final fallback: it works when the
+    # destination allows writes but refuses a rename over an open file.  The
+    # caller only invokes this after a complete candidate exists.
+    shutil.copyfile(candidate, output)
+    candidate.unlink(missing_ok=True)

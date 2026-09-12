@@ -4,6 +4,7 @@
   "type": "module",
   "engines": {"node": ">=22.18.0"},
   "dependencies": {
-    "@browserbasehq/stagehand": "^4.0.0"
+    "@browserbasehq/stagehand": "^4.0.0",
+    "zod": "^4.1.0"
   }
 }

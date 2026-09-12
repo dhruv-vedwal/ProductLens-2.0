@@ -11,7 +11,111 @@ from productlens.contracts.models import (
     OperationKind,
     ProductContext,
 )
-from productlens.presentation.editorial import _fact_id, _scene_source, _viewer_ready
+from productlens.presentation.editorial import (
+    _SENSITIVE_EDITORIAL_PATTERN,
+    _fact_id,
+    _scene_source,
+    _viewer_ready,
+    narrated_storyboard_scenes,
+)
+
+
+def inspect_editorial_preflight(
+    *, context: ProductContext, plan: DemoPlan, storyboard: EditorialStoryboard | None,
+) -> dict:
+    """Reject a weak story before a production browser is ever opened.
+
+    Trace QA remains the final authority for timing and visual fidelity, but a
+    plan already knows enough to reject route-label narration, a missing
+    welcome, and an omitted required configuration/feature relationship. This
+    prevents spending a cloud recording on an editorial failure that cannot be
+    repaired by execution.
+    """
+    if storyboard is None or not storyboard.scenes:
+        return {"editorial_score": 0.0, "hard_failures": ["EDITORIAL_STORYBOARD_UNAVAILABLE"], "warnings": []}
+    failures: list[str] = []
+    warnings: list[str] = []
+    opening = storyboard.scenes[0]
+    opening_words = set(re.findall(r"[a-z0-9]{3,}", opening.narration.casefold()))
+    if opening.interaction != "opening" or opening.required_dwell_seconds < 4:
+        failures.append("OPENING_PAGE_NOT_ESTABLISHED")
+    if not opening.narration.casefold().startswith("welcome to"):
+        failures.append("OPENING_PRESENTER_WELCOME_MISSING")
+    objective = context.objective
+    for relation in getattr(objective, "supporting_relationships", []) if objective else []:
+        if not relation.required:
+            continue
+        source = set(re.findall(r"[a-z0-9]{3,}", relation.source.casefold()))
+        target = set(re.findall(r"[a-z0-9]{3,}", relation.target.casefold())) - {"management", "workflow", "flow", "experience"}
+        all_story_words = set(re.findall(
+            r"[a-z0-9]{3,}", " ".join(scene.narration for scene in storyboard.scenes).casefold(),
+        ))
+        if source and not (source & all_story_words) or target and not (target & all_story_words):
+            failures.append("REQUIRED_CONTEXT_RELATIONSHIP_NOT_EXPLAINED")
+    generic_phrases = (
+        "quick overview of key metrics", "giving you immediate insight",
+        "various filters and details", "ready for management and action",
+        "surrounding controls visible for context", "the next part of the walkthrough",
+        "hands-on practice", "next build", "architecture cards",
+        "observed details are read before the walkthrough continues",
+    )
+    # These are the phrases that slipped through the original substring list
+    # in live runs.  They describe the mechanics of the tour (a view opened,
+    # a workflow being demonstrated) rather than the product value visible in
+    # that scene.  Keep this gate generic so it applies to every product.
+    generic_route_patterns = (
+        r"\bthe\s+next\s+view\b",
+        r"\bworkspace\s+establish(?:es|ing)\s+(?:the\s+)?current\s+working\s+view\b",
+        r"\bvisible\s+workflow\s+is\s+demonstrated\b",
+        r"\bprovides\s+the\s+setup\s+context\b.*\b(?:now\s+)?(?:we\s+)?can\s+see\b",
+        r"\b(?:current|working)\s+view\s+before\s+we\s+demonstrate\b",
+    )
+    plan_operations = {step.operation.id: step.operation for step in plan.workflow_steps}
+    for scene in storyboard.scenes:
+        text = scene.narration.casefold()
+        if _SENSITIVE_EDITORIAL_PATTERN.search(scene.narration):
+            failures.append("EDITORIAL_SENSITIVE_RECORD_DATA")
+        if any(phrase in text for phrase in generic_phrases):
+            failures.append("GENERIC_ROUTE_LABEL_CAPTION")
+        if scene.operation_id is None:
+            continue
+        if any(re.search(pattern, text) for pattern in generic_route_patterns):
+            failures.append("GENERIC_ROUTE_LABEL_CAPTION")
+        operation = plan_operations.get(scene.operation_id)
+        if operation is None:
+            # Authentication beats are synthetic presentation scenes emitted
+            # only when the objective requires login. They have no semantic
+            # workflow operation (credentials never enter the plan), but are
+            # still valid evidence-bound steps in the approved storyboard.
+            if scene.operation_id.startswith("auth:"):
+                continue
+            failures.append("EDITORIAL_SCENE_NOT_IN_PLAN")
+            continue
+        # A scroll without a target-specific fact is typically a fabricated
+        # coverage gesture. The planner should use a verified reading hold or
+        # a real form/action scene instead.
+        if operation.kind is OperationKind.SCROLL_TO:
+            source = _scene_source(context, scene)
+            # Evidence is frequently captured from accessibility/DOM text in
+            # title case or all caps (for example a stack category). Normalize
+            # before measuring it; the previous lower-case-only expression
+            # counted only the tails of capitalized words and rejected valid
+            # page-local evidence during live planning.
+            readable_source = source.casefold()
+            if not _viewer_ready(scene.narration, scene.title) or len(re.findall(r"[a-z0-9]{4,}", readable_source)) < 6:
+                failures.append("SCROLL_SCENE_LACKS_READABLE_LOCAL_EVIDENCE")
+        if scene.interaction in {"type", "submit"} and operation.kind not in {
+            OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE,
+            OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE, OperationKind.SELECT_DATE_RANGE,
+            OperationKind.SUBMIT,
+        }:
+            failures.append("EDITORIAL_INTERACTION_MISMATCH")
+    return {
+        "editorial_score": 1.0 if not failures else 0.0,
+        "hard_failures": list(dict.fromkeys(failures)),
+        "warnings": warnings,
+        "opening_words": sorted(opening_words),
+    }
 
 
 def inspect_editorial(
@@ -21,6 +125,7 @@ def inspect_editorial(
         return {"editorial_score": 1.0, "hard_failures": [], "warnings": ["EDITORIAL_STORYBOARD_UNAVAILABLE"], "scenes": []}
     failures: list[str] = []
     warnings: list[str] = []
+    narrated_texts: list[str] = []
     events = {event.operation_id: event for event in trace.events if event.success}
     scenes = []
     opening = storyboard.scenes[0] if storyboard.scenes else None
@@ -32,7 +137,21 @@ def inspect_editorial(
         if opening_seconds + 0.25 < (opening.required_dwell_seconds if opening else 4):
             failures.append("OPENING_PAGE_ADVANCED_TOO_EARLY")
     returned_home = False
-    initial_url = context.url.rstrip("/")
+    # ``ProductContext.url`` is the last discovery page, not necessarily the
+    # first page shown in production.  In authenticated workflows discovery
+    # often ends on the requested form, while production intentionally visits
+    # a supporting Settings page and then returns to that form.  Derive the
+    # opening page from the first non-auth production event so this legitimate
+    # continuation is not mistaken for a repair loop.
+    initial_event_url = next(
+        (
+            str(event.page_url).rstrip("/")
+            for event in trace.events
+            if event.success and event.page_url and not str(event.operation_id).startswith("auth:")
+        ),
+        None,
+    )
+    initial_url = (initial_event_url or str(context.url)).rstrip("/")
     for index, step in enumerate(plan.workflow_steps):
         op = step.operation
         if index and op.kind is OperationKind.NAVIGATE and str(op.value).rstrip("/") == initial_url:
@@ -42,11 +161,95 @@ def inspect_editorial(
             if any((item.href or "").rstrip("/") and destination.endswith((item.href or "").rstrip("/")) for item in context.navigation):
                 failures.append("DIRECT_ROUTE_USED_WHERE_VISIBLE_NAVIGATION_EXISTS")
                 break
+    # A supporting configuration page may be followed by a return to the
+    # feature workspace when the validated flow still has an essential
+    # mutation/inspection to perform.  That is a planned continuation, not a
+    # coverage repair.  Retain the hard failure for returns that only replay
+    # already-covered opening content.
+    return_has_essential_followup = False
     if returned_home:
+        for index, step in enumerate(plan.workflow_steps):
+            op = step.operation
+            if op.kind is not OperationKind.NAVIGATE or str(op.value).rstrip("/") != initial_url:
+                continue
+            return_has_essential_followup = any(
+                later.operation.kind in {
+                    OperationKind.OPEN_MODAL, OperationKind.CLICK,
+                    OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL,
+                    OperationKind.FILL_PHONE, OperationKind.SELECT_OPTION,
+                    OperationKind.SELECT_DATE, OperationKind.SELECT_DATE_RANGE,
+                    OperationKind.SUBMIT, OperationKind.APPLY_FILTER,
+                }
+                for later in plan.workflow_steps[index + 1 :]
+            )
+            if return_has_essential_followup:
+                break
+    if returned_home and not return_has_essential_followup:
         failures.append("RETURNED_TO_COVERED_OPENING_PAGE")
+    # A create-capable objective is not demonstrated by opening a form or
+    # leaving its save button visible. Require a submitted operation with an
+    # independent result assertion before a delivery can claim the outcome.
+    authorized_creation = bool(
+        context.objective
+        and "create_isolated_record" in context.objective.permitted_mutations
+    )
+    submit_operations = [
+        step.operation for step in plan.workflow_steps
+        if step.operation.kind is OperationKind.SUBMIT
+    ]
+    if authorized_creation and not submit_operations:
+        failures.append("AUTHORIZED_CREATION_NOT_DEMONSTRATED")
+    for operation in submit_operations:
+        independent_proof = any(
+            condition.kind in {"url", "text", "test_state"}
+            or (
+                condition.kind == "visible"
+                and condition.target is not None
+                and (operation.target is None or condition.target.name.casefold() != operation.target.name.casefold())
+            )
+            for condition in operation.postconditions
+        )
+        if not independent_proof:
+            failures.append("SUBMIT_WITHOUT_INDEPENDENT_OUTCOME_PROOF")
     # A navigation chapter is not a demonstration until the destination has a
     # page-local reveal or meaningful inspection before the next navigation.
     operations = [step.operation for step in plan.workflow_steps]
+    form_targets = {
+        (item.selector, " ".join(item.name.split()).casefold())
+        for item in context.elements
+        if (item.tag or "").casefold() in {"input", "select", "textarea"}
+    }
+
+    def is_page_exploration(operation) -> bool:
+        explicit = {
+            OperationKind.SCROLL_TO, OperationKind.CLICK, OperationKind.OPEN_MODAL,
+            OperationKind.READ_VALUE, OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL,
+            OperationKind.FILL_PHONE, OperationKind.SELECT_OPTION, OperationKind.SUBMIT,
+            OperationKind.APPLY_FILTER,
+        }
+        if operation.kind in explicit:
+            return True
+        # A read-only inspection of a page-local form/state is meaningful only
+        # when the compiler marks it as an explore/explain beat. A title-only
+        # VerifyState remains insufficient and cannot pass this gate.
+        phases = set(getattr(operation, "page_contract_phases", []))
+        evidence_refs = list(getattr(operation, "evidence_refs", []))
+        target = getattr(operation, "target", None)
+        target_is_form_control = bool(
+            target is not None
+            and (target.selector, " ".join(target.name.split()).casefold()) in form_targets
+        )
+        return (
+            operation.kind is OperationKind.VERIFY_STATE
+            and bool({"explore", "explain", "demonstrate", "verify"} & phases)
+            and (
+                any(str(ref).startswith(("form-field:", "element:")) for ref in evidence_refs)
+                if evidence_refs else (
+                    target_is_form_control
+                    or bool(getattr(operation, "required_content_groups", []))
+                )
+            )
+        )
     for index, operation in enumerate(operations):
         if operation.kind is not OperationKind.OPEN_NAVIGATION_ITEM:
             continue
@@ -56,13 +259,37 @@ def inspect_editorial(
             if candidate.kind in {OperationKind.OPEN_NAVIGATION_ITEM, OperationKind.NAVIGATE}:
                 break
             chapter.append(candidate)
-        exploration_kinds = {OperationKind.SCROLL_TO, OperationKind.CLICK, OperationKind.OPEN_MODAL, OperationKind.READ_VALUE, OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE, OperationKind.SELECT_OPTION, OperationKind.SUBMIT, OperationKind.APPLY_FILTER}
-        if not any(candidate.kind in exploration_kinds for candidate in chapter):
+        if not any(is_page_exploration(candidate) for candidate in chapter):
             failures.append("NAVIGATED_PAGE_NOT_EXPLORED")
     # Planning local exploration is insufficient on its own. A delivered trace
     # must prove that each navigation produced a later, successful page-local
     # scene before the next navigation began.
     successful_events = [event for event in trace.events if event.success]
+    for event in successful_events:
+        if event.kind is not OperationKind.SCROLL_TO:
+            continue
+        motion = event.after.get("scroll_motion") if isinstance(event.after, dict) else None
+        if not isinstance(motion, dict):
+            # Older/local traces may not expose browser motion telemetry; do
+            # not invent a failure from absent evidence. New production traces
+            # must include it whenever a directed scroll was dispatched.
+            continue
+        start = float(motion.get("start_y", event.scroll_path[0]["y"] if event.scroll_path else 0))
+        end = float(motion.get("target_y", event.scroll_path[-1]["y"] if event.scroll_path else start))
+        path = motion.get("path", event.scroll_path)
+        if abs(end - start) < 2:
+            # A target already visible in the settled viewport is a valid
+            # page-local establish/inspect beat; forcing a synthetic scroll
+            # would make footage less human, not more continuous. Only reject
+            # a no-op when the target is not visibly established.
+            rect = event.target_rect
+            viewport = event.viewport
+            if rect is not None and viewport is not None and 0 <= rect.y <= viewport.height:
+                continue
+            failures.append("SCROLL_SCENE_HAS_NO_CONTINUOUS_MOTION")
+            continue
+        if not isinstance(path, list) or len(path) < 2:
+            failures.append("SCROLL_SCENE_HAS_NO_CONTINUOUS_MOTION")
     for index, event in enumerate(successful_events):
         if event.kind is not OperationKind.OPEN_NAVIGATION_ITEM:
             continue
@@ -71,9 +298,14 @@ def inspect_editorial(
             if following.kind in {OperationKind.OPEN_NAVIGATION_ITEM, OperationKind.NAVIGATE}:
                 break
             chapter.append(following)
-        if not any(item.kind in exploration_kinds for item in chapter):
+        if not any(is_page_exploration(item) for item in chapter):
             failures.append("TRACE_NAVIGATED_PAGE_NOT_EXPLORED")
     script_by_event = {str(line.get("event_id")): str(line.get("text", "")) for line in script}
+    narrated_operation_ids = {
+        str(scene.operation_id)
+        for scene in narrated_storyboard_scenes(storyboard)
+        if scene.operation_id is not None
+    }
     opening_event_ids = {
         str(line.get("event_id")) for line in script if bool(line.get("opening", False))
     }
@@ -81,6 +313,8 @@ def inspect_editorial(
         (scene.operation_id for scene in storyboard.scenes if scene.operation_id is not None), None
     )
     for scene in storyboard.scenes:
+        if _SENSITIVE_EDITORIAL_PATTERN.search(scene.narration):
+            failures.append("EDITORIAL_SENSITIVE_RECORD_DATA")
         if scene.operation_id is None:
             continue
         event = events.get(scene.operation_id)
@@ -93,10 +327,17 @@ def inspect_editorial(
         # scheduler jitter.
         if event.duration_ms + 250 < int(scene.required_dwell_seconds * 1000):
             failures.append("SCENE_ADVANCED_BEFORE_REQUIRED_DWELL")
+        # The trace remains exhaustive, but narration intentionally selects
+        # reader-sized editorial beats.  Requiring a caption for every low
+        # level scroll caused 20-word captions to flash at crawler speed.
+        if scene.operation_id not in narrated_operation_ids:
+            scenes.append({"id": scene.id, "title": scene.title, "duration_ms": event.duration_ms, "evidence": scene.evidence, "interaction": scene.interaction, "narrated": False})
+            continue
         text = script_by_event.get(event.id, "")
         if not text:
             failures.append("EDITORIAL_SCENE_MISSING_NARRATION")
         else:
+            narrated_texts.append(text)
             target_words = set(re.findall(r"[a-z0-9]{4,}", scene.title.lower()))
             caption_words = set(re.findall(r"[a-z0-9]{4,}", text.lower()))
             generic_words = {"explored", "context", "gives", "viewer", "concrete", "evidence", "next", "part", "walkthrough"}
@@ -126,22 +367,31 @@ def inspect_editorial(
                 "section brings the visible details together",
                 " step is shown on ",
             )
+            route_mechanics = (
+                r"\bthe\s+next\s+view\b",
+                r"\bworkspace\s+establish(?:es|ing)\s+(?:the\s+)?current\s+working\s+view\b",
+                r"\bvisible\s+workflow\s+is\s+demonstrated\b",
+                r"\bprovides\s+the\s+setup\s+context\b.*\b(?:now\s+)?(?:we\s+)?can\s+see\b",
+                r"\b(?:current|working)\s+view\s+before\s+we\s+demonstrate\b",
+            )
             repeated_opening = (
                 bool(opening_words)
                 and ("\n" in scene.title or bool(re.search(r"\b\d+\b", scene.title)))
                 and len(caption_words & opening_words) / max(len(caption_words), 1) >= 0.72
+                and not presenter_opening
             )
             if (
                 len(text.split()) < 6
                 or (not presenter_opening and not _viewer_ready(text, scene.title))
                 or "distinct part of the product experience" in text
                 or any(phrase in text.lower() for phrase in boilerplate)
+                or any(re.search(pattern, text.lower()) for pattern in route_mechanics)
                 or repeated_opening
                 or title_only
             ):
                 failures.append("GENERIC_ROUTE_LABEL_CAPTION")
             evidence_text = _scene_source(context, scene)
-            evidence_words = set(re.findall(r"[a-z0-9]{4,}", evidence_text.lower()))
+            evidence_words = set(re.findall(r"[a-z0-9]{3,}", evidence_text.lower()))
             operation = next(
                 (step.operation for step in plan.workflow_steps if step.operation.id == scene.operation_id),
                 None,
@@ -163,6 +413,16 @@ def inspect_editorial(
             # scene can cite its own title while narrating a fact from another
             # card on the page.
             target_source_words = fact_words or evidence_words
+            # The target label is itself immutable DOM evidence for a control
+            # scene.  Dense pages may have no target-headed prose fact (for
+            # example a filter chip or search field), so excluding the element
+            # label makes valid, concise captions fail despite being grounded.
+            target_source_words.update(
+                word
+                for evidence in scene.evidence
+                if evidence.startswith("element:")
+                for word in re.findall(r"[a-z0-9]{3,}", evidence.split(":", 1)[1].lower())
+            )
             if (
                 target_words
                 and operation is not None
@@ -173,9 +433,61 @@ def inspect_editorial(
             # A scene can use concise editorial connective language, but its
             # factual sentence must remain recognisably tied to that scene's
             # assigned page/card evidence—not another page in the run.
-            if len(evidence_words) >= 3 and len(caption_words & evidence_words) < 2:
+            # The first proved operation carries the opening presenter line,
+            # but its evidence belongs to the operation-less opening scene.
+            # Do not compare that welcome against the destination page's
+            # local facts; the opening-specific checks above already require
+            # it to be grounded in the established opening evidence.
+            target_is_explicit = bool(
+                operation is not None
+                and operation.target is not None
+                and any(
+                    evidence.casefold() == f"element:{operation.target.name}".casefold()
+                    for evidence in scene.evidence
+                )
+                and bool(target_words & caption_words)
+            )
+            if (
+                not presenter_opening
+                and operation is not None
+                and operation.kind not in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
+                and len(target_source_words) >= 3
+                and len(caption_words & target_source_words) < 2
+                and not target_is_explicit
+            ):
                 failures.append("UNSUPPORTED_OR_WRONG_SCENE_CAPTION")
-        scenes.append({"id": scene.id, "title": scene.title, "duration_ms": event.duration_ms, "evidence": scene.evidence, "interaction": scene.interaction})
+        scenes.append({"id": scene.id, "title": scene.title, "duration_ms": event.duration_ms, "evidence": scene.evidence, "interaction": scene.interaction, "narrated": True})
     if len(trace.events) < len([scene for scene in storyboard.scenes if scene.operation_id]):
         warnings.append("SOME_PLANNED_SCENES_DID_NOT_PRODUCE_EVIDENCE")
+    for index, text in enumerate(narrated_texts):
+        if index == 0 or text.casefold().startswith(("welcome to", "today i'll walk")):
+            continue
+        # Compare semantic payload, not the shared connective grammar used to
+        # keep captions conversational.  ``The X view keeps Y close at hand``
+        # is intentionally reusable; repetition is only a failure when the
+        # meaningful nouns/verbs are also the same.
+        stop = {
+            "this", "the", "view", "workspace", "keeps", "close", "hand", "so",
+            "visible", "records", "can", "be", "narrowed", "and", "reviewed",
+            "brings", "into", "current", "workflow", "with", "surrounding",
+            "controls", "for", "context", "adds", "distinct", "beat",
+            "walkthrough", "section", "opens", "its", "ready", "focused", "review",
+        }
+        words = {w for w in re.findall(r"[a-z0-9]{4,}", text.lower()) if w not in stop}
+        for other in narrated_texts[:index]:
+            if other.casefold().startswith(("welcome to", "today i'll walk")):
+                continue
+            other_words = {w for w in re.findall(r"[a-z0-9]{4,}", other.lower()) if w not in stop}
+            if not words or not other_words:
+                continue
+            overlap = len(words & other_words) / max(1, min(len(words), len(other_words)))
+            # A shared feature noun (for example, ``bookings``) is expected
+            # across adjacent chapters and is not repetition by itself. A
+            # repeated editorial beat requires at least two meaningful words
+            # in common in addition to the ratio threshold.
+            if overlap >= 0.82 and len(words & other_words) >= 2:
+                failures.append("REPETITIVE_EDITORIAL_NARRATION")
+                break
+        if "REPETITIVE_EDITORIAL_NARRATION" in failures:
+            break
     return {"editorial_score": 1.0 if not failures else 0.0, "hard_failures": list(dict.fromkeys(failures)), "warnings": warnings, "scenes": scenes, "minimum_duration_seconds": storyboard.minimum_duration_seconds}

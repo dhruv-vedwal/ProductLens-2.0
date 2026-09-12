@@ -5,6 +5,17 @@ from typing import Any
 from productlens.contracts.models import DemoTrace
 
 
+def _ordered_subset(items: list[str], expected: list[str]) -> bool:
+    """Accept intentional editorial compression, never reordering or invention."""
+    cursor = 0
+    for item in items:
+        try:
+            cursor = expected.index(item, cursor) + 1
+        except ValueError:
+            return False
+    return bool(items)
+
+
 def inspect_story(
     trace: DemoTrace, *, objective: str, script: list[dict[str, Any]] | None = None
 ) -> dict:
@@ -20,7 +31,7 @@ def inspect_story(
     if script is not None:
         expected = [event.id for event in trace.events if event.success]
         actual = [str(line.get("event_id", "")) for line in script]
-        if actual != expected:
+        if not _ordered_subset(actual, expected):
             failures.append("NARRATION_TRACE_MISMATCH")
         for line in script:
             text = str(line.get("text", "")).strip()

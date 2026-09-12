@@ -20,6 +20,15 @@ def _page_key(url: str | None) -> str:
 
 def build_scene_plan(trace: DemoTrace, *, storyboard: EditorialStoryboard | None = None) -> list[dict]:
     scenes: list[dict] = []
+    # A page that has a directed local scroll is content-dense by definition.
+    # Its opening/explanation captions must not sit over the lower rows/cards
+    # that the following scroll is meant to reveal. This is derived from the
+    # trace's own page-local evidence, never from a product or route name.
+    page_has_scroll: set[str] = {
+        _page_key(event.page_url)
+        for event in trace.events
+        if event.success and event.kind is OperationKind.SCROLL_TO
+    }
     for event in trace.events:
         if not event.success:
             continue
@@ -50,9 +59,43 @@ def build_scene_plan(trace: DemoTrace, *, storyboard: EditorialStoryboard | None
         # the lower portion of the recorded viewport gets the top safe zone;
         # otherwise the bottom overlay preserves the product's heading/nav.
         caption_safe_zone = editorial.caption_safe_zone if editorial else "bottom"
+        # Navigation captions describe the newly loaded page after the click,
+        # not the tiny tab that was clicked.  Keep that explanation above the
+        # page body so a dense result/list below is never hidden while the
+        # route transition is being introduced.  This is deliberately based
+        # on semantic operation role rather than a product route or label.
+        if is_navigation and page_stage == "enter":
+            caption_safe_zone = "top"
+        if page_key in page_has_scroll and page_stage in {"establish", "explain", "inspect"}:
+            caption_safe_zone = "top"
         if event.target_rect is not None and event.viewport is not None:
             target_center_y = event.target_rect.y + event.target_rect.height / 2
-            if target_center_y >= event.viewport.height * 0.58:
+            # Form controls and centered dialogs often sit just below the
+            # midpoint. A bottom caption then obscures the submit/result area
+            # even though it does not overlap the active field itself. Use the
+            # opposite half of the frame with a small safety margin so the
+            # surrounding workflow remains readable.
+            # Use a conservative upper-third boundary for scroll/reveal
+            # targets. A heading near 30–40% of the viewport usually anchors
+            # a long card/list whose meaningful rows continue below it; a
+            # bottom caption would cover that evidence even though the
+            # heading's midpoint is above the geometric half of the frame.
+            if target_center_y >= event.viewport.height * 0.30:
+                caption_safe_zone = "top"
+            # A page heading/filter near the upper edge usually introduces a
+            # long list or table below it.  Keeping the caption at the bottom
+            # in that case hides the very evidence the scene is explaining
+            # (the common failure mode on dense pages whose first reveal is
+            # already visible).  Use geometry and scene role only; no route or
+            # product-specific assumptions are needed.
+            if (
+                page_stage in {"explain", "inspect"}
+                and event.target_rect.y <= event.viewport.height * 0.28
+                and (
+                    event.target_rect.width >= event.viewport.width * 0.22
+                    or bool(event.required_content_groups)
+                )
+            ):
                 caption_safe_zone = "top"
         # A directed scroll often reveals a compact card or capability whose
         # text is otherwise needlessly small inside a wide, source-faithful
@@ -107,7 +150,14 @@ def build_scene_plan(trace: DemoTrace, *, storyboard: EditorialStoryboard | None
                     OperationKind.SELECT_DATE_RANGE,
                 } else "page context is more valuable than target magnification",
                 "duration_seconds": 0.45,
-                "zoom": 1.10 if compact_reading_target else 1.0,
+                # A form scene is the one place where the viewer needs to
+                # follow a value being entered. Give it a meaningful but
+                # bounded reframe; broad page reading retains the full frame.
+                "zoom": 1.14 if kind in {
+                    OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE,
+                    OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE,
+                    OperationKind.SELECT_DATE_RANGE,
+                } else 1.10 if compact_reading_target else 1.0,
                 "easing": "out-cubic",
                 "safety_bounds": "preserve-browser-frame",
             },
@@ -161,6 +211,11 @@ def build_typed_scene_plan(
                 completion_criteria=list(scene["completion_criteria"]),
                 action_classification=(editorial.action_classification if editorial else "essential"),
                 caption_intent=(editorial.narration if editorial else event.intent),
+                transition=(
+                    editorial.transition
+                    if editorial and editorial.transition in {"cut", "dissolve", "match_scroll", "hold"}
+                    else "match_scroll" if event.kind is OperationKind.SCROLL_TO else "cut"
+                ),
             )
         )
     return typed

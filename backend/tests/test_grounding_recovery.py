@@ -25,7 +25,7 @@ class Page:
     def get_by_label(self, value: str, *, exact: bool) -> Locator:
         return Locator(self.counts.get(f"label:{value}", 0))
 
-    def get_by_text(self, value: str, *, exact: bool) -> Locator:
+    def get_by_text(self, value: str, *, exact: bool = False) -> Locator:
         return Locator(self.counts.get(f"text:{value}", 0))
 
     def locator(self, value: str) -> Locator:
@@ -47,3 +47,14 @@ async def test_grounding_rejects_ambiguous_or_missing_evidence():
     adapter = PlaywrightAdapter(Page({"role:button:Create lead": 2, "selector:#lead": 0}))
     with pytest.raises(GroundingError, match="role:2-matches"):
         await adapter.grounded_locator(Target(name="Create lead", role="button", selector="#lead"))
+
+
+@pytest.mark.asyncio
+async def test_grounding_prefers_observed_control_selector_over_adjacent_label_text():
+    adapter = PlaywrightAdapter(
+        Page({"text:Phone": 1, 'selector:[name="phone"]': 1})
+    )
+    _locator, strategy = await adapter.grounded_locator(
+        Target(name="Phone", text="Phone", selector='[name="phone"]')
+    )
+    assert strategy == "selector"

@@ -8,22 +8,42 @@ import pytest
 from productlens.artifacts.store import RunArtifacts
 from productlens.benchmark.fixtures import file_url
 from productlens.contracts.models import (
+    ActionCapability,
     DemoTrace,
+    FormField,
+    FormSchema,
+    ObjectiveSpec,
     ObservedElement,
     OperationKind,
+    PageKnowledge,
     Postcondition,
     ProductContext,
     SemanticOperation,
     Target,
     WorkflowProposal,
 )
+from productlens.planning.capabilities import compile_rehearsal_operations
 from productlens.planning.production import PlanningValidationError, ProductionPlanningService
+from productlens.planning.synthetic import hydrate_operations
 from productlens.providers.errors import ProviderError
 from productlens.services.generation import UrlGenerationService
 
 
 class EvidenceAwarePlanner:
     async def structured(self, prompt: str, schema):
+        # The staged URL pipeline first asks the provider to normalize the
+        # request into an ObjectiveSpec, then asks for a workflow.  Keep this
+        # fixture provider schema-aware so integration coverage exercises the
+        # real two-stage contract instead of depending on prompt ordering.
+        if schema is ObjectiveSpec:
+            return ObjectiveSpec(
+                raw=prompt.rsplit("Request:", 1)[-1].strip(),
+                primary_entity="teammate invitation",
+                requested_features=["invite teammate"],
+                must_show=["invite form", "invitation outcome"],
+                permitted_mutations=["create_isolated_record"],
+                safe_action_policy="authorized_mutations",
+            )
         evidence = json.loads(prompt.split("Observed evidence: ", maxsplit=1)[1])
         users_route = next(route for route in evidence["routes"] if "section-users.html" in route)
         return WorkflowProposal(
@@ -84,6 +104,71 @@ class RejectingPlanner:
         raise ProviderError("test", 503, "fallback")
 
 
+class ObjectiveParsingProvider:
+    async def structured(self, prompt: str, schema):
+        assert "Interpret this demo request" in prompt
+        return ObjectiveSpec(
+            raw="different text", demo_type="workflow_demo", audience="sales engineers",
+            depth="thorough", requested_features=["invoice", "reporting"],
+            primary_entity="invoice workflow", must_show=["invoice", "invented claim"],
+            exclusions=["billing"], success_criteria=["invoice outcome is visible"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_verified_rehearsal_is_reused_and_legacy_row_witness_is_migrated(tmp_path: Path):
+    """A downstream retry must not submit a second record or retain row dumps."""
+    run_id = "reused-rehearsal"
+    source = "https://example.test/leads"
+    capability = ActionCapability(
+        kind="form", purpose="New lead", source_url=source,
+        entry_target=Target(name="New lead", selector="#new-lead", source_url=source),
+        form_schema=FormSchema(source_url=source, fields=[
+            FormField(name="Phone", selector="#phone", control_type="phone", required=True),
+        ]),
+        submit_target=Target(name="Create lead", selector="#create", source_url=source),
+    )
+    _, dataset = hydrate_operations(compile_rehearsal_operations(capability), product_key=source)
+    generated_phone = dataset["Phone"]
+    capability = capability.model_copy(update={
+        "verified": True,
+        "outcome_target": Target(
+            name=f"Riya Kapoor {generated_phone} Fresh Open",
+            text=f"Riya Kapoor {generated_phone} Fresh Open", source_url=source,
+        ),
+        "outcome_evidence": [f"rehearsal-visible-outcome:Riya Kapoor {generated_phone}"],
+    })
+    context = ProductContext(
+        url=source, title="Example", application_type="dashboard",
+        objective=ObjectiveSpec(
+            raw="Create an isolated lead-management record", primary_entity="lead management",
+            permitted_mutations=["create_isolated_record"], safe_action_policy="authorized_side_effects",
+        ),
+        page_knowledge=[PageKnowledge(url=source, title="Leads", purpose="Lead management", fingerprint="leads")],
+        capabilities=[capability.model_dump(mode="json")],
+    )
+    artifacts = RunArtifacts(tmp_path, run_id)
+    artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
+    artifacts.write_json("discovery/rehearsal-attempt.json", {
+        "capability_id": capability.id, "status": "outcome_verified", "recording": "disabled",
+    })
+    # This stage returns before opening Playwright. A bare instance makes any
+    # accidental browser/dependency use fail instead of creating a record.
+    service = UrlGenerationService.__new__(UrlGenerationService)
+
+    recovered = await service.rehearsal_stage(
+        run_id=run_id, url=source, objective=context.objective.raw,
+        artifact_root=tmp_path, cloud_rehearsal=True,
+    )
+
+    migrated = ActionCapability.model_validate(recovered.capabilities[0])
+    assert migrated.outcome_target.name == "verified created record"
+    assert migrated.outcome_target.text == generated_phone
+    assert migrated.outcome_evidence == ["rehearsal-visible-outcome:verified-created-record"]
+    report = json.loads((artifacts.root / "discovery" / "rehearsal-report.json").read_text())
+    assert "Riya Kapoor" not in json.dumps(report)
+
+
 @pytest.mark.asyncio
 async def test_direct_run_delegates_to_the_durable_stages(tmp_path: Path):
     """The compatibility API must not silently revive the old monolithic flow."""
@@ -141,6 +226,25 @@ async def test_provider_fallback_rejects_context_without_page_local_evidence():
 
 
 @pytest.mark.asyncio
+async def test_objective_understanding_preserves_safe_deterministic_scope_and_rejects_ungrounded_terms():
+    service = UrlGenerationService(ProductionPlanningService(ObjectiveParsingProvider()))
+    parsed, report = await service._understand_objective(
+        "Create a thorough walkthrough of the invoice workflow; exclude billing."
+    )
+
+    assert report["status"] == "model_grounded"
+    assert parsed.raw == "Create a thorough walkthrough of the invoice workflow; exclude billing."
+    # Thorough depth does not by itself broaden a feature request into a
+    # whole-product tour; the provider may keep the narrower workflow mode.
+    assert parsed.demo_type == "workflow_demo"
+    assert parsed.depth == "thorough"
+    assert parsed.primary_entity == "invoice workflow"
+    assert "invoice" in parsed.must_show
+    assert "invented claim" not in parsed.must_show
+    assert "billing" in parsed.exclusions
+
+
+@pytest.mark.asyncio
 async def test_plan_stage_rejects_incomplete_persisted_discovery_without_a_browser(tmp_path: Path):
     artifacts = RunArtifacts(tmp_path, "plan-stage")
     artifacts.write_json(
@@ -154,7 +258,7 @@ async def test_plan_stage_rejects_incomplete_persisted_discovery_without_a_brows
         ).model_dump(mode="json"),
     )
     service = UrlGenerationService(ProductionPlanningService(EvidenceAwarePlanner()))
-    with pytest.raises(PlanningValidationError, match="no evidence-grounded candidate flow"):
+    with pytest.raises(PlanningValidationError, match="page lacks readable local evidence"):
         await service.plan_stage(
             run_id="plan-stage",
             objective="Invite a new teammate",
@@ -186,8 +290,10 @@ async def test_url_stages_execute_from_persisted_evidence_without_rendering(tmp_
     )
     narration = await service.narration_stage(run_id="staged-url", artifact_root=tmp_path)
     assert trace.outcome_verified
-    # Visible navigation replaces the prior duplicate direct route load.
+    # Visible navigation replaces the prior duplicate direct route load, and
+    # a read-only local form inspection proves the destination was explored.
     assert len(trace.events) == 4
+    assert trace.events[-1].kind is OperationKind.VERIFY_STATE
     assert narration["mode"] == "caption_only"
 
 
@@ -238,6 +344,7 @@ async def test_url_generation_rejects_a_short_render_that_cannot_satisfy_its_sto
     )
     assert trace.outcome_verified and len(trace.events) == 4
     assert (tmp_path / "runs" / "url-run" / "discovery" / "product-context.json").exists()
+    assert (tmp_path / "runs" / "url-run" / "discovery" / "product-knowledge.json").exists()
     assert (tmp_path / "runs" / "url-run" / "execution" / "trace.json").exists()
     final_video = tmp_path / "runs" / "url-run" / "final" / "demo.mp4"
     assert final_video.is_file() and final_video.stat().st_size >= 10_000

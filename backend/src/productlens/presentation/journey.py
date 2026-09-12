@@ -1,6 +1,7 @@
 """Deterministic trace-to-video journey direction."""
 from __future__ import annotations
 
+import re
 from urllib.parse import urlsplit, urlunsplit
 
 from productlens.contracts.models import DemoTrace, OperationKind
@@ -69,6 +70,7 @@ def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
         has_scroll_motion = _has_directed_scroll_motion(scroll_evidence)
         directed.append({
             **scene,
+            "objective": trace.objective,
             "story_phase": phase,
             "action_class": action_class,
             "camera": {"zoom": 1.0, "duration_seconds": 0.45, "easing": "out-cubic", "safety": "full-frame", **existing_camera},
@@ -162,12 +164,35 @@ def inspect_journey(scenes: list[dict]) -> dict:
     completed_pages: set[str] = {
         str(scenes[0]["page_key"])
     } if scenes and scenes[0].get("page_key") else set()
+    # A thorough/full walkthrough promises more than an opening screenshot.
+    # Before the first primary transition it must establish and inspect the
+    # opening page's meaningful local content.  Feature demos may legitimately
+    # use the opening page only as a brief context bridge, so preserve that
+    # narrower behaviour instead of forcing unrelated home-page coverage.
+    objective = " ".join(str(scenes[0].get(key, "")) for key in ("objective", "intent")).casefold()
+    thorough_opening = bool(re.search(r"\b(?:full|complete|entire|every|all)\b", objective))
+    opening_completion = next((item.get("page_completion") for item in scenes if item.get("page_completion")), None)
+    if thorough_opening and opening_completion and not all(
+        bool(opening_completion.get(key))
+        for key in ("established", "explored", "explained", "demonstrated_or_inspected", "verified_takeaway")
+    ):
+        failures.append("JOURNEY_OPENING_PAGE_INCOMPLETE")
     for index, scene in enumerate(scenes):
         if scene.get("story_phase") != "enter":
             continue
+        page_key = scene.get("page_key")
         chapter = []
         for following in scenes[index + 1 :]:
-            if following.get("story_phase") == "enter":
+            # A result navigation (for example a successful form submit)
+            # can change the URL without producing a separate ``enter`` beat.
+            # Do not fold that new page into the preceding page's contract;
+            # the preceding chapter is complete at the first page boundary.
+            # Otherwise an abstract outcome page can make the original page
+            # appear incomplete even though its establish/explore/explain/
+            # demonstrate/verify scenes all passed.
+            if following.get("story_phase") == "enter" or (
+                page_key and following.get("page_key") and following.get("page_key") != page_key
+            ):
                 break
             chapter.append(following)
         if not any(item.get("story_phase") in {"explore", "demonstrate", "verify"} for item in chapter):
@@ -179,7 +204,6 @@ def inspect_journey(scenes: list[dict]) -> dict:
             failures.append("JOURNEY_INCOMPLETE_PAGE_CONTRACT")
         if completion.get("missing_content_groups"):
             failures.append("JOURNEY_REQUIRED_CONTENT_GROUP_NOT_SHOWN")
-        page_key = scene.get("page_key")
         if page_key and page_key in completed_pages:
             failures.append("JOURNEY_REVISITS_COMPLETED_PAGE")
             continue

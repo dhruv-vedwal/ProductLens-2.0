@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind, Rect, Target
 from productlens.presentation.director import build_presentation_plan
+from productlens.presentation.scenes import build_scene_plan
 
 
 def test_small_target_keeps_native_scale_by_default():
@@ -42,7 +43,34 @@ def test_form_interaction_gets_bounded_focus_zoom_when_enabled():
         )],
     )
     decision = build_presentation_plan(trace, allow_camera_zoom=True).camera[0]
-    assert decision.zoom == 1.12
+    assert decision.zoom == 1.14
+
+
+def test_scene_directed_form_focus_reaches_the_renderer_camera():
+    trace = DemoTrace(
+        run_id="form-directed", objective="Fill form", started_at=datetime.now(UTC),
+        events=[InteractionEvent(
+            operation_id="fill", kind=OperationKind.FILL_TEXT, intent="Enter name",
+            target=Target(name="Name"), target_rect=Rect(x=400, y=350, width=360, height=48),
+            before={}, after={}, success=True, duration_ms=10,
+        )],
+    )
+    decision = build_presentation_plan(
+        trace, allow_camera_zoom=True, scene_plan=build_scene_plan(trace)
+    ).camera[0]
+    assert decision.zoom == 1.14
+
+
+def test_small_non_form_target_is_not_zoomed_without_explicit_scene_direction():
+    trace = DemoTrace(
+        run_id="small", objective="Open help", started_at=datetime.now(UTC),
+        events=[InteractionEvent(
+            operation_id="help", kind=OperationKind.CLICK, intent="Open help",
+            target=Target(name="Help"), target_rect=Rect(x=1300, y=80, width=30, height=28),
+            before={}, after={}, success=True, duration_ms=10,
+        )],
+    )
+    assert build_presentation_plan(trace, allow_camera_zoom=True).camera[0].zoom == 1.0
 
 
 def test_scene_requested_zoom_is_honoured_but_capped_to_safe_envelope():
@@ -56,8 +84,21 @@ def test_scene_requested_zoom_is_honoured_but_capped_to_safe_envelope():
     )
     scene = [{"event_id": trace.events[0].id, "camera": {"mode": "target-focus", "zoom": 1.35}}]
     decision = build_presentation_plan(trace, allow_camera_zoom=True, scene_plan=scene).camera[0]
-    assert decision.zoom == 1.2
-    assert "safe full-frame" in decision.reason
+    assert decision.zoom == 1.18
+    assert "safety bounds" in decision.reason
+
+
+def test_edge_form_control_keeps_a_smaller_safe_reframe():
+    trace = DemoTrace(
+        run_id="edge-form", objective="Fill form", started_at=datetime.now(UTC),
+        events=[InteractionEvent(
+            operation_id="fill", kind=OperationKind.FILL_TEXT, intent="Enter email",
+            target=Target(name="Email"), target_rect=Rect(x=8, y=80, width=320, height=44),
+            before={}, after={}, success=True, duration_ms=10,
+        )],
+    )
+    decision = build_presentation_plan(trace, allow_camera_zoom=True).camera[0]
+    assert decision.zoom == 1.14
 
 
 def test_cursor_direction_has_a_natural_bounded_waypoint_but_keeps_exact_target():

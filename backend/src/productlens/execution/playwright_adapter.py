@@ -54,6 +54,44 @@ class PlaywrightAdapter:
         """Return the preferred deterministic locator for compatibility callers."""
         return self.locator_candidates(target)[0][1]
 
+    async def wait_for_page_readiness(self, target: Target | None = None) -> None:
+        """Wait for a usable, hydrated page before a scene begins.
+
+        ``domcontentloaded`` is not enough for SPAs: a route can be present
+        while its transition shell, hydration, or target component is still
+        settling. This bounded check keeps the action semantic and avoids
+        baking arbitrary sleep durations into every workflow.
+        """
+        page = self.ensure_page()
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=3_000)
+        except PlaywrightError:
+            pass
+        try:
+            await page.wait_for_function(
+                "() => document.readyState !== 'loading' && !document.body?.matches('[aria-busy=\"true\"]')",
+                timeout=3_000,
+            )
+        except PlaywrightError:
+            # Long-lived websocket/analytics connections must not hold a scene
+            # indefinitely; the next semantic grounding still owns failure.
+            pass
+        if target is not None:
+            # Give a just-hydrated target a short opportunity to appear, but do
+            # not resolve or cache its locator here. Action execution performs
+            # the authoritative uniqueness/visibility grounding immediately
+            # afterwards.
+            for _ in range(8):
+                try:
+                    locator, _ = await self.grounded_locator(target)
+                    if await locator.is_visible():
+                        break
+                except (GroundingError, PlaywrightError):
+                    pass
+                await page.wait_for_timeout(125)
+        else:
+            await page.wait_for_timeout(120)
+
     def locator_candidates(self, target: Target) -> list[tuple[str, Any]]:
         """Return evidence-backed candidates in the reliability order.
 
@@ -75,18 +113,58 @@ class PlaywrightAdapter:
         if target.role and target.name:
             candidates.append(("role", self.page.get_by_role(target.role, name=target.name, exact=True)))
             candidates.append(("role_casefold", self.page.get_by_role(target.role, name=flexible_name, exact=False)))
+            # Accessible labels can legitimately change punctuation or
+            # truncation between discovery and production (for example an
+            # ellipsis rendered as ``...`` versus ``…``).  Keep an additional
+            # role-scoped contains query as a final semantic fallback; the
+            # uniqueness/visibility checks below still reject ambiguous
+            # matches, so this never degenerates into coordinate clicking.
+            candidates.append(("role_contains", self.page.get_by_role(target.role, name=target.name.replace("…", ""), exact=False)))
+            # Native controls can expose their option inventory as part of the
+            # accessible name. Use the semantic leading label as a bounded
+            # fallback; uniqueness and visibility checks still decide safety.
+            if len(target.name.split()) >= 4 and len(target.name) >= 32:
+                prefix = target.name.split()[0]
+                candidates.append((
+                    "role_prefix",
+                    self.page.get_by_role(
+                        target.role,
+                        name=re.compile(r"^" + re.escape(prefix) + r"\b", re.IGNORECASE),
+                        exact=False,
+                    ),
+                ))
         if target.label:
             candidates.append(("label", self.page.get_by_label(target.label, exact=True)))
+        # A selector captured from the observed DOM is stronger evidence for
+        # an action target than nearby descriptive text.  Forms commonly
+        # render a label and its input as separate nodes (for example a
+        # ``<span>Phone</span>`` beside ``<input name="phone">``).  Trying
+        # text first can therefore click the label or wrapper and make a valid
+        # plan fail in production.  Keep semantic role/label evidence first,
+        # then use the observed selector, and only then fall back to text.
+        if target.selector:
+            candidates.append(("selector", self.page.locator(target.selector)))
         if target.text:
             candidates.append(("text", self.page.get_by_text(target.text, exact=True)))
             flexible_text = re.compile("^" + r"\\s+".join(re.escape(part) for part in target.text.split()) + "$", re.IGNORECASE)
             candidates.append(("text_casefold", self.page.get_by_text(flexible_text)))
             candidates.append(("text_contains", self.page.get_by_text(target.text, exact=False)))
-        if target.selector:
-            candidates.append(("selector", self.page.locator(target.selector)))
         if not candidates:
             raise GroundingError(f"No deterministic grounding evidence for {target.name!r}")
         return candidates
+
+    @staticmethod
+    def _number_text_pattern(value: str | None) -> re.Pattern[str] | None:
+        """Match a displayed phone/reference value despite UI formatting.
+
+        Record-detail pages commonly add a country prefix or spaces after a
+        successful submission.  This is evidence lookup only, never an action
+        locator, and requires a sufficiently specific observed numeric value.
+        """
+        digits = "".join(re.findall(r"\d", value or ""))
+        if len(digits) < 7:
+            return None
+        return re.compile(r"\D*".join(map(re.escape, digits)))
 
     async def grounded_locator(self, target: Target) -> tuple[Any, str]:
         """Re-ground once through available DOM evidence; never use coordinates."""
@@ -113,7 +191,7 @@ class PlaywrightAdapter:
                     except PlaywrightError:
                         continue
                 if visible_indexes:
-                    # A portfolio can intentionally expose the same primary
+                    # An application can intentionally expose the same primary
                     # navigation in a top header and bottom dock. Both are
                     # semantically valid and visible; choose the highest one,
                     # which is what a human naturally uses while continuing a
@@ -154,9 +232,93 @@ class PlaywrightAdapter:
             if count:
                 return locator.first, strategy
             attempts.append(f"{strategy}:0-matches")
+        number_pattern = self._number_text_pattern(target.text)
+        if number_pattern is not None:
+            locator = self.page.get_by_text(number_pattern, exact=False)
+            try:
+                if await locator.count():
+                    # Outcome verification is an existence assertion. The
+                    # same displayed value can have several wrapper nodes;
+                    # unlike an action, the first visible semantic witness is
+                    # enough and remains traceable through its snapshot.
+                    return locator.first, "normalized_number_text"
+            except PlaywrightError:
+                attempts.append("normalized_number_text:query-error")
         raise GroundingError(
             f"Unable to find visible evidence for {target.name!r}; " + ", ".join(attempts)
         )
+
+    async def dismiss_safe_overlay(self) -> bool:
+        """Close a blocking, explicitly dismissible dialog before re-grounding.
+
+        Fresh production sessions can expose a branch/help/announcement dialog
+        that was not present in the exploration context.  Such an overlay is
+        presentation chrome, not the requested workflow.  We only dismiss a
+        visible dialog through a semantic close/cancel control; no coordinate
+        click or form submission is attempted.  The caller records this as a
+        recovery action in the scene trace.
+        """
+        self.ensure_page()
+        dialogs = self.page.get_by_role("dialog")
+        try:
+            count = await dialogs.count()
+        except PlaywrightError:
+            return False
+        for index in range(count):
+            dialog = dialogs.nth(index)
+            try:
+                if not await dialog.is_visible():
+                    continue
+                for label in ("Close", "Cancel", "Dismiss"):
+                    control = dialog.get_by_role("button", name=label, exact=False)
+                    if await control.count() and await control.first.is_visible():
+                        await control.first.click()
+                        await self.page.wait_for_timeout(350)
+                        return True
+                # Some libraries expose an icon-only close button with an
+                # aria-label but no accessible name in the dialog tree.
+                control = dialog.locator("button[aria-label*='close' i], button[data-testid*='close' i]")
+                if await control.count() and await control.first.is_visible():
+                    await control.first.click()
+                    await self.page.wait_for_timeout(350)
+                    return True
+            except PlaywrightError:
+                continue
+        return False
+
+    async def blocking_overlay(self, target: Target | None) -> str | None:
+        """Return a visible dialog that blocks the requested target, if any.
+
+        A dialog is not automatically a problem: planned form fields and close
+        controls legitimately live inside one.  It is a blocker only when the
+        next semantic target is outside the active dialog.  This check runs
+        before a scene is captured so captions can never describe obscured
+        product content.
+        """
+        self.ensure_page()
+        dialogs = self.page.get_by_role("dialog")
+        try:
+            for index in range(await dialogs.count()):
+                dialog = dialogs.nth(index)
+                if not await dialog.is_visible():
+                    continue
+                if target is not None:
+                    try:
+                        locator, _ = await self.visible_locator(target)
+                        inside = await locator.evaluate(
+                            "element => Boolean(element.closest('[role=dialog], dialog'))"
+                        )
+                        if inside:
+                            continue
+                    except GroundingError:
+                        # The requested target is unavailable while the dialog
+                        # is visible, which is exactly the blocked-state case.
+                        pass
+                label = (await dialog.inner_text()).strip().replace("\n", " ")
+                return label[:240] or "visible dialog"
+        except PlaywrightError:
+            return None
+        return None
 
     async def target_rect(self, target: Target | None) -> Rect | None:
         if target is None:
@@ -164,7 +326,25 @@ class PlaywrightAdapter:
         self.ensure_page()
         locator, _ = await self.grounded_locator(target)
         box = await locator.bounding_box()
-        return Rect(**box) if box else None
+        if box:
+            return Rect(**box)
+        # Some cloud/browser animation frames report no Playwright bounding
+        # box even though the freshly grounded control is visibly actionable.
+        # Read the DOM client box from that same locator rather than guessing
+        # a coordinate. This geometry drives cursor alignment and secret masks,
+        # so a recovered box remains evidence rather than a presentation hint.
+        try:
+            client_box = await locator.evaluate(
+                """element => {
+                    const rect = element.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0
+                      ? {x: rect.x, y: rect.y, width: rect.width, height: rect.height}
+                      : null;
+                }"""
+            )
+        except PlaywrightError:
+            client_box = None
+        return Rect(**client_box) if isinstance(client_box, dict) else None
 
     async def execute(self, operation: SemanticOperation) -> Any:
         self.ensure_page()
@@ -192,8 +372,6 @@ class PlaywrightAdapter:
             OperationKind.SEARCH,
         }:
             # `fill()` is correct for machine setup but skips the visible typing a demo must show.
-            if operation.target.test_id == "combobox-input":
-                return await locator.fill(str(operation.value))
             await locator.click()
             await locator.press("ControlOrMeta+A")
             await locator.press("Backspace")
@@ -207,7 +385,21 @@ class PlaywrightAdapter:
                 )
             return await locator.fill(str(operation.value["start"]))
         if operation.kind == OperationKind.SELECT_OPTION:
-            return await locator.select_option(str(operation.value))
+            try:
+                return await locator.select_option(str(operation.value))
+            except (AttributeError, PlaywrightError):
+                # Design-system comboboxes expose their choices through the
+                # accessibility tree instead of a native <select>. The value
+                # came from discovery's visible option probe, so this remains
+                # a semantic, evidence-backed choice rather than typed guess.
+                await locator.click()
+                option = self.page.get_by_role("option", name=str(operation.value), exact=True)
+                count = await option.count()
+                for index in range(count):
+                    candidate = option.nth(index)
+                    if await candidate.is_visible():
+                        return await candidate.click()
+                raise GroundingError(f"Observed option is no longer visible: {operation.value!r}")
         if operation.kind in {OperationKind.CHECK, OperationKind.CHOOSE_RADIO}:
             return await locator.check()
         if operation.kind == OperationKind.UNCHECK:
@@ -334,6 +526,29 @@ class PlaywrightAdapter:
             )
             return {**snapshot, "grounding_strategy": strategy}
         except PlaywrightError:  # Navigation can intentionally remove the previous target.
+            return {"url": self.page.url, "target_available": False}
+
+    async def snapshot_visible(self, target: Target) -> dict[str, Any]:
+        """Snapshot a visible outcome witness without action-level uniqueness.
+
+        This is intentionally limited to post-action proof.  It prevents a
+        successful submit/navigation from being reclassified as failed merely
+        because the old form control disappeared or the result lives inside
+        repeated layout wrappers.
+        """
+        self.ensure_page()
+        locator, strategy = await self.visible_locator(target)
+        try:
+            snapshot = await locator.evaluate(
+                """element => ({
+                    url: window.location.href,
+                    text: (element.innerText || element.textContent || '').slice(0, 500),
+                    value: ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) ? element.value : null,
+                    attributes: { className: typeof element.className === 'string' ? element.className : '' },
+                })"""
+            )
+            return {**snapshot, "grounding_strategy": strategy}
+        except PlaywrightError:
             return {"url": self.page.url, "target_available": False}
 
     async def view_state(self) -> tuple[Viewport, dict[str, float]]:

@@ -1,4 +1,5 @@
 import pytest
+from playwright.async_api import Error as PlaywrightError
 
 from productlens.credentials.service import CredentialError, EnvironmentCredentialService
 
@@ -23,3 +24,40 @@ async def test_authentication_fails_cleanly_when_login_needs_a_reference():
 
     with pytest.raises(CredentialError, match="AUTH_REQUIRED"):
         await EnvironmentCredentialService().authenticate_if_required(Page(), None)
+
+
+@pytest.mark.asyncio
+async def test_authentication_clears_existing_values_then_types_sequentially(monkeypatch):
+    monkeypatch.setenv("PRODUCTLENS_CREDENTIAL_DEMO_USERNAME", "demo@example.test")
+    monkeypatch.setenv("PRODUCTLENS_CREDENTIAL_DEMO_PASSWORD", "safe-test-password")
+
+    class Locator:
+        def __init__(self):
+            self.actions = []
+
+        async def count(self): return 1
+        async def click(self): self.actions.append("click")
+        async def press(self, value): self.actions.append(("press", value))
+        async def press_sequentially(self, value, *, delay): self.actions.append(("type", value, delay))
+        async def wait_for(self, **_kwargs): return None
+
+    username, password, submit = Locator(), Locator(), Locator()
+
+    class Page:
+        def locator(self, selector):
+            if "password" in selector and "submit" not in selector:
+                return password
+            if "submit" in selector:
+                return submit
+            return username
+
+        async def wait_for_timeout(self, _milliseconds): return None
+        async def wait_for_function(self, *_args, **_kwargs): return None
+
+    assert await EnvironmentCredentialService().authenticate_if_required(
+        Page(), "secret://productlens/demo"
+    )
+    assert username.actions[:3] == ["click", ("press", "ControlOrMeta+A"), ("press", "Backspace")]
+    assert password.actions[:3] == ["click", ("press", "ControlOrMeta+A"), ("press", "Backspace")]
+    assert username.actions[-1] == ("type", "demo@example.test", 70)
+    assert password.actions[-1] == ("type", "safe-test-password", 70)

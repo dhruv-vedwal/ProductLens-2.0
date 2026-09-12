@@ -26,6 +26,24 @@ def delivery_report(
         + list(synchronization.get("hard_failures", []))
         + list(visual_review.get("hard_failures", []))
     )
+    # Keep the delivery verdict explainable.  A flat failure list made it
+    # impossible for the retry coordinator to prove which layer owned a
+    # rejection, especially when the same symptom appeared in visual and
+    # synchronization reports.  Preserve first-seen ownership and the raw
+    # layer evidence without exposing provider secrets.
+    layer_inputs = {
+        "delivery": missing,
+        "execution": list(execution.get("hard_failures", [])),
+        "story": list(story.get("hard_failures", [])),
+        "video": list(video.get("hard_failures", [])),
+        "synchronization": list(synchronization.get("hard_failures", [])),
+        "visual_review": list(visual_review.get("hard_failures", [])),
+    }
+    owner_by_failure: dict[str, str] = {}
+    for layer, failures in layer_inputs.items():
+        for failure in failures:
+            owner_by_failure.setdefault(str(failure), layer)
+    hard_failures = list(dict.fromkeys(str(item) for item in hard_failures))
     quality = QualityReport(
         execution_score=float(execution.get("execution_score", 0)),
         workflow_score=float(execution.get("workflow_score", execution.get("execution_score", 0))),
@@ -36,6 +54,12 @@ def delivery_report(
         viewport_score=viewport_score,
         overall_score=0.0 if hard_failures else 1.0,
         hard_failures=hard_failures,
+        layer_evidence={
+            layer: [str(item) for item in failures]
+            for layer, failures in layer_inputs.items()
+            if failures
+        },
+        owner_by_failure=owner_by_failure,
         warnings=[
             *story.get("warnings", []), *video.get("warnings", []),
             *synchronization.get("warnings", []), *visual_review.get("warnings", []),

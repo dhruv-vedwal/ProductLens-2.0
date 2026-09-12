@@ -8,6 +8,9 @@ import pytest
 from productlens.artifacts.store import RunArtifacts
 from productlens.contracts.models import (
     DemoTrace,
+    EditorialBrief,
+    EditorialScene,
+    EditorialStoryboard,
     InteractionEvent,
     OperationKind,
     PresentationPlan,
@@ -18,10 +21,15 @@ from productlens.contracts.models import (
 from productlens.video.render import (
     CaptureDurationError,
     NarrationTimingError,
+    _build_editorial_source,
     _completed_segment_after_timeout,
     _editorial_cut_windows,
     _evidence_timed_captions,
     _frame_rate,
+    _outro_copy,
+    _promote_render,
+    _prepare_remotion_source,
+    _presentation_secret_redactions,
     _recording_space_cursor_paths,
     _remap_trace_for_cuts,
     _render_concurrency,
@@ -36,13 +44,136 @@ def test_frame_rate_parser_preserves_measured_source_cadence():
     assert _frame_rate("broken") == 0
 
 
+def test_prepared_h264_editorial_source_is_copied_without_a_second_encode(monkeypatch, tmp_path: Path):
+    raw = tmp_path / "editorial-source.mp4"
+    raw.write_bytes(b"already-encoded-evidence")
+    public = tmp_path / "public"
+
+    class Probe:
+        stdout = json.dumps({"streams": [{"codec_name": "h264", "pix_fmt": "yuv420p"}]})
+
+    monkeypatch.setattr("productlens.video.render.subprocess.run", lambda *args, **kwargs: Probe())
+    asset = _prepare_remotion_source(raw, public, "run")
+    assert asset == "run.mp4"
+    assert (public / asset).read_bytes() == raw.read_bytes()
+
+
+def test_render_promotion_falls_back_when_windows_rename_is_locked(monkeypatch, tmp_path: Path):
+    candidate = tmp_path / "candidate.mp4"
+    output = tmp_path / "final" / "demo.mp4"
+    candidate.write_bytes(b"complete-render")
+    output.parent.mkdir()
+    output.write_bytes(b"previous-render")
+
+    def locked_replace(self, target):
+        raise PermissionError("simulated media-player lock")
+
+    monkeypatch.setattr(Path, "replace", locked_replace)
+    _promote_render(candidate, output)
+
+    assert output.read_bytes() == b"complete-render"
+    assert not candidate.exists()
+
+
+def test_existing_content_addressed_editorial_source_is_reused(monkeypatch, tmp_path: Path):
+    raw = tmp_path / "raw.webm"
+    raw.write_bytes(b"immutable-recording")
+    windows = [(0.0, 4.0)]
+    def initial_encode(args, **kwargs):
+        Path(args[-1]).write_bytes(b"x" * 10_001)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr("productlens.video.render.subprocess.run", initial_encode)
+    first = _build_editorial_source(raw, render_dir=tmp_path / "render", windows=windows)
+    monkeypatch.setattr(
+        "productlens.video.render.subprocess.run",
+        lambda *args, **kwargs: pytest.fail("cached source must not invoke ffmpeg"),
+    )
+    assert _build_editorial_source(raw, render_dir=tmp_path / "render", windows=windows) == first
+
+
+def test_outro_copy_uses_the_approved_product_story_not_a_static_label():
+    board = EditorialStoryboard(
+        brief=EditorialBrief(
+            title="Service Console walkthrough", product_purpose="Service health and incident coordination",
+            opening_message="Welcome to the Service Console.",
+        ),
+        scenes=[EditorialScene(
+            id="result", operation_id="result", title="Resolved incident",
+            purpose="Verify the outcome", narration="The resolved incident leaves a clear handoff for the next responder.",
+            evidence=["page:https://example.test/incidents"], interaction="observe",
+            required_dwell_seconds=3, completion_criteria=["visible"],
+        )],
+        minimum_duration_seconds=60,
+    )
+    title, subtitle = _outro_copy(
+        DemoTrace(run_id="close", objective="Show incident coordination", started_at=datetime.now(UTC)), board
+    )
+    assert title == "That concludes the Service Console walkthrough."
+    assert "clear handoff" in subtitle
+
+
 def test_render_concurrency_is_conservative_and_configurable(monkeypatch):
     monkeypatch.delenv("PRODUCTLENS_REMOTION_CONCURRENCY", raising=False)
-    assert _render_concurrency() == 1
+    assert _render_concurrency() == 2
     monkeypatch.setenv("PRODUCTLENS_REMOTION_CONCURRENCY", "12")
     assert _render_concurrency() == 4
     monkeypatch.setenv("PRODUCTLENS_REMOTION_CONCURRENCY", "invalid")
-    assert _render_concurrency() == 1
+    assert _render_concurrency() == 2
+
+
+def test_presentation_masks_generic_credential_fields_until_navigation():
+    recorded_at = datetime.now(UTC)
+    email = InteractionEvent(
+        operation_id="email", kind=OperationKind.FILL_EMAIL, intent="Enter account email",
+        target=Target(name="Email address"), target_rect=Rect(x=40, y=60, width=360, height=48),
+        page_url="https://example.test/sign-in", occurred_at=recorded_at + timedelta(seconds=2),
+        before={}, after={}, success=True, duration_ms=1,
+    )
+    password = InteractionEvent(
+        operation_id="password", kind=OperationKind.FILL_TEXT, intent="Enter password",
+        target=Target(name="Password"), target_rect=Rect(x=40, y=120, width=360, height=48),
+        page_url="https://example.test/sign-in", occurred_at=recorded_at + timedelta(seconds=3),
+        before={}, after={}, success=True, duration_ms=1,
+    )
+    submit = InteractionEvent(
+        operation_id="submit", kind=OperationKind.SUBMIT, intent="Sign in",
+        page_url="https://example.test/home", occurred_at=recorded_at + timedelta(seconds=5),
+        before={}, after={}, success=True, duration_ms=1,
+    )
+    trace = DemoTrace(run_id="redact", objective="Demo", started_at=recorded_at, events=[email, password, submit])
+    beats = [
+        {"eventId": email.id, "start": 10, "end": 30, "x": 60, "y": 90, "width": 540, "height": 72},
+        {"eventId": password.id, "start": 30, "end": 60},
+        {"eventId": submit.id, "start": 60, "end": 90},
+    ]
+    masks = _presentation_secret_redactions(trace, beats, frame_rate=30)
+    assert [(item["x"], item["end"]) for item in masks] == [(60, 60), (40, 60)]
+    assert masks[0]["start"] == 0
+    assert all(item["label"] == "Sensitive value redacted" for item in masks)
+
+
+def test_presentation_uses_a_full_frame_secure_transition_when_legacy_geometry_is_missing():
+    event = InteractionEvent(
+        operation_id="token", kind=OperationKind.FILL_TEXT, intent="Enter access token",
+        target=Target(name="Access token"), before={}, after={}, success=True, duration_ms=1,
+    )
+    trace = DemoTrace(run_id="unsafe", objective="Demo", started_at=datetime.now(UTC), events=[event])
+    masks = _presentation_secret_redactions(trace, [{"eventId": event.id, "start": 0, "end": 10}], frame_rate=30)
+    assert masks == [{"eventId": event.id, "start": 0, "end": 10, "mode": "secure-full-frame", "label": "Signing in securely"}]
+
+
+def test_missing_credential_geometry_protects_the_pre_action_authentication_prelude():
+    recorded_at = datetime.now(UTC)
+    event = InteractionEvent(
+        operation_id="email", kind=OperationKind.FILL_EMAIL, intent="Enter account email",
+        target=Target(name="Email address"), before={}, after={}, success=True, duration_ms=1,
+        occurred_at=recorded_at + timedelta(seconds=3),
+    )
+    trace = DemoTrace(run_id="unsafe-prelude", objective="Demo", started_at=recorded_at, events=[event])
+    masks = _presentation_secret_redactions(trace, [{"eventId": event.id, "start": 90, "end": 120}], frame_rate=30)
+    assert masks[0]["start"] == 0
+    assert masks[0]["mode"] == "secure-full-frame"
 
 
 def test_editorial_cuts_preserve_native_action_and_reveal_edges():
@@ -92,6 +223,28 @@ def test_editorial_cuts_never_remove_the_middle_of_a_directed_scroll():
     # visible evidence in its own right, so its motion is retained at speed.
     assert len(windows) == 1
     assert windows[0] == pytest.approx((4.55, 32.9))
+
+
+def test_editorial_cuts_preserve_native_reading_dwell_only_for_selected_caption_scene():
+    recorded_at = datetime.now(UTC)
+    first = InteractionEvent(
+        operation_id="selected", kind=OperationKind.SCROLL_TO, intent="Explain selected evidence",
+        action_at=recorded_at + timedelta(seconds=4), occurred_at=recorded_at + timedelta(seconds=5),
+        before={}, after={"scroll_motion": {"duration_ms": 900}}, success=True, duration_ms=1,
+    )
+    second = InteractionEvent(
+        operation_id="transition", kind=OperationKind.SCROLL_TO, intent="Move through supporting context",
+        action_at=recorded_at + timedelta(seconds=15), occurred_at=recorded_at + timedelta(seconds=16),
+        before={}, after={"scroll_motion": {"duration_ms": 900}}, success=True, duration_ms=1,
+    )
+    trace = DemoTrace(run_id="dwell", objective="Demo", started_at=recorded_at, recording_started_at=recorded_at, events=[first, second])
+
+    windows = _editorial_cut_windows(
+        trace, 25, reading_holds_seconds={first.id: 6.0},
+    )
+
+    assert windows[0][1] >= 10.89
+    assert windows[1][1] < 18
 
 
 def test_cursor_geometry_is_normalized_from_css_viewport_to_recording_pixels():
@@ -394,9 +547,10 @@ def test_result_caption_is_not_clamped_to_the_next_cursor_action_beat(monkeypatc
             action_at=recorded_at + timedelta(seconds=2), occurred_at=recorded_at + timedelta(seconds=5),
             before={}, after={}, success=True, duration_ms=1,
         ),
-        InteractionEvent(
-            operation_id="second", kind=OperationKind.FILL_EMAIL, intent="Enter email",
-            action_at=recorded_at + timedelta(seconds=5.3), occurred_at=recorded_at + timedelta(seconds=9),
+            InteractionEvent(
+                operation_id="second", kind=OperationKind.FILL_EMAIL, intent="Enter email",
+                target=Target(name="Email"), target_rect=Rect(x=100, y=200, width=360, height=48),
+                action_at=recorded_at + timedelta(seconds=5.3), occurred_at=recorded_at + timedelta(seconds=9),
             before={}, after={}, success=True, duration_ms=1,
         ),
     ]
@@ -429,6 +583,28 @@ def test_presenter_welcome_begins_on_the_first_stable_product_frame():
     )
     assert timed is not None
     assert timed[0]["start"] == 0.0
+
+
+def test_presenter_welcome_waits_for_its_product_event_after_authentication():
+    recorded_at = datetime.now(UTC)
+    login = InteractionEvent(
+        operation_id="login", kind=OperationKind.SUBMIT, intent="Sign in",
+        action_at=recorded_at + timedelta(seconds=1), occurred_at=recorded_at + timedelta(seconds=3),
+        before={}, after={}, success=True, duration_ms=1,
+    )
+    opening = InteractionEvent(
+        operation_id="opening", kind=OperationKind.VERIFY_STATE, intent="Establish workspace",
+        action_at=recorded_at + timedelta(seconds=6), occurred_at=recorded_at + timedelta(seconds=7),
+        before={}, after={}, success=True, duration_ms=1,
+    )
+    trace = DemoTrace(run_id="post-auth-opening", objective="Demo", started_at=recorded_at, recording_started_at=recorded_at, events=[login, opening])
+    timed = _evidence_timed_captions(
+        trace,
+        [{"scene_id": opening.id, "opening": True, "text": "Welcome to the workspace. We will review the verified workflow."}],
+        screen_seconds=12,
+    )
+    assert timed is not None
+    assert timed[0]["start"] >= 6
 
 
 def test_render_namespaces_media_asset_to_current_retry_artifact_directory(monkeypatch, tmp_path: Path):

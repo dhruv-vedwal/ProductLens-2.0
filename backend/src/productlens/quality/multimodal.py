@@ -71,13 +71,14 @@ def review_multimodal(
     returns the concrete samples for manual inspection; semantic judgement can
     still be augmented by a provider callback.
     """
+    video = Path(str(packet["video_path"]))
+    seconds = [float(value) for value in packet.get("sample_seconds", [])]
+    if not seconds:
+        seconds = [2.0, 10.0, 30.0]
+    review_root = video.parent / "review-frames"
+    frames = extract_review_frames(video=video, output_directory=review_root, sample_seconds=seconds)
+    review_packet = {**packet, "frames": frames}
     if reviewer is None:
-        video = Path(str(packet["video_path"]))
-        seconds = [float(value) for value in packet.get("sample_seconds", [])]
-        if not seconds:
-            seconds = [2.0, 10.0, 30.0]
-        review_root = video.parent / "review-frames"
-        frames = extract_review_frames(video=video, output_directory=review_root, sample_seconds=seconds)
         failures = [] if frames else ["RENDERED_FRAME_EXTRACTION_FAILED"]
         return {
             "status": "deterministic_complete",
@@ -85,9 +86,9 @@ def review_multimodal(
             "hard_failures": failures,
             "warnings": ["SEMANTIC_VISUAL_REVIEW_REQUIRES_HUMAN_OR_CONFIGURED_MODEL"],
             "findings": [{"kind": "rendered_frame", **frame} for frame in frames],
-            "packet": {key: value for key, value in packet.items() if key != "video_path"},
+            "packet": {key: value for key, value in review_packet.items() if key not in {"video_path", "frames"}},
         }
-    result = reviewer(packet)
+    result = reviewer(review_packet)
     if not isinstance(result, dict):
         raise TypeError("multimodal reviewer must return a mapping")
     return {

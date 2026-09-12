@@ -47,6 +47,19 @@ def test_journey_rejects_route_sweep_without_page_exploration():
     assert "JOURNEY_HAS_NAVIGATION_WITHOUT_EXPLORATION" in inspect_journey(build_journey(trace, scenes))["hard_failures"]
 
 
+def test_full_walkthrough_rejects_an_opening_page_that_is_only_glimpsed_before_navigation():
+    trace = DemoTrace(run_id="opening-gap", objective="Complete walkthrough of the product", started_at=datetime.now(UTC), events=[
+        _event("opening", OperationKind.VERIFY_STATE, "https://example.test/"),
+        _event("features", OperationKind.OPEN_NAVIGATION_ITEM, "https://example.test/features"),
+        _event("features-content", OperationKind.SCROLL_TO, "https://example.test/features"),
+    ], outcome_verified=True)
+    scenes = [{"event_id": event.id, "dwell_seconds": 2} for event in trace.events]
+
+    report = inspect_journey(build_journey(trace, scenes))
+
+    assert "JOURNEY_OPENING_PAGE_INCOMPLETE" in report["hard_failures"]
+
+
 def test_journey_rejects_a_return_to_an_already_completed_page():
     trace = DemoTrace(run_id="bad-return", objective="walkthrough", started_at=datetime.now(UTC), events=[
         _event("opening", OperationKind.VERIFY_STATE, "https://example.test/"),

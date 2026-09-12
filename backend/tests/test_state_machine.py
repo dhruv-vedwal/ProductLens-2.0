@@ -22,3 +22,18 @@ def test_unknown_event_cannot_skip_compiled_steps():
     machine = WorkflowStateMachine.from_operations([])
     with pytest.raises(InvalidTransition):
         machine.transition("invented-event", verified=True)
+
+
+def test_state_graph_artifact_records_the_postcondition_gate():
+    operation = SemanticOperation(
+        kind=OperationKind.CLICK,
+        intent="Open details",
+        target=Target(name="Details", selector="button.details"),
+        postconditions=[Postcondition(kind="visible", expected=True)],
+    )
+
+    artifact = WorkflowStateMachine.from_operations([operation]).artifact()
+
+    assert artifact["initial_state"] == "NEW"
+    assert artifact["transitions"][0]["event"] == operation.id
+    assert artifact["transitions"][0]["required_postconditions"] == ["visible"]

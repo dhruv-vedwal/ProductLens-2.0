@@ -37,3 +37,18 @@ def test_settings_reserves_browserbase_finalization_time(monkeypatch, tmp_path):
     settings = Settings.from_environment()
 
     assert settings.cloud_capture_timeout_seconds == 30
+
+
+def test_settings_requires_explicit_multimodal_review_opt_in(monkeypatch, tmp_path):
+    source = tmp_path / ".env"
+    source.write_text(
+        "PRODUCTLENS_AUTH_SECRET=0123456789abcdef0123456789abcdef\n"
+        "OPENROUTER_VISION_MODEL=provider/vision\n"
+        "PRODUCTLENS_MULTIMODAL_REVIEW_ENABLED=true\n"
+    )
+    monkeypatch.setenv("PRODUCTLENS_ENV_FILE", str(source))
+
+    settings = Settings.from_environment()
+
+    assert settings.multimodal_review_enabled is True
+    assert settings.openrouter_vision_model == "provider/vision"

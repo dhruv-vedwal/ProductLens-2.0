@@ -4,6 +4,8 @@ from productlens.contracts.models import DemoTrace, InteractionEvent, OperationK
 from productlens.narration.script import (
     captions_from_audio_duration,
     captions_from_measured_segments,
+    captions_from_duration,
+    recommended_caption_duration,
     script_from_trace,
 )
 
@@ -61,3 +63,14 @@ def test_script_adapts_editorial_lens_to_audience():
     )
     assert "engineering context" in script_from_trace(trace, audience="recruiter")[0]["text"]
     assert "implementation-relevant" in script_from_trace(trace, audience="technical developer")[0]["text"]
+
+
+def test_recommended_caption_duration_covers_longest_equal_slice():
+    script = [
+        {"event_id": "one", "text": "A short line."},
+        {"event_id": "two", "text": "This deliberately longer line needs enough time for silent reading."},
+    ]
+    duration = recommended_caption_duration(script)
+    captions = captions_from_duration(script, duration)
+    longest = max(len(item["text"].split()) / 3.2 + 0.25 for item in script)
+    assert all(item["end"] - item["start"] + 0.02 >= longest for item in captions)

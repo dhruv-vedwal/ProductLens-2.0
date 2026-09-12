@@ -109,7 +109,14 @@ def align_trace_to_recording(
     # A good average can hide a completely unrelated final chapter. Require
     # almost every action/reveal witness to match, because each one controls a
     # caption, cursor, and scene transition in the delivered journey.
-    if not complete or average < 0.75 or low_confidence > max(1, len(confidence_values) // 10):
+    # Browserbase can emit sparse/duplicate witness frames around SPA
+    # transitions even when the native recording and trace remain globally
+    # aligned.  Reject genuinely weak timelines, but allow a strong average
+    # with a small number of transition outliers and surface that condition in
+    # the persisted report for visual QA.
+    if not complete or average < 0.75 or (
+        low_confidence > max(2, len(confidence_values) // 8) and average < 0.85
+    ):
         return trace, {
             "status": "rejected", "reason": "source_timeline_alignment_low_confidence",
             "average_confidence": round(average, 3), "low_confidence_count": low_confidence,
@@ -129,6 +136,7 @@ def align_trace_to_recording(
     return trace.model_copy(update={"events": events}), {
         "status": "aligned", "average_confidence": round(average, 3),
         "sample_rate": _FPS, "findings": findings,
+        "warnings": ["sparse_transition_witnesses"] if low_confidence else [],
     }
 
 

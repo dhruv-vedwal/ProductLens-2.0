@@ -9,10 +9,26 @@ from productlens.contracts.models import (
 from productlens.planning.candidates import (
     _editorial_landmark_groups,
     _page_landmarks,
+    _select_representative_groups,
     build_page_complete_proposal,
     candidate_flows_from_evidence,
     select_candidate_flow,
 )
+
+
+def test_representative_groups_prioritize_semantic_roles_over_even_spacing():
+    groups = [
+        [ObservedElement(tag="h2", name="Professional History", selector="#history")],
+        [ObservedElement(tag="h3", name="Senior Engineer", selector="#senior", text="Current role and contributions")],
+        [ObservedElement(tag="h3", name="Software Development Intern", selector="#intern", text="Earlier internship contribution")],
+        [ObservedElement(tag="h2", name="Technical Skills", selector="#skills")],
+        [ObservedElement(tag="h2", name="Academic Foundation", selector="#academic")],
+    ]
+
+    selected = _select_representative_groups(groups, maximum=3)
+    names = [item.name for group in selected for item in group]
+
+    assert names == ["Professional History", "Senior Engineer", "Software Development Intern"]
 
 
 def test_editorial_landmark_groups_preserve_every_heading_without_one_action_per_card():
@@ -94,9 +110,14 @@ def test_page_complete_proposal_finishes_home_before_timeline_without_returning_
         if step.page_url == "https://portfolio.test/timeline"
         and step.kind.value == "ScrollTo"
     ]
-    # Each observed career card is a required group, not a three-beat budget
-    # casualty. This protects both the current role and the internship scene.
-    assert timeline_content == ["Smartsevak", "Datansh Solutions"]
+    # The current role is already readable when Timeline opens, so it is held
+    # as a verified state rather than faking a zero-distance scroll. The
+    # internship remains a real continuous exploration beat.
+    assert timeline_content == ["Datansh Solutions"]
+    assert any(
+        step.kind.value == "VerifyState" and step.target and step.target.name == "Smartsevak"
+        for step in proposal.steps
+    )
     datansh = next(
         step for step in proposal.steps
         if step.target and step.target.name == "Datansh Solutions"
@@ -168,6 +189,53 @@ def test_page_landmarks_keep_one_representative_numbered_collection_item():
     assert [item.name for item in _page_landmarks(context, page)] == ["Weeks", "Week 1"]
 
 
+def test_page_landmarks_exclude_record_grid_chrome_and_placeholder_controls():
+    root = "https://app.test/bookings"
+    page = PageKnowledge(
+        url=root, title="Bookings", purpose="appointment workspace",
+        visible_facts=["List Bookings :: Manage and track appointments in one workspace."],
+        fingerprint="bookings",
+    )
+    context = ProductContext(
+        url=root, title="Bookings", application_type="dashboard",
+        page_knowledge=[page],
+        elements=[
+            ObservedElement(tag="h1", name="Bookings", selector="h1", source_url=root, actionable=False),
+            ObservedElement(tag="span", role="button", name="PATIENT", selector="span", source_url=root),
+            ObservedElement(tag="td", name="A real customer", selector="td", source_url=root),
+            ObservedElement(tag="td", name="22 Sep 2026 11:00", selector="td", source_url=root),
+            ObservedElement(tag="input", name="element-40", selector="input", source_url=root),
+            ObservedElement(tag="button", name="Create", selector="button", source_url=root),
+        ],
+    )
+    landmarks = _page_landmarks(context, page)
+    names = [item.name for item in landmarks]
+    assert names == ["Bookings"]
+
+
+def test_page_complete_proposal_never_emits_anonymous_form_element_target():
+    root = "https://app.test/bookings"
+    page = PageKnowledge(
+        url=root, title="Bookings", purpose="appointment workspace",
+        visible_sections=["Bookings"], scroll_landmarks=["Bookings"],
+        visible_facts=["Bookings :: Manage appointments and review their current status."],
+        fingerprint="bookings",
+    )
+    context = ProductContext(
+        url=root, title="Bookings", application_type="dashboard",
+        page_knowledge=[page],
+        elements=[
+            ObservedElement(tag="h1", name="Bookings", selector="h1", source_url=root, actionable=False),
+            ObservedElement(tag="input", name="element-40", selector="input", source_url=root),
+        ],
+    )
+    from productlens.planning.candidates import CandidateDemoFlow
+    proposal = build_page_complete_proposal(
+        context, CandidateDemoFlow(name="bookings", page_urls=[root], estimated_duration_seconds=30, score=1.0)
+    )
+    assert all(step.target is None or not step.target.name.startswith("element-") for step in proposal.steps)
+
+
 @pytest.mark.asyncio
 async def test_full_storyboard_reserves_time_for_native_motion_instead_of_five_second_holds():
     from productlens.presentation.editorial import build_editorial_storyboard
@@ -183,3 +251,22 @@ async def test_full_storyboard_reserves_time_for_native_motion_instead_of_five_s
     operation_scenes = [scene for scene in storyboard.scenes if scene.operation_id]
     assert max(scene.required_dwell_seconds for scene in operation_scenes) < 5.0
     assert min(scene.required_dwell_seconds for scene in operation_scenes) >= 2.25
+
+
+@pytest.mark.asyncio
+async def test_focused_multi_beat_story_allocates_native_reading_time_to_script():
+    from productlens.presentation.editorial import build_editorial_storyboard
+
+    context = _context()
+    plan = await ProductionPlanningService(_UnusedProvider()).plan(
+        objective="Create a walkthrough of the task board workflow for a delivery manager",
+        context=context,
+        target_duration_seconds=90,
+    )
+    storyboard = build_editorial_storyboard(context, plan)
+    operation_scenes = [scene for scene in storyboard.scenes if scene.operation_id]
+    # Focused stories with several evidence beats must capture enough native
+    # page time for the approved captions; a renderer must not manufacture it
+    # later by freezing or slowing the source footage.
+    assert len(operation_scenes) > 4
+    assert min(scene.required_dwell_seconds for scene in operation_scenes) >= 6.0

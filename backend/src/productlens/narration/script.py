@@ -103,11 +103,24 @@ def recommended_caption_duration(script: list[dict[str, object]], *, minimum_sce
     """
     if not script:
         return 0.0
-    words = sum(len(str(item.get("text", "")).split()) for item in script)
-    reading_seconds = words / 2.6
-    scene_floor = len(script) * max(1.0, float(minimum_scene_seconds))
+    # Keep this calculation in lockstep with the synchronization gate.  The
+    # previous aggregate word-rate estimate could produce a per-caption slice
+    # just below the reader dwell requirement after rounding, rejecting an
+    # otherwise valid fixture or URL render.  Allocate each line independently
+    # and then add a small transition allowance between scenes.
+    per_scene_requirements = [
+        max(
+            float(minimum_scene_seconds),
+            len(str(item.get("text", "")).split()) / 3.2 + 0.25,
+        )
+        for item in script
+    ]
+    # ``captions_from_duration`` gives every scene an equal slice.  Therefore
+    # the total must be based on the longest line, not the sum of independent
+    # requirements, otherwise a single long sentence is still under-dwelled.
+    scene_floor = max(per_scene_requirements) * len(script)
     transition_seconds = max(0.0, (len(script) - 1) * 0.35)
-    return round(max(3.0, reading_seconds, scene_floor + transition_seconds), 2)
+    return round(max(3.0, scene_floor + transition_seconds), 2)
 
 
 def captions_from_measured_segments(

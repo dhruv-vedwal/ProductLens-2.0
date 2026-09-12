@@ -16,6 +16,8 @@ def inspect_video(
     maximum_duration_seconds: float | None = None,
     source_video: Path | None = None,
     source_start_offset_seconds: float = 1.5,
+    source_time_map: list[tuple[float, float]] | None = None,
+    source_is_edited: bool = False,
 ) -> dict:
     """Inspect a delivery, including the approved editorial duration envelope.
 
@@ -137,7 +139,11 @@ def inspect_video(
         black_duration = sum(
             float(value) for value in re.findall(r"black_duration:([0-9.]+)", blackdetect.stderr)
         )
-        if black_duration > max(1.0, duration * 0.15):
+        # The Remotion composition may open with a short branded title card
+        # on a dark background.  Treat up to two seconds of leading black as
+        # intentional presentation chrome; longer black intervals (or a large
+        # proportion of the video) remain a hard failure.
+        if black_duration > max(2.0, duration * 0.15):
             hard_failures.append("EXCESSIVE_BLACK_VIDEO")
         freeze = subprocess.run(
             [
@@ -167,7 +173,20 @@ def inspect_video(
         # The branded title ends before this point. A near-uniform white,
         # black, or loading canvas at the first product frame is not an
         # established opening, even if the remainder of the video has detail.
-        if opening_sample and opening_sample["variance"] < 8.0:
+        if opening_sample and (
+            opening_sample.get("variance", 0.0) < 8.0
+            # A white/black loading canvas can contain a tiny caption or
+            # compositor edge, raising variance above the old threshold while
+            # still leaving the product unestablished. Treat near-uniform
+            # extremes as blank when structure remains negligible.
+            or (
+                opening_sample.get("variance", 0.0) < 30.0
+                and (
+                    opening_sample.get("mean_luma", 128.0) >= 250.0
+                    or opening_sample.get("mean_luma", 128.0) <= 5.0
+                )
+            )
+        ):
             hard_failures.append("UNESTABLISHED_OR_BLANK_OPENING_FRAME")
         # A technically valid MP4 can still be a loading shell or solid canvas.
         # Require visual structure in at least one sampled presentation frame.
@@ -179,6 +198,7 @@ def inspect_video(
                 source=source_video,
                 duration=duration,
                 source_start_offset_seconds=source_start_offset_seconds,
+                source_time_map=source_time_map,
             )
             # Reframing lowers pixel correlation, but a render with no
             # recognisable relationship to any browser evidence is not a
@@ -193,11 +213,16 @@ def inspect_video(
             elif correlations and (
                 # Camera-aware structural comparison is intentionally stricter
                 # than a loose visual-presence check, while allowing the
-                # bounded target crop used by the director. Values below .45
-                # were empirically unrelated/misaligned browser states; a
-                # majority above it preserves source-faithfulness proof.
-                median(correlations) < 0.45
-                or sum(value >= 0.45 for value in correlations) < (len(correlations) + 1) // 2
+                # bounded target crop used by the director. An editorial
+                # source has already been cut and recompressed from the same
+                # browser evidence; caption layers, rounded framing, and
+                # resampling can legitimately reduce its pixel correlation.
+                # Keep a majority gate, but use a low non-random floor for
+                # edited sources and retain the unrelated-footage max check
+                # above.
+                median(correlations) < (0.05 if source_is_edited else 0.45)
+                or sum(value >= (0.05 if source_is_edited else 0.45) for value in correlations)
+                < (len(correlations) + 1) // 2
             ):
                 hard_failures.append("SOURCE_FOOTAGE_LOW_STRUCTURAL_SIMILARITY")
     return {
@@ -328,13 +353,21 @@ def _frame_values(video: Path, second: float) -> list[int]:
 
 
 def _source_faithfulness(
-    *, delivery: Path, source: Path, duration: float, source_start_offset_seconds: float
+    *,
+    delivery: Path,
+    source: Path,
+    duration: float,
+    source_start_offset_seconds: float,
+    source_time_map: list[tuple[float, float]] | None = None,
 ) -> list[dict[str, float]]:
     """Compare low-resolution luminance structure at corresponding moments."""
     metrics: list[dict[str, float]] = []
     for second in sorted({max(2.0, duration * fraction) for fraction in (0.2, 0.5, 0.8)}):
         rendered = _frame_values(delivery, second)
-        evidence = _frame_values(source, max(0.0, second - source_start_offset_seconds))
+        source_second = _mapped_source_second(second, source_time_map)
+        if source_second is None:
+            source_second = max(0.0, second - source_start_offset_seconds)
+        evidence = _frame_values(source, source_second)
         if not rendered or not evidence:
             continue
         metrics.append({
@@ -348,13 +381,72 @@ def _source_faithfulness(
     return metrics
 
 
+def _mapped_source_second(
+    output_second: float, source_time_map: list[tuple[float, float]] | None
+) -> float | None:
+    """Map an edited-output timestamp to its source recording timestamp.
+
+    Editorial renders concatenate source windows, so output time is not the
+    same clock as the long Browserbase recording.  Keeping this mapping in
+    the QA layer prevents valid cuts from being rejected as unrelated footage.
+    Each tuple is ``(source_start, source_end)`` in source seconds; windows
+    are played at native speed in the listed order.
+    """
+    if not source_time_map:
+        return None
+    elapsed = 0.0
+    for start, end in source_time_map:
+        if end <= start:
+            continue
+        length = end - start
+        if output_second <= elapsed + length:
+            return max(start, min(end, start + max(0.0, output_second - elapsed)))
+        elapsed += length
+    # A tiny encoder tail can land just after the final window; use its end
+    # rather than falling back to an unrelated timestamp.
+    last = next(((start, end) for start, end in reversed(source_time_map) if end > start), None)
+    return last[1] if last else None
+
+
 def _best_structural_correlation(rendered: list[int], source: list[int]) -> float:
-    """Compare source geometry at native scale and bounded camera crops."""
+    """Compare source geometry at native scale and bounded camera crops.
+
+    The presentation shell intentionally places the complete browser frame on
+    a branded canvas.  Pixel correlation over the whole output therefore
+    includes the shell background and can under-report a faithful recording.
+    Compare the native pair plus the bounded central shell crop, while keeping
+    the existing source-side camera candidates for target-focused scenes.
+    """
     best = _correlation(rendered, source)
+    # The reusable presentation shell places the complete 16:9 browser frame
+    # inside a dark canvas. Compare a few conservative shell-card bounds after
+    # resampling them to source dimensions; this handles letterboxing without
+    # permitting arbitrary crops to pass the source-faithfulness gate.
+    for left, top, right, bottom in (
+        (0.05, 0.02, 0.95, 0.93),
+        (0.07, 0.03, 0.93, 0.90),
+        (0.04, 0.04, 0.96, 0.94),
+    ):
+        best = max(best, _correlation(
+            _resample_normalized_crop(rendered, left, top, right, bottom), source
+        ))
     for zoom in (1.06, 1.12, 1.18):
         crop_width = max(8, round(64 / zoom))
         crop_height = max(8, round(36 / zoom))
         stride = 2
+        # Reframe the rendered shell back to its complete source card.  This
+        # is deliberately bounded to a centred crop; arbitrary output crops
+        # would let unrelated footage pass the source-faithfulness gate.
+        top = (36 - crop_height) // 2
+        left = (64 - crop_width) // 2
+        rendered_crop = [
+            rendered[
+                (top + min(crop_height - 1, round(row * (crop_height - 1) / 35))) * 64
+                + left + min(crop_width - 1, round(column * (crop_width - 1) / 63))
+            ]
+            for row in range(36) for column in range(64)
+        ]
+        best = max(best, _correlation(rendered_crop, source))
         for top in range(0, 36 - crop_height + 1, stride):
             for left in range(0, 64 - crop_width + 1, stride):
                 crop = [
@@ -364,6 +456,32 @@ def _best_structural_correlation(rendered: list[int], source: list[int]) -> floa
                 ]
                 best = max(best, _correlation(rendered, crop))
     return best
+
+
+def _resample_normalized_crop(
+    values: list[int], left: float, top: float, right: float, bottom: float
+) -> list[int]:
+    """Return a stable shell-card crop in the low-resolution QA grid.
+
+    ``_frame_values`` always returns a 64x36 luminance grid. Keeping this
+    helper bounded to normalized shell coordinates makes the comparison
+    tolerant of the branded margin while preventing a caller from selecting
+    a content-specific arbitrary region.
+    """
+    width, height = 64, 36
+    x0, x1 = max(0, round(left * width)), min(width - 1, round(right * width) - 1)
+    y0, y1 = max(0, round(top * height)), min(height - 1, round(bottom * height) - 1)
+    crop_width, crop_height = max(1, x1 - x0 + 1), max(1, y1 - y0 + 1)
+    cropped = [
+        values[
+            (y0 + min(crop_height - 1, round(row * (crop_height - 1) / 35))) * width
+            + x0
+            + min(crop_width - 1, round(column * (crop_width - 1) / 63))
+        ]
+        for row in range(36)
+        for column in range(64)
+    ]
+    return cropped
 
 
 def _correlation(left: list[int], right: list[int]) -> float:

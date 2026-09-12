@@ -14,14 +14,36 @@ class FailureCode(StrEnum):
     PLANNING_FAILURE = "PLANNING_FAILURE"
     DISCOVERY_FAILURE = "DISCOVERY_FAILURE"
     AUTH_FAILURE = "AUTH_FAILURE"
+    CAPTCHA_FAILURE = "CAPTCHA_FAILURE"
+    APPLICATION_BLOCKER = "APPLICATION_BLOCKER"
     TARGET_RESOLUTION_FAILURE = "TARGET_RESOLUTION_FAILURE"
     EXECUTION_FAILURE = "EXECUTION_FAILURE"
     STATE_VERIFICATION_FAILURE = "STATE_VERIFICATION_FAILURE"
+    CAPTURE_FAILURE = "CAPTURE_FAILURE"
     TRACE_FAILURE = "TRACE_FAILURE"
     PRESENTATION_FAILURE = "PRESENTATION_FAILURE"
+    NARRATION_FAILURE = "NARRATION_FAILURE"
+    AUDIO_FAILURE = "AUDIO_FAILURE"
+    RENDER_FAILURE = "RENDER_FAILURE"
+    VIDEO_QA_FAILURE = "VIDEO_QA_FAILURE"
     PROVIDER_FAILURE = "PROVIDER_FAILURE"
     TIMEOUT = "TIMEOUT"
+    UNSUPPORTED_APPLICATION = "UNSUPPORTED_APPLICATION"
     UNSUPPORTED_INTERACTION = "UNSUPPORTED_INTERACTION"
+
+
+class AudienceProfile(BaseModel):
+    """Structured viewer context shared by planning and editorial layers."""
+
+    type: Literal[
+        "general_user", "sales", "recruiter", "founder", "prospect",
+        "support", "onboarding", "internal",
+    ] = "prospect"
+    priorities: list[str] = Field(default_factory=list, max_length=12)
+    vocabulary: Literal["plain", "technical", "executive"] = "plain"
+    depth: Literal["overview", "standard", "deep"] = "standard"
+    narration_style: Literal["conversational", "concise", "technical", "persuasive"] = "conversational"
+    workflow_preferences: list[str] = Field(default_factory=list, max_length=12)
 
 
 class WorkflowState(StrEnum):
@@ -185,7 +207,10 @@ class EditorialScene(BaseModel):
     purpose: str = Field(min_length=1, max_length=420)
     narration: str = Field(min_length=1, max_length=520)
     evidence: list[str] = Field(min_length=1)
-    interaction: Literal["opening", "scroll", "navigate", "click", "observe"]
+    # ``type`` and ``submit`` are distinct presentational beats. Treating
+    # them as generic observation hid the causal form journey and also let a
+    # model replace their carefully grounded narration with field-label copy.
+    interaction: Literal["opening", "scroll", "navigate", "click", "type", "submit", "observe"]
     required_dwell_seconds: float = Field(ge=1.0, le=20.0)
     completion_criteria: list[str] = Field(min_length=1)
     caption_safe_zone: Literal["bottom", "top"] = "bottom"
@@ -193,7 +218,7 @@ class EditorialScene(BaseModel):
     page_url: str | None = None
     visible_proof: list[str] = Field(default_factory=list)
     action_classification: Literal["essential", "transitional", "dead_time"] = "essential"
-    transition: str = "cut"
+    transition: Literal["cut", "dissolve", "match_scroll", "hold"] = "cut"
 
 
 class EditorialStoryboard(BaseModel):
@@ -213,6 +238,40 @@ class EditorialNarrationDraft(BaseModel):
     """Small editorial-only contract; it cannot alter execution or timing."""
 
     lines: list[EditorialNarrationLine] = Field(min_length=1, max_length=60)
+
+
+class NarrationSegment(BaseModel):
+    """One approved line shared by captions, cursor timing, and optional TTS."""
+
+    scene_id: str = Field(min_length=1, max_length=120)
+    event_id: str = Field(min_length=1, max_length=120)
+    text: str = Field(min_length=10, max_length=520)
+    # Editorial lines carry evidence IDs; deterministic compatibility lines may
+    # retain a redacted browser-state mapping until they are converted into
+    # evidence references by the owning storyboard layer.
+    evidence: list[str] = Field(default_factory=list, max_length=24)
+    facts: list[str] | dict[str, Any] = Field(default_factory=list)
+    opening: bool = False
+    start_seconds: float | None = Field(default=None, ge=0)
+    end_seconds: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def valid_interval(self) -> "NarrationSegment":
+        if self.start_seconds is not None and self.end_seconds is not None:
+            if self.end_seconds <= self.start_seconds:
+                raise ValueError("narration segment end must be after its start")
+        return self
+
+
+class NarrationScript(BaseModel):
+    """Versioned script contract owned by the storyboard, not the renderer."""
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["caption_only", "tts"] = "caption_only"
+    audience: str = Field(default="product prospect", min_length=1, max_length=160)
+    audience_profile: AudienceProfile = Field(default_factory=AudienceProfile)
+    timing_owner: Literal["scene", "measured_audio"] = "scene"
+    segments: list[NarrationSegment] = Field(min_length=1, max_length=60)
 
 
 class Rect(BaseModel):
@@ -272,9 +331,10 @@ class DemoTrace(BaseModel):
     run_id: str
     objective: str
     started_at: datetime
-    # The evidence recorder starts before the page is navigated.  Retaining its
-    # clock origin lets the presentation layer place cursors and camera beats on
-    # the frame where the verified interaction actually appears.
+    # The provider recorder may start before navigation, but this clock origin
+    # is set only once the requested page is stable. It lets presentation trim
+    # provisioning/navigation noise and place beats on the verified product
+    # frame rather than a blank opening.
     recording_started_at: datetime | None = None
     completed_at: datetime | None = None
     events: list[InteractionEvent] = Field(default_factory=list)
@@ -389,10 +449,18 @@ class ProductContext(BaseModel):
     page_knowledge: list[PageKnowledge] = Field(default_factory=list)
     feature_knowledge: list[FeatureKnowledge] = Field(default_factory=list)
     candidate_demo_flows: list[CandidateDemoFlow] = Field(default_factory=list)
+    # Concrete interaction capabilities are collected during reversible
+    # exploration. They remain dictionaries here to preserve resumability of
+    # older discovery artifacts; new writers use ``ActionCapability`` below.
+    capabilities: list[dict[str, Any]] = Field(default_factory=list)
     # Discovery records only safe read-only navigation probes. A route visit is
     # never proof that an application workflow or side effect was executed.
     exploration_actions: list[str] = Field(default_factory=list)
     rejected_routes: list[str] = Field(default_factory=list)
+    # The effective budget is evidence from discovery, not an implicit
+    # runtime override. Full walkthroughs may expand it only after visible
+    # primary navigation proves the default bound is insufficient.
+    effective_discovery_budget: DiscoveryBudget | None = None
 
 
 class ProductKnowledge(BaseModel):
@@ -409,6 +477,7 @@ class ProductKnowledge(BaseModel):
     page_knowledge: list[PageKnowledge] = Field(default_factory=list)
     workflow_knowledge: list[CandidateDemoFlow] = Field(default_factory=list)
     form_schemas: list[FormSchema] = Field(default_factory=list)
+    capabilities: list[dict[str, Any]] = Field(default_factory=list)
     interaction_patterns: list[str] = Field(default_factory=list)
     known_blockers: list[str] = Field(default_factory=list)
     successful_actions: list[dict[str, Any]] = Field(default_factory=list)
@@ -434,18 +503,33 @@ class ScenePlan(BaseModel):
     cursor_behavior: dict[str, Any] = Field(default_factory=dict)
     scroll_behavior: dict[str, Any] = Field(default_factory=dict)
     caption_intent: str = "Explain visible evidence and its viewer value."
+    transition: Literal["cut", "dissolve", "match_scroll", "hold"] = "cut"
     rejection_conditions: list[str] = Field(default_factory=list)
+
+
+class ObjectiveRelationship(BaseModel):
+    """A requested supporting relationship grounded during exploration."""
+
+    source: str = Field(min_length=1, max_length=160)
+    target: str = Field(min_length=1, max_length=160)
+    relation: Literal["context_for", "configures", "depends_on", "proves"] = "context_for"
+    required: bool = True
 
 
 class ObjectiveSpec(BaseModel):
     raw: str
     demo_type: Literal["full_walkthrough", "feature_walkthrough", "workflow_demo"] = "workflow_demo"
     audience: str = "product prospect"
+    audience_profile: AudienceProfile = Field(default_factory=AudienceProfile)
     depth: Literal["overview", "standard", "thorough"] = "standard"
     requested_features: list[str] = Field(default_factory=list)
+    primary_entity: str | None = Field(default=None, max_length=160)
+    supporting_relationships: list[ObjectiveRelationship] = Field(default_factory=list)
     must_show: list[str] = Field(default_factory=list)
     exclusions: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list, max_length=24)
     safe_action_policy: Literal["read_only", "authorized_side_effects"] = "read_only"
+    permitted_mutations: list[Literal["create_isolated_record"]] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
     minimum_duration_seconds: int = Field(default=60, ge=15, le=600)
     target_duration_seconds: int = Field(default=120, ge=30, le=600)
@@ -483,6 +567,10 @@ class FeatureKnowledge(BaseModel):
 
 class CandidateDemoFlow(BaseModel):
     name: str
+    # Evidence-only context discovered before production. These pages ground
+    # a relationship or prerequisite without forcing a configuration tour
+    # into a video whose viewer asked to see the operational experience.
+    supporting_page_urls: list[str] = Field(default_factory=list)
     page_urls: list[str] = Field(default_factory=list)
     rationale: list[str] = Field(default_factory=list)
     expected_outcomes: list[str] = Field(default_factory=list)
@@ -492,6 +580,28 @@ class CandidateDemoFlow(BaseModel):
     semantic_steps: list[str] = Field(default_factory=list)
     rejected_reason: str | None = None
     score: float = Field(ge=0, le=1)
+
+
+class DemoBrief(BaseModel):
+    """Reviewable boundary between discovered product knowledge and a DemoPlan.
+
+    The brief deliberately contains no selectors or executable instructions.
+    It states *why* a page is in the story and which observed evidence must be
+    carried forward.  Planning can therefore be inspected or rejected before
+    a fresh production browser is opened.
+    """
+
+    objective: ObjectiveSpec
+    audience: str = Field(min_length=1, max_length=160)
+    duration_seconds: int = Field(ge=15, le=900)
+    selected_flow: str = Field(min_length=1, max_length=180)
+    included_pages: list[str] = Field(default_factory=list)
+    supporting_pages: list[str] = Field(default_factory=list)
+    page_story_roles: dict[str, str] = Field(default_factory=dict)
+    required_outcomes: list[str] = Field(default_factory=list)
+    exclusions: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
 
 
 class ExplorationReport(BaseModel):
@@ -519,6 +629,35 @@ class FormSchema(BaseModel):
     source_url: str
     fields: list[FormField] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
+    # A form may visibly state that required inputs exist while a component
+    # hides their native controls behind an unresolved widget.  That is not
+    # permission to submit partial data during an authorised demo rehearsal.
+    unresolved_required_fields: bool = False
+
+
+class ActionCapability(BaseModel):
+    """A reversible interaction discovered before a production run.
+
+    This is deliberately generic: it records a form/modal/detail capability,
+    never a Lead/Booking-specific implementation path.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    kind: Literal["form", "modal", "detail", "navigation"]
+    purpose: str = Field(min_length=1, max_length=300)
+    source_url: str
+    entry_target: Target
+    form_schema: FormSchema | None = None
+    submit_target: Target | None = None
+    # A creation workflow is executable only when the success state has a
+    # separate semantic witness (new row, detail title, toast, confirmation).
+    # It may not reuse the submit button as proof.
+    outcome_target: Target | None = None
+    close_target: Target | None = None
+    outcome_evidence: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    safe_to_probe: bool = True
+    verified: bool = False
 
 
 class WorkflowProposal(BaseModel):

@@ -54,7 +54,6 @@ def build_presentation_plan(
         }
         scene = scene_by_event.get(event.id)
         scene_camera = scene.get("camera") if isinstance(scene, dict) and isinstance(scene.get("camera"), dict) else {}
-        scene_allows_focus = scene is None or scene_camera.get("mode") == "target-focus"
         requested_zoom = scene_camera.get("zoom")
         try:
             requested_zoom = float(requested_zoom) if requested_zoom is not None else None
@@ -66,18 +65,32 @@ def build_presentation_plan(
             rect.x >= 0 and rect.y >= 0 and rect.x + rect.width <= event_width
             and rect.y + rect.height <= event_height
         )
+        # Non-form clicks receive focus only when the validated scene plan
+        # explicitly requested it. A missing scene used to make every small
+        # button eligible for a cinematic zoom, including empty sidebars.
+        scene_allows_focus = scene_camera.get("mode") == "target-focus" or form_interaction
+        # A focused form control needs more than the old 1.12 reframe to make
+        # real typing readable at 1080p. The allowable zoom is nevertheless
+        # derived from target geometry: controls near an edge retain more page
+        # context, while a centrally visible field can receive a closer but
+        # still reversible editorial view.
+        center_x = (rect.x + rect.width / 2) / max(event_width, 1)
+        center_y = (rect.y + rect.height / 2) / max(event_height, 1)
+        edge_proximity = min(center_x, 1 - center_x, center_y, 1 - center_y)
+        # Keep the capture's full browser frame readable. Form controls get a
+        # restrained target focus, while ordinary content never exceeds the
+        # presentation QA ceiling. The scene request can lower this value but
+        # cannot push it beyond the safe bound.
+        max_safe_zoom = 1.16 if form_interaction else (1.12 if edge_proximity < 0.12 else 1.18)
         if allow_camera_zoom and scene_allows_focus and target_in_view and requested_zoom is not None:
-            # Editorial/model direction may choose emphasis based on the
-            # observed evidence. ProductLens owns the safety envelope: camera
-            # zoom can never crop beyond the validated 1.20 cap.
-            zoom = min(1.20, max(1.0, requested_zoom))
-            reason = "scene-requested target emphasis constrained to the safe full-frame zoom envelope"
+            zoom = min(max_safe_zoom, max(1.0, requested_zoom))
+            reason = "scene-requested target emphasis constrained by target-to-frame safety bounds"
         elif allow_camera_zoom and form_interaction and scene_allows_focus and target_in_view:
-            zoom, reason = 1.12, "form control receives a bounded focus zoom while its surrounding context remains visible"
-        elif allow_camera_zoom and scene_allows_focus and target_in_view and (rect.width < 96 or rect.height < 30):
-            zoom, reason = 1.16, "small target receives restrained cinematic emphasis"
-        elif allow_camera_zoom and scene_allows_focus and target_in_view and small_target:
-            zoom, reason = 1.08, "compact target receives restrained cinematic emphasis"
+            zoom, reason = min(1.14, max_safe_zoom), "form control receives a restrained target-local focus while surrounding context remains visible"
+        elif allow_camera_zoom and scene_camera.get("mode") == "target-focus" and target_in_view and (rect.width < 96 or rect.height < 30):
+            zoom, reason = min(1.20, max_safe_zoom), "small target receives restrained cinematic emphasis"
+        elif allow_camera_zoom and scene_camera.get("mode") == "target-focus" and target_in_view and small_target:
+            zoom, reason = min(1.14, max_safe_zoom), "compact target receives restrained cinematic emphasis"
         else:
             zoom, reason = 1.0, "native browser scale; no scene-local focus justification"
         if off_center:

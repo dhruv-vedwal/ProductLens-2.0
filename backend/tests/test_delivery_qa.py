@@ -26,6 +26,16 @@ def test_live_url_delivery_requires_discovery_and_editorial_lineage(tmp_path):
     assert not all(required.values())
 
 
+def test_isolated_creation_delivery_requires_rehearsal_outcome_artifact(tmp_path):
+    from productlens.artifacts.store import RunArtifacts
+
+    artifacts = RunArtifacts(tmp_path, "creation-run")
+    artifacts.write_json("objective.json", {"permitted_mutations": ["create_isolated_record"]})
+    assert artifacts.required_url_delivery_artifacts()["rehearsal_outcome"] is False
+    artifacts.write_json("discovery/rehearsal-report.json", {"outcome_target": {"name": "Created"}})
+    assert artifacts.required_url_delivery_artifacts()["rehearsal_outcome"] is True
+
+
 def test_browserbase_native_recording_satisfies_live_trace_evidence(tmp_path):
     from productlens.artifacts.store import RunArtifacts
 

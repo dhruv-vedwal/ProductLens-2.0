@@ -47,6 +47,22 @@ class WorkflowStateMachine:
         self.history.append({"source": previous, "event": event, "target": self.current, "verified": verified})
         return self.current
 
+    def artifact(self) -> dict[str, object]:
+        """Return the immutable state contract persisted beside a DemoPlan."""
+        return {
+            "initial_state": self.initial,
+            "transitions": [
+                {
+                    "source": item.source,
+                    "event": item.event,
+                    "target": item.target,
+                    "required_postconditions": list(item.required_postconditions),
+                }
+                for item in self.transitions
+            ],
+            "invariant": "a workflow transition advances only after its required postconditions verify",
+        }
+
     @classmethod
     def from_operations(cls, operations: list[SemanticOperation], *, initial: str = "NEW") -> WorkflowStateMachine:
         """Compile a generic operation sequence into a deterministic state graph."""

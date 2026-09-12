@@ -57,13 +57,21 @@ def test_generic_run_document_ledger_mirrors_architectural_artifacts(tmp_path: P
     root = tmp_path / "runs" / run["id"]
     evidence = {
         "objective.json": {"demo_type": "full_walkthrough"},
+        "discovery/objective-understanding.json": {"status": "deterministic"},
         "exploration-report.json": {"stop_reason": "grounded"},
         "feature-graph.json": [{"name": "Timeline"}],
         "candidate-flows.json": [{"score": 0.9}],
+        "planning/demo-brief.json": {"title": "Example"},
+        "planning/validated-state-graph.json": {"initial_state": "OPEN"},
         "plan.json": {"workflow_steps": []},
         "presentation/validated-scene-plan.json": {"scenes": []},
+        "presentation/actual-flow-storyboard.json": {"source": "trace"},
+        "presentation/narration-script.json": {"script": []},
         "execution/trace.json": {"events": []},
+        "execution/source-timing-alignment.json": {"status": "aligned"},
+        "presentation/source-edit-plan.json": {"mode": "native_speed_cuts"},
         "qa/repair-decision.json": {"retry_from_stage": "NARRATION"},
+        "qa/delivery-report.json": {"deliverable": True},
         "artifact-manifest.json": {"artifacts": []},
     }
     for relative, payload in evidence.items():
@@ -76,6 +84,12 @@ def test_generic_run_document_ledger_mirrors_architectural_artifacts(tmp_path: P
     assert set(persisted) == set(documents)
     assert documents["objective"]["payload"] == evidence["objective.json"]
     assert documents["demo_trace"]["source_path"] == "execution/trace.json"
+    assert documents["objective_understanding"]["payload"] == evidence[
+        "discovery/objective-understanding.json"
+    ]
+    assert documents["actual_flow_storyboard"]["payload"] == evidence[
+        "presentation/actual-flow-storyboard.json"
+    ]
     assert documents["demo_trace"]["sha256"] == hashlib.sha256(
         (root / "execution/trace.json").read_bytes()
     ).hexdigest()
@@ -246,6 +260,20 @@ def test_delivery_assets_and_provider_telemetry_are_retained_without_secrets(tmp
     ]
 
 
+def test_provider_call_metadata_records_model_and_cost_class_without_exposing_keys(tmp_path: Path):
+    repository = RunRepository(tmp_path / "productlens.sqlite3")
+    request = repository.create_request("provider-metadata", "https://example.test", "Inspect")
+    run = repository.create_run(request["id"], str(tmp_path))
+    repository.record_provider_call(
+        run_id=run["id"], provider="openrouter", operation="planning", status="COMPLETE",
+        model="configured-model", cost_class="structured",
+    )
+    row = repository.connection.execute(
+        "SELECT model, cost_class FROM provider_calls WHERE run_id=?", (run["id"],)
+    ).fetchone()
+    assert dict(row) == {"model": "configured-model", "cost_class": "structured"}
+
+
 def test_fresh_knowledge_is_versioned_and_retrievable(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
     repository.upsert_knowledge(
@@ -253,6 +281,17 @@ def test_fresh_knowledge_is_versioned_and_retrievable(tmp_path: Path):
     )
     cached = repository.fresh_knowledge("https://example.test")
     assert cached and cached["evidence"]["relevant_routes"] == ["https://example.test/leads"]
+
+
+def test_product_knowledge_uses_canonical_url_keys(tmp_path: Path):
+    repository = RunRepository(tmp_path / "productlens.sqlite3")
+    repository.upsert_knowledge(
+        "HTTPS://EXAMPLE.TEST/%74oday/?b=2&a=1#ignored",
+        {"routes": ["https://example.test/today"]},
+        0.9,
+    )
+    cached = repository.fresh_knowledge("https://example.test/today?b=2&a=1")
+    assert cached and cached["evidence"]["routes"] == ["https://example.test/today"]
 
 
 def test_page_knowledge_is_persisted_with_its_product_version(tmp_path: Path):
@@ -352,3 +391,15 @@ def test_retention_deletes_only_empty_terminal_runs_and_invalidation_removes_pag
     assert repository.invalidate_knowledge("https://example.test") is True
     assert repository.fresh_knowledge("https://example.test") is None
     assert repository.connection.execute("SELECT 1 FROM page_knowledge").fetchone() is None
+
+
+def test_retention_refuses_unregistered_filesystem_evidence(tmp_path: Path):
+    repository = RunRepository(tmp_path / "productlens.sqlite3")
+    request = repository.create_request("retention-unregistered", "https://example.test", "Show product")
+    run = repository.create_run(request["id"], str(tmp_path))
+    repository.update_run(run["id"], stage="FAILED", status="FAILED")
+    run_root = tmp_path / "runs" / run["id"]
+    run_root.mkdir(parents=True)
+    (run_root / "crash.log").write_text("worker stopped", encoding="utf-8")
+    assert repository.purge_empty_terminal_runs() == []
+    assert repository.get_run(run["id"])["status"] == "FAILED"

@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from contextlib import suppress
 
 import httpx
 
@@ -15,22 +16,48 @@ from productlens.providers.errors import ProviderError
 class BrowserbaseSessionInfo:
     session_id: str
     connect_url: str
+    stagehand_extension_id: str | None = None
 
 
 class BrowserbaseProvider:
     """Creates remote browser sessions; Playwright remains the execution owner."""
 
-    def __init__(self, api_key: str, project_id: str | None = None, *, session_timeout_seconds: int = 1800):
+    def __init__(self, api_key: str, project_id: str | None = None, *, session_timeout_seconds: int = 1800,
+                 stagehand_extension_path: Path | None = None):
         self.api_key = api_key
         self.project_id = project_id
         self.session_timeout_seconds = max(60, min(1800, int(session_timeout_seconds)))
+        self.stagehand_extension_path = stagehand_extension_path or (
+            Path(__file__).resolve().parents[3]
+            / "stagehand/node_modules/@browserbasehq/stagehand/dist/assets/stagehand-extension.zip"
+        )
+        self._stagehand_extensions: dict[str, str] = {}
 
     async def create_session(self) -> str:
         return (await self.create_session_info()).session_id
 
-    async def create_session_info(self) -> BrowserbaseSessionInfo:
+    async def create_session_info(
+        self,
+        *,
+        viewport: dict[str, int] | None = None,
+        user_metadata: dict[str, object] | None = None,
+        region: str | None = None,
+        keep_alive: bool | None = None,
+        proxies: bool | list[dict[str, object]] | None = None,
+    ) -> BrowserbaseSessionInfo:
+        """Create an isolated session with the recording contract up front.
+
+        Browserbase applies viewport and browser settings when the session is
+        provisioned.  Setting the viewport later through CDP can change DOM
+        layout but cannot reliably change the native Session Replay geometry,
+        which is the source used for production rendering.  Keep all options
+        optional for compatibility, while allowing production to pass its
+        already-selected viewport and non-secret run metadata.
+        """
+        extension_id: str | None = None
         try:
             async with httpx.AsyncClient(timeout=30) as client:
+                extension_id = await self._upload_stagehand_extension(client)
                 response = await client.post(
                     "https://api.browserbase.com/v1/sessions",
                     headers={"x-bb-api-key": self.api_key, "Content-Type": "application/json"},
@@ -40,7 +67,12 @@ class BrowserbaseProvider:
                     # sparse during real reading holds.
                     json={
                         **({"projectId": self.project_id} if self.project_id else {}),
+                        **({"extensionId": extension_id} if extension_id else {}),
                         "timeout": self.session_timeout_seconds,
+                        **({"region": region} if region else {}),
+                        **({"keepAlive": keep_alive} if keep_alive is not None else {}),
+                        **({"proxies": proxies} if proxies is not None else {}),
+                        **({"userMetadata": user_metadata} if user_metadata else {}),
                         # Developer-plan Identity includes automatic CAPTCHA
                         # solving. Keep it explicit so a project-level setting
                         # cannot silently disable the capability required by a
@@ -49,18 +81,61 @@ class BrowserbaseProvider:
                         "browserSettings": {
                             "recordSession": True,
                             "solveCaptchas": True,
+                            **({"viewport": viewport} if viewport else {}),
                         },
                     },
                 )
                 response.raise_for_status()
         except httpx.HTTPError as error:
+            if extension_id:
+                await self._delete_stagehand_extension(extension_id)
             response = getattr(error, "response", None)
             raise ProviderError("browserbase", getattr(response, "status_code", None), str(error)) from error
         payload = response.json()
         connect_url = payload.get("connectUrl") or payload.get("connect_url")
         if not payload.get("id") or not connect_url:
             raise RuntimeError("Browserbase session response did not include id and connectUrl")
-        return BrowserbaseSessionInfo(session_id=payload["id"], connect_url=connect_url)
+        if extension_id:
+            self._stagehand_extensions[str(payload["id"])] = extension_id
+        return BrowserbaseSessionInfo(
+            session_id=payload["id"], connect_url=connect_url,
+            stagehand_extension_id=extension_id,
+        )
+
+    async def _upload_stagehand_extension(self, client: httpx.AsyncClient) -> str | None:
+        """Provision the official Stagehand extension for this session.
+
+        Stagehand's own Browserbase launcher performs this upload before
+        creating a session. ProductLens creates the session first so
+        Playwright can remain the execution owner, therefore the provider must
+        perform the same documented extension lifecycle explicitly.
+        """
+        archive = self.stagehand_extension_path
+        if not archive.is_file():
+            return None
+        try:
+            with archive.open("rb") as handle:
+                response = await client.post(
+                    "https://api.browserbase.com/v1/extensions",
+                    headers={"x-bb-api-key": self.api_key},
+                    files={"file": (archive.name, handle, "application/zip")},
+                )
+                response.raise_for_status()
+            extension_id = response.json().get("id")
+            return str(extension_id).strip() if extension_id else None
+        except (OSError, httpx.HTTPError, ValueError, TypeError):
+            # Stagehand is advisory; a provider outage must not discard the
+            # Playwright-grounded discovery. The persisted Stagehand artifact
+            # will classify the unavailable advisory path for QA.
+            return None
+
+    async def _delete_stagehand_extension(self, extension_id: str) -> None:
+        with suppress(Exception):
+            async with httpx.AsyncClient(timeout=30) as client:
+                await client.delete(
+                    f"https://api.browserbase.com/v1/extensions/{extension_id}",
+                    headers={"x-bb-api-key": self.api_key},
+                )
 
     async def close_session(self, session_id: str) -> None:
         """Release a remote session after CDP disconnect, including failed discovery runs."""
@@ -70,31 +145,44 @@ class BrowserbaseProvider:
         # than DELETE); the request is idempotent and does not repeat any
         # browser action or user-side effect.
         last_error: httpx.HTTPError | None = None
-        for attempt in range(3):
-            try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    response = await client.post(
-                        f"https://api.browserbase.com/v1/sessions/{session_id}",
-                        headers={"x-bb-api-key": self.api_key, "Content-Type": "application/json"},
-                        json={
-                            "status": "REQUEST_RELEASE",
-                            **({"projectId": self.project_id} if self.project_id else {}),
-                        },
-                    )
-                    # Session termination is idempotent: Stagehand or a timed-out
-                    # browser process may already have released it before the
-                    # ProductLens lifecycle owner performs its final cleanup.
-                    if response.status_code == 404:
-                        return
-                    response.raise_for_status()
-                    return
-            except httpx.HTTPError as error:
-                last_error = error
-                if attempt < 2:
-                    await asyncio.sleep(1 + attempt)
-        assert last_error is not None
-        response = getattr(last_error, "response", None)
-        raise ProviderError("browserbase", getattr(response, "status_code", None), str(last_error)) from last_error
+        released = False
+        try:
+            for attempt in range(3):
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        response = await client.post(
+                            f"https://api.browserbase.com/v1/sessions/{session_id}",
+                            headers={"x-bb-api-key": self.api_key, "Content-Type": "application/json"},
+                            json={
+                                "status": "REQUEST_RELEASE",
+                                **({"projectId": self.project_id} if self.project_id else {}),
+                            },
+                        )
+                        # Session termination is idempotent: Stagehand or a
+                        # timed-out browser process may already have released
+                        # it before ProductLens performs final cleanup.
+                        if response.status_code == 404:
+                            released = True
+                            break
+                        response.raise_for_status()
+                        released = True
+                        break
+                except httpx.HTTPError as error:
+                    last_error = error
+                    if attempt < 2:
+                        await asyncio.sleep(1 + attempt)
+            if not released:
+                response = getattr(last_error, "response", None)
+                raise ProviderError(
+                    "browserbase", getattr(response, "status_code", None), str(last_error)
+                ) from last_error
+        finally:
+            # Extension cleanup is best effort: it must not turn a released
+            # browser into a failed run, and leaked extension IDs are not
+            # execution evidence.
+            extension_id = self._stagehand_extensions.pop(session_id, None)
+            if extension_id:
+                await self._delete_stagehand_extension(extension_id)
 
     async def download_native_recording(
         self, session_id: str, output: Path, *, timeout_seconds: int = 120

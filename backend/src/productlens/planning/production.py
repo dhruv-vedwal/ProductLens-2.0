@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 from pydantic import ValidationError
 
 from productlens.contracts.models import (
+    ActionCapability,
     DemoPlan,
     ObservedElement,
     OperationKind,
@@ -21,9 +22,16 @@ from productlens.contracts.models import (
 )
 from productlens.planning.candidates import (
     build_page_complete_proposal,
+    navigation_control_for_transition,
     select_candidate_flow,
     validate_flow_scope,
 )
+from productlens.planning.capabilities import (
+    CapabilityCompilationError,
+    compile_read_only_form_inspection,
+    compile_record_creation,
+)
+from productlens.planning.rehearsal import CapabilitySelectionError, select_rehearsal_capability
 from productlens.planning.side_effects import (
     SideEffectPolicyError,
     authorize_operation,
@@ -32,6 +40,18 @@ from productlens.planning.side_effects import (
 from productlens.planning.synthetic import hydrate_operations
 from productlens.providers.errors import ProviderError
 from productlens.providers.interfaces import LLMProvider
+
+
+def _canonical_url(value: str) -> str:
+    """Normalize equivalent browser URL spellings for planning transitions."""
+    parsed = urlsplit(value)
+    return urlunsplit((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        unquote(parsed.path).rstrip("/") or "/",
+        parsed.query,
+        "",
+    ))
 
 
 class PlanningValidationError(ValueError):
@@ -76,18 +96,47 @@ class ProductionPlanningService:
         )
         if not approved_minimum <= target_duration_seconds <= approved_maximum:
             raise PlanningValidationError("requested duration is outside the approved objective envelope")
+        # A route list is navigation metadata, not product knowledge. Allow a
+        # tiny compatibility snapshot to use the structured provider, but if
+        # discovery already claims supporting routes it must materialise their
+        # page-local evidence before a provider/fallback can propose a story.
+        # Otherwise a plausible route tour can bypass the reliability-first
+        # PageKnowledge contract entirely.
+        if context.relevant_routes and not context.page_knowledge:
+            raise PlanningValidationError("page lacks readable local evidence for discovered supporting routes")
         candidate = select_candidate_flow(context, objective)
+        self._validate_objective_grounding(context, candidate)
+        # A requested duration must be plausible from *captured* production
+        # evidence before a fresh browser context is opened. This is not a
+        # request to pad a sparse form with holds: discovery must instead add
+        # relevant page-local content or select a stronger candidate flow.
+        if (
+            objective_spec is not None
+            and context.page_knowledge
+            and candidate is not None
+            and candidate.estimated_duration_seconds < approved_minimum
+        ):
+            raise PlanningValidationError(
+                "candidate lacks enough evidence-backed content for the approved minimum duration; "
+                "targeted exploration must collect relevant page-local scenes"
+            )
         objective_lower = objective.lower()
-        complete_objective = bool(
-            re.search(r"\bfull\b(?:\s+\w+){0,4}\s+walkthrough\b", objective_lower)
-        ) or "each tab" in objective_lower or "every safe primary" in objective_lower
-        # “Thorough walkthrough” is an explicit depth request even when the
-        # user does not say “full”. It must cover primary sections rather than
-        # accepting a narrow model-selected route and later stretching it.
-        complete_objective = complete_objective or (
-            "walkthrough" in objective_lower
-            and any(depth in objective_lower for depth in ("thorough", "complete", "entire"))
+        # Objective understanding is the authoritative scope classifier.  The
+        # previous lexical check only recognised the literal word ``full``;
+        # a request such as "create a complete walkthrough" was consequently
+        # sent through the focused-flow path and could drop required detail
+        # pages (for example the representative week view).  Preserve the
+        # lexical signals as compatibility fallbacks for older contexts, but
+        # honour the validated ObjectiveSpec whenever it is available.
+        complete_objective = (
+            bool(objective_spec and objective_spec.demo_type == "full_walkthrough")
+            or bool(re.search(r"\bfull\b(?:\s+\w+){0,4}\s+walkthrough\b", objective_lower))
+            or "each tab" in objective_lower
+            or "every safe primary" in objective_lower
         )
+        # Thorough depth can apply to a focused feature workflow. Only an
+        # explicit completeness signal (full/complete/entire/every/each)
+        # broadens planning to all safe primary sections.
         # Whole-product requests are not a deterministic navigation tour.
         # They must be compiled from the fresh PageKnowledge selected by a
         # scored candidate, so every transition has local evidence and every
@@ -100,16 +149,25 @@ class ProductionPlanningService:
             except ValueError as error:
                 raise PlanningValidationError(str(error)) from error
         else:
-            try:
-                proposal = await self.provider.structured(
-                    self._prompt(objective, context, allow_external_side_effects), WorkflowProposal
-                )
-            except (ValidationError, ProviderError):
-                # A provider outage must not degrade a focused request into a
-                # shallow route sweep. Compile the already-scored evidence
-                # candidate through the same page-complete contract used by a
-                # full walkthrough.
+            # The evidence candidate is the minimum editorial contract for a
+            # focused walkthrough.  A free-form model proposal may be valid
+            # JSON yet collapse a rich page to one arbitrary button/route.
+            # Compile the grounded candidate first so every selected page and
+            # local reading beat survives.  The model remains available for
+            # extraction/editorial enrichment, but it cannot replace the
+            # workflow proof owned by ProductLens.
+            if candidate is not None and context.page_knowledge:
                 proposal = self._evidence_fallback(candidate, context)
+            else:
+                # Compatibility for callers that provide only a live element
+                # snapshot (before discovery materialises PageKnowledge).
+                # Those requests still use the validated structured planner.
+                try:
+                    proposal = await self.provider.structured(
+                        self._prompt(objective, context, allow_external_side_effects), WorkflowProposal
+                    )
+                except (ValidationError, ProviderError):
+                    proposal = self._evidence_fallback(candidate, context)
         if not complete_objective:
             proposal = self._compile_navigation(proposal, context)
             try:
@@ -132,13 +190,175 @@ class ProductionPlanningService:
             scope_failures = validate_flow_scope(proposal, context=context, candidate=candidate)
             if scope_failures:
                 raise PlanningValidationError(scope_failures[0])
+        specification = context.objective
+        if specification and "create_isolated_record" in specification.permitted_mutations:
+            if not allow_external_side_effects:
+                raise PlanningValidationError(
+                    "isolated record creation requires explicit runtime authorization"
+                )
+            capabilities = []
+            for raw in context.capabilities:
+                try:
+                    capabilities.append(ActionCapability.model_validate(raw))
+                except ValidationError:
+                    continue
+            try:
+                creation = compile_record_creation(
+                    select_rehearsal_capability(
+                        context, capabilities, require_verified_outcome=True
+                    )
+                )
+            except (CapabilitySelectionError, CapabilityCompilationError) as error:
+                raise PlanningValidationError(
+                    "authorized record creation has no independently verified form capability"
+                ) from error
+            # A capability was discovered on a particular product state. A
+            # relationship/context chapter may have moved the plan elsewhere
+            # since then, so return through a verified visible control (or a
+            # documented direct-navigation fallback) before opening its form.
+            # This is a workflow transition, not a coverage repair.
+            creation_source = creation[0].target.source_url if creation and creation[0].target else None
+            transition = self._transition_to_capability_source(
+                proposal, context, creation_source
+            )
+            proposal = proposal.model_copy(update={
+                "selected_workflow": f"{proposal.selected_workflow} with verified record creation",
+                "steps": [*proposal.steps, *transition, *creation],
+                "expected_outcomes": [*proposal.expected_outcomes, creation[-1].target.name],
+            })
+            # The appended submit crosses the side-effect boundary after the
+            # original read-only candidate has been validated. Validate the
+            # full compiled plan again before any target is grounded/executed.
+            self._validate(proposal, context, allow_external_side_effects)
+            scope_failures = validate_flow_scope(proposal, context=context, candidate=candidate)
+            if scope_failures:
+                raise PlanningValidationError(scope_failures[0])
+        # A read-only prospect objective can still benefit from seeing the
+        # actual setup surface.  Discovery's reversible capability probe is
+        # sufficient to open and type into the grounded form, but it is never
+        # permission to submit.  Compile this only when the request names a
+        # setup/detail/form beat and only for the semantically best capability;
+        # unrelated forms remain out of scope.
+        specification = context.objective
+        if specification and not specification.permitted_mutations:
+            # ``create a walkthrough/demo/video`` describes the requested
+            # deliverable, not a product-side record mutation.  Strip that
+            # framing before deciding whether to open and fill a form; doing
+            # otherwise made every demo request trigger an unrelated create
+            # flow and a return navigation.
+            request_text = re.sub(
+                r"^\s*(?:please\s+)?create\s+(?:a\s+)?(?:thorough\s+|full\s+|complete\s+)?(?:walkthrough|demo|video)\b",
+                "",
+                specification.raw.casefold(),
+            )
+            request_words = set(
+                re.findall(r"[a-z0-9]{3,}", request_text)
+            ) | {
+                word.casefold()
+                for value in specification.must_show
+                for word in re.findall(r"[a-z0-9]{3,}", value.casefold())
+            }
+            wants_setup = bool(request_words & {
+                "setup", "details", "detail", "form", "fields", "configure",
+                # Merely asking for configuration *context* should show the
+                # observed settings surface, not open a form and navigate back
+                # to the feature. Editing/creation is opt-in through an
+                # explicit action verb or form request.
+                "appointment", "schedule", "create", "add",
+            })
+            already_has_form = any(
+                step.kind in {
+                    OperationKind.OPEN_MODAL,
+                    OperationKind.FILL_TEXT,
+                    OperationKind.FILL_EMAIL,
+                    OperationKind.FILL_PHONE,
+                    OperationKind.SELECT_OPTION,
+                    OperationKind.SELECT_DATE,
+                }
+                for step in proposal.steps
+            )
+            if wants_setup and not already_has_form:
+                capabilities: list[ActionCapability] = []
+                for raw in context.capabilities:
+                    try:
+                        capabilities.append(ActionCapability.model_validate(raw))
+                    except ValidationError:
+                        continue
+                try:
+                    capability = select_rehearsal_capability(
+                        context, capabilities, require_verified_outcome=False
+                    )
+                    inspection = compile_read_only_form_inspection(capability)
+                    transition = self._transition_to_capability_source(
+                        proposal, context, capability.source_url
+                    )
+                    proposal = proposal.model_copy(update={
+                        "selected_workflow": f"{proposal.selected_workflow} with read-only setup inspection",
+                        "steps": [*proposal.steps, *transition, *inspection],
+                        "expected_outcomes": [
+                            *proposal.expected_outcomes,
+                            f"visible {capability.purpose} setup fields are explained",
+                        ],
+                    })
+                    self._validate(proposal, context, allow_external_side_effects)
+                except (CapabilitySelectionError, CapabilityCompilationError):
+                    # A form probe is an enhancement, not a reason to invent a
+                    # control. The base evidence flow remains valid when no
+                    # capability can be compiled safely.
+                    pass
         steps = self._ground(proposal, context)
-        steps, synthetic_dataset = hydrate_operations(steps, product_key=context.url)
+        # Isolated demo records must never reuse an observed customer/contact
+        # value. Keep this broad and evidence-driven: it is derived from the
+        # discovered product text/facts rather than known products or fields.
+        observed_values = {
+            value
+            for value in [
+                context.visible_text,
+                *(item.text or "" for item in context.elements),
+                *(fact for page in context.page_knowledge for fact in page.visible_facts),
+            ]
+            if value
+        }
+        steps, synthetic_dataset = hydrate_operations(
+            steps, product_key=context.url, forbidden_values=observed_values,
+        )
         side_effects = {
             operation.id: side_effect_decision(operation)
             for operation in steps
             if operation.kind in SIDE_EFFECTING
         }
+        # The selected candidate is discovery evidence, while ``proposal`` is
+        # the validated executable story.  Reconcile the persisted summary at
+        # this boundary so it cannot retain routes/outcomes from a rejected
+        # model proposal or an earlier candidate-selection pass.
+        selected_candidate = candidate
+        if candidate is not None:
+            actual_pages: list[str] = []
+            evidence: list[str] = []
+            semantic_steps: list[str] = []
+            for operation in steps:
+                page_url = operation.page_url or (
+                    operation.target.source_url if operation.target else None
+                )
+                if page_url and page_url not in actual_pages:
+                    actual_pages.append(page_url)
+                evidence.extend(operation.evidence_refs)
+                label = operation.target.name if operation.target else operation.intent
+                semantic_steps.append(f"{operation.kind.value}:{label}")
+            selected_candidate = candidate.model_copy(update={
+                "name": proposal.selected_workflow,
+                "page_urls": actual_pages or candidate.page_urls,
+                "supporting_page_urls": [
+                    page for page in candidate.supporting_page_urls if page in actual_pages
+                ],
+                "expected_outcomes": list(proposal.expected_outcomes),
+                "semantic_steps": semantic_steps,
+                "evidence_coverage": list(dict.fromkeys([*candidate.evidence_coverage, *evidence])),
+                "estimated_duration_seconds": max(
+                    candidate.estimated_duration_seconds,
+                    int(sum(max(1, len(operation.intent.split()) // 2) for operation in steps) + 15),
+                ),
+            })
         return DemoPlan(
             objective=objective,
             narrative_goal=proposal.narrative_goal,
@@ -186,7 +406,7 @@ class ProductionPlanningService:
                 "must_not_use_credentials": True,
                 "generated_values": synthetic_dataset,
                 "side_effect_decisions": side_effects,
-                "selected_candidate_flow": candidate.model_dump(mode="json") if candidate else None,
+                "selected_candidate_flow": selected_candidate.model_dump(mode="json") if selected_candidate else None,
             },
             expected_outcomes=proposal.expected_outcomes,
             important_elements=proposal.important_elements,
@@ -204,6 +424,342 @@ class ProductionPlanningService:
         )
 
     @staticmethod
+    def _proposal_active_page(proposal: WorkflowProposal, context: ProductContext) -> str:
+        """Derive the browser state after the last planned semantic operation."""
+        active = _canonical_url(context.url)
+        for operation in proposal.steps:
+            if operation.kind in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}:
+                destination = next(
+                    (str(condition.expected) for condition in operation.postconditions if condition.kind == "url"),
+                    str(operation.value or ""),
+                )
+                if destination:
+                    active = _canonical_url(urljoin(context.url, destination))
+            elif operation.page_url:
+                active = _canonical_url(operation.page_url)
+            elif operation.target and operation.target.source_url:
+                active = _canonical_url(operation.target.source_url)
+        return active
+
+    @classmethod
+    def _transition_to_capability_source(
+        cls, proposal: WorkflowProposal, context: ProductContext, source_url: str | None
+    ) -> list[SemanticOperation]:
+        """Return to the exact state that owns a verified form capability."""
+        if not source_url:
+            raise PlanningValidationError("verified form capability has no source page")
+        source = _canonical_url(urljoin(context.url, source_url))
+        current = cls._proposal_active_page(proposal, context)
+        if current == source:
+            return []
+        control = navigation_control_for_transition(context, current, source)
+        if control is not None:
+            return [SemanticOperation(
+                kind=OperationKind.OPEN_NAVIGATION_ITEM,
+                intent=f"Return to the verified form workspace using visible {control.name}",
+                target=Target(
+                    name=control.name,
+                    selector=control.selector,
+                    text=control.text or control.name,
+                    source_url=control.source_url,
+                    role=control.role,
+                ),
+                postconditions=[Postcondition(kind="url", expected=source)],
+                story_phase="transition", page_url=source,
+                evidence_refs=[f"page:{source}", f"element:{control.name}", "transition:capability-source"],
+            )]
+        return [SemanticOperation(
+            kind=OperationKind.NAVIGATE,
+            intent="Return to the verified form workspace (no reliable visible navigation control was discovered)",
+            value=source,
+            postconditions=[Postcondition(kind="url", expected=source)],
+            story_phase="transition", page_url=source,
+            evidence_refs=[f"page:{source}", "fallback:direct-navigation-no-visible-control", "transition:capability-source"],
+        )]
+
+    @staticmethod
+    def _validate_objective_grounding(context: ProductContext, candidate) -> None:
+        """Refuse a polished route tour when required objective evidence is absent.
+
+        The old planner could select a reachable Settings shell and then claim
+        to explain its relationship to an operational feature.  A relationship
+        is now a planning precondition: both sides must be present in the
+        selected candidate's freshly captured page evidence.
+        """
+        specification = context.objective
+        if specification is None:
+            return
+        # Older/resumable ObjectiveSpecs can describe duration and audience
+        # without making a semantic entity/context claim. They remain valid
+        # compatibility inputs; only explicit grounding requirements demand
+        # PageKnowledge.
+        if (
+            not specification.primary_entity
+            and not specification.supporting_relationships
+            and not specification.must_show
+        ):
+            return
+        if candidate is None:
+            raise PlanningValidationError("no candidate flow is grounded in the requested objective")
+        selected = {
+            _canonical_url(page.url): page
+            for page in context.page_knowledge
+            if _canonical_url(page.url) in {
+                _canonical_url(url) for url in [*candidate.page_urls, *candidate.supporting_page_urls]
+            }
+        }
+        if not selected:
+            raise PlanningValidationError("candidate flow has no fresh page knowledge")
+
+        def vocabulary(value: str) -> set[str]:
+            # Requests are often editorial prose ("home identity and
+            # capabilities"), while page evidence is terse UI language. Do
+            # not make harmless function words literal grounding requirements;
+            # require the meaningful concept overlap below instead.
+            stopwords = {
+                "the", "and", "for", "from", "with", "into", "that", "this", "its",
+                "then", "than", "every", "each", "all", "one", "on", "in",
+                "of", "to", "a", "an", "is", "are", "be", "by", "or",
+                "including", "initial", "dashboard", "view", "views", "screen", "screens", "tab", "tabs",
+                # Editorial qualifiers describe how to present evidence, not
+                # a literal DOM label that must appear on the selected page.
+                "representative", "meaningful", "visible", "actual", "relevant",
+                "primary", "initial", "complete", "full", "current", "requested",
+                "details", "detail", "outcome", "result", "management", "workflow", "flow", "experience",
+            }
+            words = {
+                word for word in re.findall(r"[a-z0-9]{3,}", value.lower())
+                if word not in stopwords
+            }
+            # Normalize ordinary English inflections so an objective such as
+            # "study planning" grounds against a visible "study plan" label
+            # without embedding a product-specific synonym table. Keep the
+            # original token as well; these are evidence aids, not fuzzy
+            # authorization to select an unrelated page.
+            for word in tuple(words):
+                if word.endswith("s") and len(word) > 3:
+                    words.add(word[:-1])
+                if word.endswith("ing") and len(word) > 5:
+                    base = word[:-3]
+                    words.add(base)
+                    if len(base) > 2 and base[-1] == base[-2]:
+                        words.add(base[:-1])
+                if word.endswith("ed") and len(word) > 4:
+                    words.add(word[:-2])
+            if "configuration" in words:
+                words.add("config")
+            if "config" in words:
+                words.add("configuration")
+            # Do not embed product/domain vocabulary here.  Synonyms such as
+            # “appointment”/“booking” belong in the model-produced objective
+            # concepts (or page evidence), not in a runtime route rule.  This
+            # keeps grounding generic for an unseen product while preserving
+            # the evidence threshold below.
+            if "setup" in words:
+                words.update({"config", "configuration", "settings"})
+            return words
+
+        evidence_words = set()
+        for page in selected.values():
+            path = urlsplit(page.url).path
+            evidence_words |= vocabulary(" ".join([
+                page.title, page.purpose, *page.visible_sections,
+                *page.scroll_landmarks, *page.actionable_controls, *page.visible_facts,
+                path.replace("/", " ").replace("-", " "),
+                "home" if path in {"", "/"} else "",
+            ]))
+        # Login is a requested presentation chapter, not a page-local content
+        # landmark. Once discovery has authenticated the fresh browser, the
+        # credential boundary itself is the authoritative evidence that this
+        # requirement is satisfied; requiring the post-login DOM to repeat
+        # the word "login" incorrectly rejects otherwise valid plans.
+        if context.authentication_state == "authenticated":
+            evidence_words.update({"login", "sign", "authentication", "authenticated"})
+        # Objectives describe capabilities in human language, while a UI can
+        # label the same workspace with the entity alone ("Customers" versus
+        # "Customer Management").  Ground the meaningful entity terms here;
+        # the relationship validation below enforces any requested setup or
+        # outcome role separately.
+        objective_generic = {
+            "flow", "management", "workflow", "experience", "page", "pages",
+            "module", "feature", "area", "screen", "view", "lifecycle",
+            "journey", "progression", "context",
+        }
+        primary_words = vocabulary(specification.primary_entity or "") - objective_generic
+        primary_grounded = not primary_words or primary_words.issubset(evidence_words)
+        # Model-parsed full-walkthrough requests often use an editorial
+        # product description ("the study planning experience") instead of
+        # the product's visible brand/title ("Interview Crack"). Do not turn
+        # that wording mismatch into a false rejection when concrete
+        # must-show requirements are independently grounded across multiple
+        # discovered pages. Narrow feature/workflow requests remain strict.
+        broad_walkthrough_grounded = (
+            specification.demo_type == "full_walkthrough"
+            and len(selected) >= 2
+            and any(
+                vocabulary(requirement) & evidence_words
+                for requirement in specification.must_show
+                if requirement != specification.primary_entity
+            )
+        )
+        if primary_words and not primary_grounded and not broad_walkthrough_grounded:
+            raise PlanningValidationError(
+                f"requested entity is not grounded by the selected candidate: {specification.primary_entity}"
+            )
+        for required in specification.must_show:
+            if (
+                required == specification.primary_entity
+                and not primary_grounded
+                and broad_walkthrough_grounded
+            ):
+                continue
+            required_words = vocabulary(required)
+            # Objective-understanding models sometimes promote an explanatory
+            # sentence (for example, "what the product helps a learner plan
+            # and track") into ``must_show``.  That is a story intent, not a
+            # literal UI entity that can be grounded by a single label.  For
+            # broad walkthroughs, page-purpose and section evidence already
+            # enforce this intent; do not reject a valid product merely
+            # because its UI uses different wording.  Concrete noun phrases
+            # (Today, Progress, invoice export, etc.) remain strict below.
+            if (
+                specification.demo_type == "full_walkthrough"
+                and re.match(r"^(?:what|how|why)\b", required.strip().casefold())
+                and re.search(r"\b(?:product|application|system|workspace|feature)\b", required.casefold())
+            ):
+                continue
+            # Preserve hard rejection for an entirely unsupported requirement,
+            # but tolerate editorial wording where one descriptor is implicit
+            # in the page title/layout (for example "identity" on a named
+            # portfolio home page). A 60% meaningful-token threshold prevents
+            # a single generic word from laundering an unrelated requirement.
+            grounded_words = required_words & evidence_words
+            required_threshold = max(1, int(len(required_words) * 0.6 + 0.999))
+            editorial_descriptors = {
+                    "identity", "value", "proposition", "capability", "capabilities",
+                    "meaningful", "featured", "project", "projects", "career", "role",
+                    "roles", "contribution", "contributions", "architecture", "architectural",
+                    "work", "representative", "theme", "themes", "available", "path",
+                    "visible", "page", "pages", "operational", "state", "states", "sidebar",
+                    "handled", "current", "relevant", "actual",
+            }
+            if required_words and required_words.issubset(editorial_descriptors):
+                # These words describe how the evidence should be presented,
+                # not an additional product entity that can be matched
+                # literally (for example, "visible states"). The page-level
+                # evidence and scene completion gates still enforce that a
+                # readable state was actually captured.
+                continue
+            if len(grounded_words) < required_threshold:
+                # Walkthrough requests are often written as editorial briefs
+                # ("Home identity", "Timeline with career roles") while the
+                # site exposes concrete labels such as a person's name or
+                # "Professional History". Accept the requirement when a
+                # structural page/section token is grounded and the remaining
+                # words are presentation descriptors, not a hidden product
+                # claim. The selected page still has to carry real visible
+                # evidence and is independently explored later.
+                structural_overlap = set()
+                for page in selected.values():
+                    path = urlsplit(page.url).path
+                    page_structural = vocabulary(" ".join([
+                        page.title, page.purpose, path.replace("/", " ").replace("-", " "),
+                        "home" if path in {"", "/"} else "",
+                        *page.actionable_controls,
+                    ]))
+                    structural_overlap |= required_words & page_structural
+                residual = required_words - structural_overlap
+                if structural_overlap and residual.issubset(editorial_descriptors):
+                    continue
+            if required_words and len(grounded_words) < required_threshold:
+                raise PlanningValidationError(
+                    f"must-show requirement is not grounded by selected pages: {required}"
+                )
+        relationship_generic = objective_generic
+        for relation in specification.supporting_relationships:
+            source = vocabulary(relation.source)
+            target = vocabulary(relation.target)
+            if not relation.required:
+                continue
+            # Persisted objective artifacts may contain a model-produced
+            # relationship that was inferred from ordinary prose (for
+            # example, ``Home identity``).  A relationship is a workflow
+            # dependency only when the original request explicitly connects
+            # both sides; otherwise page-local evidence and the selected flow
+            # remain the authority.  This guard also makes older runs safe to
+            # resume after the objective-understanding filter is tightened.
+            raw_objective = specification.raw.casefold()
+            source_phrase = " ".join(re.findall(r"[a-z0-9]{3,}", relation.source.casefold()))
+            target_phrase = " ".join(re.findall(r"[a-z0-9]{3,}", relation.target.casefold()))
+            connector = r"(?:->|→|configures|explains|supports|in the context of|configured by|with context from|using)"
+            if source_phrase and target_phrase:
+                explicit_relation = bool(
+                    re.search(rf"{re.escape(source_phrase)}\s*{connector}\s*{re.escape(target_phrase)}", raw_objective)
+                    or re.search(rf"{re.escape(target_phrase)}\s*{connector}\s*{re.escape(source_phrase)}", raw_objective)
+                )
+                if not explicit_relation:
+                    continue
+
+            # A Settings shell can expose a configuration label without ever
+            # showing that configuration's own detail state. Relationship
+            # context is only useful when selected page *identity* (not its
+            # navigation chrome) establishes both sides of the relationship.
+            def page_identity_words(page) -> set[str]:
+                path = urlsplit(page.url).path
+                # The root route is the conventional Home page even when the
+                # document title never contains the word "home". Preserve
+                # that structural evidence for objective relationships such
+                # as Home -> Timeline without introducing a product-specific
+                # route exception.
+                structural = "home" if path in {"", "/"} else ""
+                return vocabulary(" ".join([
+                    page.title,
+                    page.purpose,
+                    path.replace("/", " ").replace("-", " "),
+                    structural,
+                ]))
+
+            shared_entity = (source & target) - relationship_generic
+            # A relationship must first be tied to an observed entity.  Do
+            # not require every prose descriptor in the request to appear
+            # literally: products may call an operational workspace "Leads
+            # V3" while the request calls it "Lead Management".  The
+            # semantic detail checks below still require a separate concrete
+            # setup/context page and an operational page.
+            if shared_entity and not shared_entity.issubset(evidence_words):
+                raise PlanningValidationError(
+                    f"required objective relationship is not grounded by selected pages: {relation.source} -> {relation.target}"
+                )
+
+            def subject_pages(subject: set[str], counterpart: set[str]):
+                meaningful = subject - relationship_generic
+                # The setup side must prove the term that distinguishes it
+                # from the operational feature. A shared entity noun alone
+                # cannot establish a configuration relationship when it also
+                # appears on the feature's workspace.
+                distinguishing = meaningful - (counterpart - relationship_generic)
+                required_words = distinguishing or meaningful or subject
+                # Routes commonly use a plural entity while the request uses
+                # a singular feature phrase. Vocabulary normalisation retains
+                # both forms, so a concrete non-generic subject is sufficient.
+                return [
+                    page for page in selected.values()
+                    if page_identity_words(page) & required_words
+                ]
+
+            source_pages = subject_pages(source, target)
+            target_pages = subject_pages(target, source)
+            distinct_page_pair = any(
+                source_page.url != target_page.url
+                for source_page in source_pages for target_page in target_pages
+            )
+            if not source_pages or not target_pages or not distinct_page_pair:
+                raise PlanningValidationError(
+                    "required objective relationship lacks a selected semantic detail page: "
+                    f"{relation.source} -> {relation.target}"
+                )
+
+    @staticmethod
     def _prompt(objective: str, context: ProductContext, allow_side_effects: bool) -> str:
         evidence = {
             "url": context.url,
@@ -212,6 +768,7 @@ class ProductionPlanningService:
             "authentication_state": context.authentication_state,
             "routes": context.relevant_routes,
             "elements": [item.model_dump() for item in context.elements[:40]],
+            "reversible_capabilities": context.capabilities[:12],
             "historical_successful_actions": context.successful_action_hints[:12],
         }
         return (
@@ -219,7 +776,8 @@ class ProductionPlanningService:
             "Use only targets present in the observed evidence, never coordinates, credentials, secrets, "
             "or a historical target that is absent from the current observed evidence. Historical successful "
             "actions are advisory only; current DOM evidence remains authoritative. "
-            "or invented controls. Every actionable operation must have at least one postcondition; only "
+            "or invented controls. A discovered reversible capability proves a form can be opened, not that it can be "
+            "submitted; do not plan a submit unless an explicit outcome postcondition is grounded. Every actionable operation must have at least one postcondition; only "
             "ScrollTo and ReadValue may omit one. "
             f"External side effects are {'allowed' if allow_side_effects else 'not allowed'}; "
             "when disallowed, do not submit, toggle, check, uncheck, delete, or publish. "
@@ -236,7 +794,7 @@ class ProductionPlanningService:
             "Postcondition kind must be exactly one of url, visible, value, test_state, text; never use state. "
             "When the workflow uses a discovered route, begin with a Navigate step to that exact observed route "
             "before referring to controls found there. "
-            "Choose a coherent viewer journey, not arbitrary clickable coverage. For a portfolio or content "
+            "Choose a coherent viewer journey, not arbitrary clickable coverage. For a content "
             "collection, first ScrollTo the collection and show several observed items before optionally opening "
             "one representative item. Give each ScrollTo an intent explaining what the viewer is about to see. "
             "Avoid making one project, footer, or contact CTA the entire story when a richer overview is observed. "
@@ -265,7 +823,9 @@ class ProductionPlanningService:
                 visible_navigation = next(
                     (
                         item for item in context.navigation
-                        if item.href and urljoin(item.source_url or context.url, item.href).rstrip("/") == current.rstrip("/")
+                        if item.href and _canonical_url(
+                            urljoin(item.source_url or context.url, item.href)
+                        ) == _canonical_url(current)
                     ),
                     None,
                 )
@@ -278,13 +838,26 @@ class ProductionPlanningService:
                         "postconditions": [Postcondition(kind="url", expected=current)],
                     })
                     continue
-                if current in {context.url, *context.relevant_routes}:
+                if _canonical_url(current) in {
+                    _canonical_url(value) for value in (context.url, *context.relevant_routes)
+                }:
                     continue
                 next_target = next(
                     (item.target for item in steps[index + 1 :] if item.target is not None), None
                 )
-                source = source_by_selector.get(next_target.selector or "") if next_target else None
-                if source and source in context.relevant_routes:
+                # A target without a selector has no provenance key. Looking
+                # up the empty string can accidentally select an unrelated
+                # page-local element (often the last discovered route) and
+                # rewrite the opening navigation while leaving its URL
+                # postcondition unchanged.
+                source = (
+                    source_by_selector.get(next_target.selector)
+                    if next_target is not None and next_target.selector
+                    else None
+                )
+                if source and _canonical_url(source) in {
+                    _canonical_url(value) for value in context.relevant_routes
+                }:
                     steps[index] = operation.model_copy(update={"value": source})
                 continue
             if operation.target is not None and operation.target.selector:
@@ -327,6 +900,17 @@ class ProductionPlanningService:
                 if operation.target
                 else None
             )
+            # Incremental callers may submit a page-local reading target while
+            # the browser is already on that page, without capturing its
+            # navigation link.  Do not invent a leading route transition in
+            # that compatibility mode; the target's source provenance remains
+            # intact for execution and narration.
+            if (
+                source and source != context.url
+                and operation.kind is OperationKind.SCROLL_TO
+                and not context.navigation
+            ):
+                continue
             if source and source != context.url:
                 already_opened = any(
                     candidate.kind in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
@@ -350,7 +934,32 @@ class ProductionPlanningService:
                 )
                 steps.insert(index, navigate)
                 break
-        return proposal.model_copy(update={"steps": steps})
+        # A model/fallback proposal can contain both the visible navigation
+        # operation and an equivalent direct Navigate for the same destination
+        # (common when a page-local target is compiled after a navigation
+        # control). Collapse only adjacent equivalent transitions; a later
+        # revisit separated by real work remains visible and is judged by
+        # journey QA rather than silently erased.
+        deduped: list[SemanticOperation] = []
+        for operation in steps:
+            if operation.kind in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}:
+                destination = next(
+                    (str(condition.expected) for condition in operation.postconditions if condition.kind == "url"),
+                    str(operation.value or ""),
+                )
+                canonical = _canonical_url(urljoin(context.url, destination)) if destination else ""
+                if (
+                    deduped
+                    and deduped[-1].kind in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
+                    and canonical
+                    and _canonical_url(urljoin(context.url, next(
+                        (str(condition.expected) for condition in deduped[-1].postconditions if condition.kind == "url"),
+                        str(deduped[-1].value or ""),
+                    ))) == canonical
+                ):
+                    continue
+            deduped.append(operation)
+        return proposal.model_copy(update={"steps": deduped})
 
     @staticmethod
     def _validate(
@@ -360,9 +969,31 @@ class ProductionPlanningService:
     ) -> None:
         observed_selectors = {item.selector for item in [*context.elements, *context.navigation]}
         observed_names = {item.name.lower() for item in [*context.elements, *context.navigation]}
-        observed_routes = {urljoin(item.source_url or context.url, item.href) for item in context.navigation if item.href}
+        capability_targets: set[tuple[str | None, str]] = set()
+        for raw in context.capabilities:
+            try:
+                capability = ActionCapability.model_validate(raw)
+            except ValidationError:
+                continue
+            for field in capability.form_schema.fields if capability.form_schema else []:
+                capability_targets.add((capability.source_url, field.name.casefold()))
+            for target in (capability.submit_target, capability.outcome_target):
+                if target is not None:
+                    capability_targets.add((target.source_url, target.name.casefold()))
+        observed_routes = {
+            _canonical_url(urljoin(item.source_url or context.url, item.href))
+            for item in context.navigation if item.href
+        }
+        # A page-local element can be the only captured witness for a route
+        # during an incremental discovery snapshot.  Its source URL is still
+        # observed evidence and must be accepted when the compiler inserts the
+        # required page entry before a local scroll.
+        observed_routes.update(
+            _canonical_url(item.source_url) for item in context.elements
+            if item.source_url and item.source_url != context.url
+        )
         source_by_selector = {item.selector: item.source_url for item in context.elements}
-        navigated_to: set[str] = {context.url}
+        navigated_to: set[str] = {_canonical_url(context.url)}
         for operation in proposal.steps:
             if operation.kind in SIDE_EFFECTING:
                 try:
@@ -370,8 +1001,10 @@ class ProductionPlanningService:
                 except SideEffectPolicyError as error:
                     raise PlanningValidationError(str(error)) from error
             if operation.kind is OperationKind.NAVIGATE:
-                destination = urljoin(context.url, str(operation.value))
-                if destination not in {context.url, *context.relevant_routes, *observed_routes}:
+                destination = _canonical_url(urljoin(context.url, str(operation.value)))
+                if destination not in {
+                    _canonical_url(value) for value in (context.url, *context.relevant_routes)
+                } | observed_routes:
                     raise PlanningValidationError(
                         "Navigation target is not observed and same-origin"
                     )
@@ -380,16 +1013,27 @@ class ProductionPlanningService:
             elif (
                 operation.target.selector not in observed_selectors
                 and operation.target.name.lower() not in observed_names
+                and (operation.target.source_url, operation.target.name.casefold()) not in capability_targets
+                and not (
+                    operation.target.selector == "body"
+                    and operation.target.source_url
+                    and any(
+                        _canonical_url(page.url)
+                        == _canonical_url(operation.target.source_url)
+                        and (page.visible_facts or page.evidence_refs)
+                        for page in context.page_knowledge
+                    )
+                )
             ):
                 raise PlanningValidationError(
                     f"Target is not grounded in current evidence: {operation.target.name}"
                 )
             if operation.kind is OperationKind.NAVIGATE:
-                navigated_to.add(urljoin(context.url, str(operation.value)))
+                navigated_to.add(_canonical_url(urljoin(context.url, str(operation.value))))
             elif operation.kind is OperationKind.OPEN_NAVIGATION_ITEM:
                 destination = next((str(condition.expected) for condition in operation.postconditions if condition.kind == "url"), None)
                 if destination:
-                    navigated_to.add(urljoin(context.url, destination))
+                    navigated_to.add(_canonical_url(urljoin(context.url, destination)))
             elif operation.target is not None:
                 # Prefer provenance carried on the operation target. A
                 # selector is not globally unique in SPAs and may otherwise
@@ -399,7 +1043,7 @@ class ProductionPlanningService:
                     if operation.target.selector
                     else source_by_selector.get(operation.target.selector or "")
                 )
-                if source and source not in navigated_to:
+                if source and _canonical_url(source) not in navigated_to:
                     raise PlanningValidationError(
                         f"Target {operation.target.name} requires an observed navigation to {source}"
                     )
@@ -440,6 +1084,17 @@ class ProductionPlanningService:
     def _ground(proposal: WorkflowProposal, context: ProductContext) -> list:
         """Replace planner target hints with the exact observed locator evidence."""
         observed_items = [*context.elements, *context.navigation]
+        capability_target_names: set[tuple[str | None, str]] = set()
+        for raw in context.capabilities:
+            try:
+                capability = ActionCapability.model_validate(raw)
+            except ValidationError:
+                continue
+            for field in capability.form_schema.fields if capability.form_schema else []:
+                capability_target_names.add((capability.source_url, field.name.casefold()))
+            for target in (capability.submit_target, capability.outcome_target):
+                if target is not None:
+                    capability_target_names.add((target.source_url, target.name.casefold()))
         by_selector = {item.selector: item for item in observed_items}
         by_name = {item.name.lower(): item for item in observed_items}
         roles = {"a": "link", "button": "button", "select": "combobox", "textarea": "textbox", "h1": "heading", "h2": "heading", "h3": "heading", "h4": "heading"}
@@ -456,6 +1111,23 @@ class ProductionPlanningService:
                 grounded.append(operation)
                 continue
             selector = operation.target.selector or ""
+            # A page-level verified hold is intentionally grounded by the
+            # captured PageKnowledge record rather than a DOM element. This
+            # is used for dense grids/transient states where every element is
+            # a table cell or modal control and selecting one would create a
+            # misleading editorial target.
+            if (
+                selector == "body"
+                and operation.target.source_url
+                and any(
+                    _canonical_url(page.url)
+                    == _canonical_url(operation.target.source_url)
+                    and (page.visible_facts or page.evidence_refs)
+                    for page in context.page_knowledge
+                )
+            ):
+                grounded.append(operation)
+                continue
             # Discovery uses generic tag selectors only when a page does not
             # expose a stronger id/test id. Such selectors are not unique, so
             # prefer the observed accessible name for grounding in that case.
@@ -497,6 +1169,13 @@ class ProductionPlanningService:
                     else by_selector.get(selector)
                 ) or by_name.get(operation.target.name.lower())
             if item is None:
+                if (operation.target.source_url, operation.target.name.casefold()) in capability_target_names:
+                    # Fields inside a reversible modal are intentionally absent
+                    # from the resting page DOM. Preserve their discovery-time
+                    # semantic label; execution re-grounds only after the
+                    # verified open-modal step has made the form visible.
+                    grounded.append(operation)
+                    continue
                 raise PlanningValidationError(
                     f"Target is not grounded in current evidence: {operation.target.name}"
                 )
@@ -682,7 +1361,23 @@ class ProductionPlanningService:
         # Inputs and buttons can be workflow targets, but are not reading
         # landmarks. Prefer semantic page headings whenever they are present.
         if heading_candidates:
-            candidates = heading_candidates
+            # Headings establish a section, but a dashboard/table/form page
+            # often exposes only one heading while its actual interaction
+            # surface is represented by descriptive rows, filters, or cards.
+            # Keep a bounded set of those page-local witnesses as supplemental
+            # reading landmarks instead of declaring the page complete after a
+            # title-only scroll. This remains DOM/evidence-derived and works
+            # for any product shape.
+            original_candidates = list(candidates)
+            candidates = list(heading_candidates)
+            if len(heading_candidates) < 3:
+                supplemental = [
+                    item for item in original_candidates
+                    if item not in heading_candidates
+                    and len(" ".join((item.text or item.name).split())) >= 24
+                    and not (item.tag == "a" and " ".join(item.name.split()).lower() in navigation_labels)
+                ]
+                candidates.extend(supplemental[: max(0, 4 - len(candidates))])
         collections: list[tuple[ObservedElement, list[ObservedElement]]] = []
         for index, item in enumerate(heading_candidates):
             if item.tag != "h2":

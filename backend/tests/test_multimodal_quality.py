@@ -22,6 +22,8 @@ def test_multimodal_reviewer_findings_are_normalized(tmp_path: Path):
     video = tmp_path / "demo.mp4"
     video.write_bytes(b"video")
     packet = build_review_packet(video=video, run_id="run", trace={})
-    report = review_multimodal(packet, lambda _: {"provider": "test", "findings": ["smooth"]})
+    seen = {}
+    report = review_multimodal(packet, lambda payload: (seen.update(payload), {"provider": "test", "findings": ["smooth"]})[1])
     assert report["status"] == "complete"
     assert report["findings"] == ["smooth"]
+    assert "frames" in seen

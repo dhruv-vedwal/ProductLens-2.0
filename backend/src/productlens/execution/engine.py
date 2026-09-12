@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
 from datetime import UTC, datetime
 from time import perf_counter
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from productlens.artifacts.store import RunArtifacts
 from productlens.browser.recovery import RecoveryBudget
+from productlens.browser.theme import discover_theme_control
 from productlens.contracts.models import (
     DemoPlan,
     DemoTrace,
@@ -22,6 +26,42 @@ from productlens.execution.playwright_adapter import GroundingError, PlaywrightA
 
 class VerificationError(RuntimeError):
     pass
+
+
+def _canonical_browser_url(value: str) -> str:
+    """Normalize encoded paths and query-free browser state for URL QA."""
+    parsed = urlsplit(value)
+    return urlunsplit((
+        parsed.scheme.lower(), parsed.netloc.lower(),
+        unquote(parsed.path).rstrip("/") or "/", parsed.query, "",
+    ))
+
+
+def _browser_url_matches(actual: str, expected: str) -> bool:
+    """Match exact canonical states and the plan's same-origin suffix form."""
+    if expected.startswith("**/"):
+        suffix = unquote(expected[3:]).rstrip("/")
+        return _canonical_browser_url(actual).rstrip("/").endswith("/" + suffix)
+    return _canonical_browser_url(actual) == _canonical_browser_url(expected)
+
+
+def _value_matches(target_name: str, expected: object, actual: str) -> bool:
+    """Compare a rendered form value using the target's observed data shape.
+
+    Telephone controls commonly format or strip punctuation while a person is
+    typing. Exact-string comparison incorrectly treats that visible, accepted
+    value as a failed action. Keep strict equality for every other field and
+    normalise only a target explicitly identified as phone/mobile/tel.
+    """
+    expected_text = str(expected)
+    if actual == expected_text:
+        return True
+    target_words = set(re.findall(r"[a-z0-9]+", target_name.casefold()))
+    if {"phone", "mobile", "telephone", "tel"} & target_words:
+        expected_digits = "".join(re.findall(r"\d", expected_text))
+        actual_digits = "".join(re.findall(r"\d", actual))
+        return bool(expected_digits) and expected_digits == actual_digits
+    return False
 
 
 class ExecutionEngine:
@@ -63,9 +103,9 @@ class ExecutionEngine:
             return p.length >= 3 && (p[0] * .2126 + p[1] * .7152 + p[2] * .0722) <= 150; }"""
         )
         if is_dark:
-            toggle = page.get_by_role("button", name="Toggle Theme")
-            if await toggle.count():
-                await toggle.first.click()
+            toggle = await discover_theme_control(page)
+            if toggle is not None:
+                await toggle.click()
                 await page.wait_for_timeout(900)
         # Do not mutate product CSS. The next verifier measures the rendered
         # result and rejects the capture if the site's own control did not win.
@@ -83,6 +123,7 @@ class ExecutionEngine:
         action_at = None
         scroll_before: dict[str, float] | None = None
         scroll_motion: dict[str, object] | None = None
+        verified_outcome: dict | None = None
         # This is deliberately captured *before* the editorial reading hold.
         # ``occurred_at`` is the moment the verified state became visible; a
         # hold preserves that state for the viewer, it is not part of the
@@ -94,8 +135,28 @@ class ExecutionEngine:
             while True:
                 action_dispatched = False
                 try:
+                    readiness = getattr(self.adapter, "wait_for_page_readiness", None)
+                    if callable(readiness):
+                        await readiness(operation.target)
                     for condition in operation.preconditions:
                         await self.verify(condition)
+                    # Do this before the before-snapshot and scene clock. A
+                    # viewer must never receive narration for content hidden
+                    # behind a branch/announcement/chooser dialog. Planned
+                    # form controls are allowed because the adapter proves
+                    # their target belongs to the active dialog.
+                    blocking_overlay = getattr(self.adapter, "blocking_overlay", None)
+                    if callable(blocking_overlay):
+                        blocker = await blocking_overlay(operation.target)
+                        if blocker:
+                            dismiss = getattr(self.adapter, "dismiss_safe_overlay", None)
+                            if callable(dismiss) and await dismiss():
+                                recovery.append({
+                                    "strategy": "dismiss_safe_overlay_before_scene",
+                                    "reason": blocker,
+                                })
+                            else:
+                                raise GroundingError(f"BLOCKING_OVERLAY_UNRESOLVED: {blocker}")
                     # Both calls resolve a fresh locator from the live DOM. A
                     # retry therefore re-grounds semantically, not by reusing an
                     # old coordinate or a cached element handle.
@@ -127,6 +188,32 @@ class ExecutionEngine:
                     # could duplicate a submit or another side effect.
                     for condition in operation.postconditions:
                         await self.verify(condition)
+                        if (
+                            operation.kind is OperationKind.SUBMIT
+                            and condition.target is not None
+                            and (operation.target is None or condition.target.name.casefold() != operation.target.name.casefold())
+                        ):
+                            # Persist the independent witness, not merely the
+                            # save button snapshot. Completion audit uses this
+                            # exact postcondition evidence to prove a replayed
+                            # create flow reached its promised result.
+                            # A URL postcondition is already its own witness.
+                            # Its optional target is descriptive metadata (for
+                            # example ``verified created record``), not
+                            # necessarily a DOM element.  Never try to ground
+                            # that abstract label after navigation: doing so
+                            # turns a successfully verified outcome into a
+                            # ``No deterministic grounding evidence`` failure.
+                            if condition.kind == "url":
+                                verified_outcome = await self.adapter.snapshot(None)
+                                verified_outcome["expected_url"] = str(condition.expected)
+                            else:
+                                snapshot_visible = getattr(self.adapter, "snapshot_visible", None)
+                                verified_outcome = (
+                                    await snapshot_visible(condition.target)
+                                    if callable(snapshot_visible)
+                                    else await self.adapter.snapshot(condition.target)
+                                )
                     occurred_at = datetime.now(UTC)
                     if self.adapter.page is not None:
                         await self._active_page().wait_for_timeout(
@@ -139,6 +226,15 @@ class ExecutionEngine:
                         # A dispatched operation is never replayed merely
                         # because verifying it needs another locator.
                         raise
+                    # A fresh production context can have a safe, dismissible
+                    # dialog layered over the discovered page (for example a
+                    # branch chooser).  Clear only that semantic overlay, then
+                    # re-ground the same target; the recovery is attached to
+                    # the scene event so it remains auditable.
+                    dismiss = getattr(self.adapter, "dismiss_safe_overlay", None)
+                    if callable(dismiss) and await dismiss():
+                        recovery.append({"strategy": "dismiss_safe_overlay", "reason": str(error)[:500]})
+                        continue
                     if not self.recovery_budget.allow_reground(
                         FailureCode.TARGET_RESOLUTION_FAILURE
                     ):
@@ -163,6 +259,8 @@ class ExecutionEngine:
                     "target_available": False,
                     "snapshot_error": str(error)[:500],
                 }
+            if verified_outcome is not None:
+                after["verified_outcome"] = verified_outcome
             viewport, scroll = await self.adapter.view_state()
             event = InteractionEvent(
                 operation_id=operation.id,
@@ -196,7 +294,20 @@ class ExecutionEngine:
             )
             if scroll_motion:
                 event.after["scroll_motion"] = scroll_motion
-            if self.artifacts and self.capture_event_screenshots:
+            # Production may turn off routine per-event screenshots for a
+            # lightweight rehearsal, but an authorised mutation with a
+            # viewer-facing visible postcondition is never optional evidence.
+            # Keep a screenshot of that verified state even in the compact
+            # mode; otherwise a later read-only recovery can prove the record
+            # exists while the actual demo recording ends on the submit form.
+            requires_visible_outcome_witness = (
+                operation.kind is OperationKind.SUBMIT
+                and any(
+                    condition.kind == "visible" and condition.target is not None
+                    for condition in operation.postconditions
+                )
+            )
+            if self.artifacts and (self.capture_event_screenshots or requires_visible_outcome_witness):
                 screenshot = self.artifacts.screenshot_path(len(self.trace.events) + 1)
                 await self._active_page().screenshot(path=str(screenshot), full_page=False)
                 event.screenshot_path = str(screenshot.relative_to(self.artifacts.root))
@@ -252,7 +363,14 @@ class ExecutionEngine:
     async def verify(self, condition: Postcondition) -> None:
         page = self.adapter.page
         if condition.kind == "url":
-            await page.wait_for_url(str(condition.expected), timeout=condition.timeout_ms)
+            expected = str(condition.expected)
+            deadline = perf_counter() + condition.timeout_ms / 1000
+            while not _browser_url_matches(page.url, expected):
+                if perf_counter() >= deadline:
+                    raise VerificationError(
+                        f"Expected URL {condition.expected!r}, got {page.url!r}"
+                    )
+                await asyncio.sleep(0.05)
         elif condition.kind == "visible":
             if condition.target is None:
                 raise VerificationError("Visible postcondition requires a semantic target")
@@ -264,7 +382,7 @@ class ExecutionEngine:
             locator, _ = await self.adapter.grounded_locator(condition.target)
             await locator.wait_for(timeout=condition.timeout_ms)
             actual = await locator.input_value()
-            if actual != str(condition.expected):
+            if not _value_matches(condition.target.name, condition.expected, actual):
                 raise VerificationError(
                     f"Expected {condition.target.name}={condition.expected!r}, got {actual!r}"
                 )

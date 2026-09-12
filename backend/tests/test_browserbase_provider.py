@@ -69,8 +69,11 @@ async def test_create_session_uses_only_the_browserbase_api_key(monkeypatch):
         def raise_for_status(self):
             return None
 
+        def __init__(self, payload):
+            self.payload = payload
+
         def json(self):
-            return {"id": "session-1", "connectUrl": "wss://example.test/session-1"}
+            return self.payload
 
     class Client:
         async def __aenter__(self):
@@ -81,15 +84,47 @@ async def test_create_session_uses_only_the_browserbase_api_key(monkeypatch):
 
         async def post(self, _url, **kwargs):
             assert kwargs["headers"]["x-bb-api-key"] == "test-key"
+            if _url.endswith("/extensions"):
+                assert "file" in kwargs["files"]
+                return Response({"id": "extension-1"})
             assert kwargs["json"] == {
+                "extensionId": "extension-1",
                 "timeout": 1800,
                 "browserSettings": {"recordSession": True, "solveCaptchas": True}
             }
-            return Response()
+            return Response({"id": "session-1", "connectUrl": "wss://example.test/session-1"})
 
     monkeypatch.setattr("productlens.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client())
     session = await BrowserbaseProvider("test-key").create_session_info()
     assert session.session_id == "session-1"
+    assert session.stagehand_extension_id == "extension-1"
+
+
+@pytest.mark.asyncio
+async def test_create_session_passes_recording_viewport_and_non_secret_metadata(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def __init__(self, payload): self.payload = payload
+        def json(self): return self.payload
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def post(self, url, **kwargs):
+            if url.endswith('/extensions'):
+                return Response({})
+            assert kwargs['json']['browserSettings']['viewport'] == {'width': 1440, 'height': 900}
+            assert kwargs['json']['userMetadata'] == {'productlens_run_id': 'run-1', 'stage': 'production'}
+            return Response({'id': 'session-2', 'connectUrl': 'wss://example.test/session-2'})
+
+    monkeypatch.setattr('productlens.providers.browserbase.httpx.AsyncClient', lambda **kwargs: Client())
+    session = await BrowserbaseProvider('test-key').create_session_info(
+        viewport={'width': 1440, 'height': 900},
+        user_metadata={'productlens_run_id': 'run-1', 'stage': 'production'},
+    )
+    assert session.session_id == 'session-2'
 
 
 @pytest.mark.asyncio

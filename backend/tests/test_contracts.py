@@ -4,13 +4,25 @@ import pytest
 from pydantic import ValidationError
 
 from productlens.contracts.models import (
+    AudienceProfile,
     DemoPlan,
     DemoTrace,
     InteractionEvent,
+    NarrationScript,
     OperationKind,
     Target,
     WorkflowState,
 )
+
+
+def test_audience_profile_is_bounded_and_serializable():
+    profile = AudienceProfile(
+        type="recruiter", vocabulary="executive", depth="overview",
+        priorities=["career progression"], narration_style="concise",
+    )
+    assert profile.model_dump()["type"] == "recruiter"
+    with pytest.raises(ValidationError):
+        AudienceProfile(type="unknown")
 
 
 def test_demo_plan_rejects_unstructured_fields():
@@ -54,3 +66,20 @@ def test_trace_requires_semantic_before_after_and_success():
     trace.final_state = WorkflowState.ACTION_IN_PROGRESS
     assert trace.events[0].before != trace.events[0].after
     assert trace.events[0].target.test_id == "new-lead-btn"
+
+
+def test_narration_script_is_versioned_and_rejects_invalid_timing():
+    script = NarrationScript(segments=[{
+        "scene_id": "scene-1", "event_id": "event-1",
+        "text": "This opening view establishes the product context for the viewer.",
+        "evidence": ["page:https://example.test/"],
+        "start_seconds": 0, "end_seconds": 3,
+    }])
+    assert script.schema_version == 1
+    assert script.timing_owner == "scene"
+    with pytest.raises(ValidationError):
+        NarrationScript(segments=[{
+            "scene_id": "scene-1", "event_id": "event-1",
+            "text": "This opening view establishes the product context for the viewer.",
+            "start_seconds": 4, "end_seconds": 2,
+        }])

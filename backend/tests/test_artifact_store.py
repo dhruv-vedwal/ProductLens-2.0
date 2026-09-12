@@ -112,6 +112,17 @@ def test_render_retry_copies_required_predecessor_evidence_but_not_a_prior_deliv
     assert not (child.root / "final" / "demo.mp4").exists()
 
 
+def test_manifest_excludes_mutable_run_status_checkpoint(tmp_path):
+    artifacts = RunArtifacts(tmp_path, "manifest-status")
+    artifacts.write_json("objective.json", {"objective": "demo"})
+    artifacts.write_json("run-status.json", {"status": "RUNNING"})
+    artifacts.write_manifest()
+    entries = json.loads((artifacts.root / "artifact-manifest.json").read_text())[
+        "artifacts"
+    ]
+    assert "run-status.json" not in {entry["path"] for entry in entries}
+
+
 def test_planning_retry_inherits_root_discovery_evidence_required_by_delivery_qa(tmp_path):
     parent = RunArtifacts(tmp_path, "parent")
     parent.write_json("discovery/product-context.json", {"page": "observed"})

@@ -7,7 +7,7 @@ from productlens.persistence.repository import RunRepository
 from productlens.planning.production import ProductionPlanningService
 from productlens.providers.browserbase import BrowserbaseProvider
 from productlens.providers.elevenlabs import ElevenLabsProvider
-from productlens.providers.openrouter import OpenRouterProvider
+from productlens.providers.openrouter import OpenRouterProvider, OpenRouterVisualReviewer
 from productlens.providers.stagehand import StagehandProvider
 from productlens.services.generation import UrlGenerationService
 from productlens.services.jobs import DemoJobService
@@ -27,6 +27,11 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
         if settings.openrouter_api_key
         else None
     )
+    visual_reviewer = (
+        OpenRouterVisualReviewer(settings.openrouter_api_key, settings.openrouter_vision_model)
+        if settings.multimodal_review_enabled and settings.openrouter_api_key and settings.openrouter_vision_model
+        else None
+    )
     generator = (
         UrlGenerationService(
             ProductionPlanningService(planner_provider),
@@ -42,9 +47,13 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
                 model=settings.stagehand_model,
                 node=settings.stagehand_node,
                 browserbase_api_key=settings.browserbase_api_key,
+                browserbase_project_id=settings.browserbase_project_id,
+                openrouter_api_key=settings.openrouter_api_key,
+                openrouter_model=settings.openrouter_model,
             )
             if settings.browserbase_api_key
             else None,
+            visual_reviewer=visual_reviewer,
             cloud_capture_timeout_seconds=settings.cloud_capture_timeout_seconds,
         )
         if planner_provider

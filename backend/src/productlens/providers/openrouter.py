@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
+from pathlib import Path
 from typing import Any, TypeVar
 
 import httpx
@@ -88,3 +91,84 @@ class OpenRouterProvider:
             model=self.model,
         )
         return schema.model_validate_json(content)
+
+
+class OpenRouterVisualReviewer:
+    """Opt-in, non-secret visual reviewer for rendered ProductLens frames.
+
+    It is intentionally separate from the planning provider: a text-only
+    planning model must never be assumed to understand screenshots, and visual
+    review is an explicit cost/privacy choice controlled by configuration.
+    """
+
+    endpoint = OpenRouterProvider.endpoint
+
+    def __init__(self, api_key: str, model: str):
+        self.api_key, self.model = api_key, model
+
+    def __call__(self, packet: dict[str, Any]) -> dict[str, Any]:
+        frames = packet.get("frames") if isinstance(packet.get("frames"), list) else []
+        content: list[dict[str, Any]] = [{
+            "type": "text",
+            "text": (
+                "You are a strict product-demo video reviewer. Inspect the supplied rendered frames against this "
+                "checklist: full readable product frame, no crop or blank state, caption readability and relevance, "
+                "cursor/target plausibility, purposeful zoom, and coherent scene progression. Return JSON only with "
+                "{hard_failures:string[],warnings:string[],findings:object[]}. Report only visible evidence; do not "
+                "infer hidden content or repeat webpage text. "
+                f"Run metadata: {json.dumps({key: packet.get(key) for key in ('run_id', 'sample_seconds', 'event_count', 'scene_count')})}"
+            ),
+        }]
+        for frame in frames[:8]:
+            path = Path(str(frame.get("path", ""))) if isinstance(frame, dict) else Path()
+            if not path.is_file() or path.stat().st_size == 0:
+                continue
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{encoded}"},
+            })
+        if len(content) == 1:
+            return {
+                "provider": "openrouter", "hard_failures": ["MULTIMODAL_REVIEW_FRAMES_UNAVAILABLE"],
+                "warnings": [], "findings": [],
+            }
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": content}],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+            "max_tokens": 900,
+        }
+        try:
+            with httpx.Client(timeout=httpx.Timeout(50.0, connect=10.0)) as client:
+                response = client.post(
+                    self.endpoint,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost:3000"),
+                        "X-OpenRouter-Title": os.getenv("OPENROUTER_APP_TITLE", "ProductLens 2.0"),
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+            response_content = response.json()["choices"][0]["message"]["content"]
+            if isinstance(response_content, list):
+                response_content = "".join(
+                    str(part.get("text", "")) for part in response_content if isinstance(part, dict)
+                )
+            result = json.loads(str(response_content))
+            if not isinstance(result, dict):
+                raise TypeError("visual review did not return an object")
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            return {
+                "provider": "openrouter", "hard_failures": [],
+                "warnings": [f"MULTIMODAL_REVIEW_UNAVAILABLE:{type(error).__name__}"], "findings": [],
+            }
+        return {
+            "provider": f"openrouter:{self.model}",
+            "hard_failures": [str(item) for item in result.get("hard_failures", []) if str(item).strip()],
+            "warnings": [str(item) for item in result.get("warnings", []) if str(item).strip()],
+            "findings": result.get("findings", []),
+        }

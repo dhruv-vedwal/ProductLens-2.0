@@ -7,6 +7,7 @@ from pathlib import Path
 _PROVIDER_ENV_NAMES = {
     "OPENROUTER_API_KEY",
     "OPENROUTER_MODEL",
+    "OPENROUTER_VISION_MODEL",
     "ELEVENLABS_API_KEY",
     "ELEVENLABS_VOICE_ID",
     "ELEVENLABS_TTS_MODEL",
@@ -18,6 +19,7 @@ _PROVIDER_ENV_NAMES = {
     "PRODUCTLENS_WORKER_MODE",
     "PRODUCTLENS_AUTH_SECRET",
     "PRODUCTLENS_AUTH_REQUIRED",
+    "PRODUCTLENS_MULTIMODAL_REVIEW_ENABLED",
     "PRODUCTLENS_SESSION_TTL_SECONDS",
     "PRODUCTLENS_ARTIFACT_STORAGE",
     "PRODUCTLENS_S3_BUCKET",
@@ -52,6 +54,8 @@ class Settings:
     database_url: str
     openrouter_api_key: str | None
     openrouter_model: str
+    openrouter_vision_model: str | None
+    multimodal_review_enabled: bool
     elevenlabs_api_key: str | None
     elevenlabs_voice_id: str
     elevenlabs_tts_model: str
@@ -100,6 +104,9 @@ class Settings:
             database_url=database_url,
             openrouter_api_key=value("OPENROUTER_API_KEY"),
             openrouter_model=value("OPENROUTER_MODEL", "openrouter/free"),
+            openrouter_vision_model=value("OPENROUTER_VISION_MODEL"),
+            multimodal_review_enabled=value("PRODUCTLENS_MULTIMODAL_REVIEW_ENABLED", "false").lower()
+            in {"1", "true", "yes"},
             elevenlabs_api_key=value("ELEVENLABS_API_KEY"),
             elevenlabs_voice_id=value("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
             elevenlabs_tts_model=value("ELEVENLABS_TTS_MODEL", "eleven_multilingual_v2"),

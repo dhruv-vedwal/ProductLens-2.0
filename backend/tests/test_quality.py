@@ -1,6 +1,19 @@
 from pathlib import Path
 
-from productlens.quality.video import _frame_pacing, _timestamp_pacing, inspect_video
+from productlens.quality.video import (
+    _frame_pacing,
+    _mapped_source_second,
+    _timestamp_pacing,
+    inspect_video,
+)
+
+
+def test_editorial_source_time_map_tracks_concatenated_windows():
+    windows = [(17.5, 32.5), (44.5, 52.5)]
+    assert _mapped_source_second(0.0, windows) == 17.5
+    assert _mapped_source_second(15.0, windows) == 32.5
+    assert _mapped_source_second(16.0, windows) == 45.5
+    assert _mapped_source_second(24.0, windows) == 52.5
 
 
 def test_missing_video_is_a_hard_failure(tmp_path: Path):
@@ -15,6 +28,29 @@ def test_uniform_sampled_frames_are_rejected(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("productlens.quality.video._sample_frame_quality", lambda *args: [{"variance": 0.0}])
     report = inspect_video(video, execution_verified=True)
     assert "VISUALLY_EMPTY_RENDER" in report["hard_failures"]
+
+
+def test_near_white_opening_is_rejected_even_with_compositor_edges(monkeypatch, tmp_path: Path):
+    video = tmp_path / "white-opening.mp4"
+    video.write_bytes(b"x" * 10_001)
+    monkeypatch.setattr(
+        "productlens.quality.video.subprocess.run",
+        lambda *args, **kwargs: type(
+            "R", (), {
+                "stdout": '{"streams":[{"codec_type":"video","width":1920,"height":1080,"avg_frame_rate":"30/1"}],"format":{"duration":"10","bit_rate":"800000"}}',
+                "stderr": "",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "productlens.quality.video._sample_frame_quality",
+        lambda *args: [
+            {"second": 2.2, "mean_luma": 252.0, "variance": 12.0},
+            {"second": 5.0, "mean_luma": 120.0, "variance": 12.0},
+        ],
+    )
+    report = inspect_video(video, execution_verified=True)
+    assert "UNESTABLISHED_OR_BLANK_OPENING_FRAME" in report["hard_failures"]
 
 
 def test_render_is_rejected_when_it_does_not_preserve_any_browser_footage(monkeypatch, tmp_path: Path):

@@ -122,6 +122,19 @@ def main() -> None:
         presentation = PresentationPlan.model_validate(
             json.loads((artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8"))
         )
+    # Always pass the validated scene contract to Remotion.  The old
+    # trace-only path rendered with an empty ``scenes`` array, so captions
+    # fell back to the bottom of the frame even after a scene-level safety
+    # repair.  Prefer the validated plan, and fall back to the freshly
+    # materialized scene plan only for legacy artifacts.
+    scenes_path = artifacts.presentation / "validated-scene-plan.json"
+    if scenes_path.exists():
+        scenes = json.loads(scenes_path.read_text(encoding="utf-8"))
+    else:
+        scene_plan_path = artifacts.presentation / "scene-plan.json"
+        scenes = json.loads(scene_plan_path.read_text(encoding="utf-8")) if scene_plan_path.exists() else build_scene_plan(trace)
+    if not isinstance(scenes, list):
+        raise RuntimeError("validated scene plan must be a list")
     storyboard_path = artifacts.presentation / "storyboard.json"
     storyboard = (
         EditorialStoryboard.model_validate(json.loads(storyboard_path.read_text(encoding="utf-8")))
@@ -159,6 +172,7 @@ def main() -> None:
             artifacts,
             narration_path=narration if narration.exists() else None,
             captions=captions,
+            scenes=scenes,
             target_duration_seconds=target_duration,
             maximum_duration_seconds=(int(maximum_duration) if maximum_duration is not None else None),
             storyboard=storyboard,

@@ -77,8 +77,10 @@ class GenerationRequest(BaseModel):
     url: HttpUrl
     objective: str = Field(min_length=3, max_length=2_000)
     allow_external_side_effects: bool = False
+    # Explicitly narrower than external side effects: permits a discovered
+    # isolated demo record only after workflow/outcome validation.
+    allow_isolated_record_creation: bool = False
     cloud_discovery: bool = False
-    stagehand_assist: bool = False
     max_pages: int = Field(default=6, ge=1, le=12)
     render: bool = True
     project_id: str | None = None
@@ -125,8 +127,8 @@ class RetryRequest(BaseModel):
     """Explicit retry configuration; safe defaults prevent replaying side effects."""
 
     allow_external_side_effects: bool = False
+    allow_isolated_record_creation: bool = False
     cloud_discovery: bool | None = None
-    stagehand_assist: bool | None = None
     max_pages: int | None = Field(default=None, ge=1, le=12)
     render: bool | None = None
     credential_reference: str | None = None
@@ -395,12 +397,10 @@ async def retry_generation_run(
         # must opt in again for every replayable external mutation.
         job_payload = {
             "allow_external_side_effects": payload.allow_external_side_effects,
+            "allow_isolated_record_creation": payload.allow_isolated_record_creation,
             "cloud_discovery": payload.cloud_discovery
             if payload.cloud_discovery is not None
             else bool(original.get("cloud_discovery", False)),
-            "stagehand_assist": payload.stagehand_assist
-            if payload.stagehand_assist is not None
-            else bool(original.get("stagehand_assist", False)),
             "max_pages": payload.max_pages
             if payload.max_pages is not None
             else int(original.get("max_pages", 6)),

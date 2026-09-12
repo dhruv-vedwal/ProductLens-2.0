@@ -10,6 +10,15 @@ from typing import Any
 from productlens.contracts.models import DemoTrace
 
 
+def _sha256_file(path: Path) -> str:
+    """Hash video and trace evidence without materialising it in memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class RunArtifacts:
     """Creates the plan-defined evidence layout without overwriting another run."""
 
@@ -101,15 +110,20 @@ class RunArtifacts:
     def write_manifest(self) -> Path:
         """Persist a deterministic checksum manifest for the completed run."""
         entries: list[dict[str, Any]] = []
-        for source in sorted(path for path in self.root.rglob("*") if path.is_file() and path.name != "artifact-manifest.json"):
-            digest = hashlib.sha256()
-            with source.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
+        # ``run-status.json`` is a mutable operational checkpoint updated by
+        # the worker after each lifecycle transition.  It is deliberately not
+        # part of the immutable evidence manifest; hashing it would make a
+        # valid delivery appear tampered merely because the job reached its
+        # terminal state after publication.
+        for source in sorted(
+            path
+            for path in self.root.rglob("*")
+            if path.is_file() and path.name not in {"artifact-manifest.json", "run-status.json"}
+        ):
             entries.append({
                 "path": source.relative_to(self.root).as_posix(),
                 "bytes": source.stat().st_size,
-                "sha256": digest.hexdigest(),
+                "sha256": _sha256_file(source),
             })
         return self.write_json("artifact-manifest.json", {"run_id": self.root.name, "artifacts": entries})
 
@@ -131,7 +145,7 @@ class RunArtifacts:
             if not path.is_file():
                 missing.append(relative)
                 continue
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            digest = _sha256_file(path)
             if digest != entry.get("sha256") or path.stat().st_size != entry.get("bytes"):
                 mutated.append(relative)
         return {"valid": not missing and not mutated, "missing_manifest": False, "missing": missing, "mutated": mutated}
@@ -145,15 +159,22 @@ class RunArtifacts:
         """
         paths = {
             "objective": self.root / "objective.json",
+            "objective_understanding": self.root / "discovery" / "objective-understanding.json",
             "exploration_report": self.root / "exploration-report.json",
+            "product_knowledge": self.root / "discovery" / "product-knowledge.json",
             "page_knowledge": self.root / "page-knowledge",
             "feature_graph": self.root / "feature-graph.json",
             "candidate_flows": self.root / "candidate-flows.json",
+            "relevance_graph": self.root / "discovery" / "relevance-graph.json",
+            "demo_brief": self.root / "planning" / "demo-brief.json",
+            "validated_state_graph": self.root / "planning" / "validated-state-graph.json",
             "plan": self.root / "plan.json",
+            "plan_consistency": self.qa / "plan-consistency-report.json",
             "editorial_brief": self.presentation / "editorial-brief.json",
             "storyboard": self.presentation / "storyboard.json",
             "scene_plan": self.presentation / "scene-plan.json",
             "validated_scene_plan": self.presentation / "validated-scene-plan.json",
+            "actual_flow_storyboard": self.presentation / "actual-flow-storyboard.json",
             "narration_script": self.presentation / "narration-script.json",
             "captions": self.presentation / "rendered-captions.json",
             "coverage_qa": self.qa / "coverage-report.json",
@@ -171,6 +192,18 @@ class RunArtifacts:
             for name, path in paths.items()
             },
         }
+        # An explicitly authorised creation demo must prove the separate
+        # rehearsal boundary. Without this artifact a final render could show
+        # a submit while silently lacking the independent outcome witness that
+        # made the production workflow safe to replay.
+        objective_path = self.root / "objective.json"
+        try:
+            objective = json.loads(objective_path.read_text(encoding="utf-8")) if objective_path.is_file() else {}
+        except (OSError, ValueError, TypeError):
+            objective = {}
+        if "create_isolated_record" in objective.get("permitted_mutations", []):
+            rehearsal = self.root / "discovery" / "rehearsal-report.json"
+            required["rehearsal_outcome"] = rehearsal.is_file() and rehearsal.stat().st_size > 0
         # Browserbase production uses Session Replay plus the ProductLens
         # DemoTrace instead of starting a local Playwright trace. Accept that
         # verified native pair as equivalent trace evidence for live delivery.

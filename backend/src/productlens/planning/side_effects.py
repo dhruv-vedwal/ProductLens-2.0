@@ -11,10 +11,14 @@ class SideEffectPolicyError(ValueError):
 
 MUTATING_KINDS = {OperationKind.SUBMIT, OperationKind.CHECK, OperationKind.UNCHECK}
 _BLOCKED_TERMS = {
-    "payment", "pay", "checkout", "invoice", "charge", "email", "sms", "whatsapp",
+    "payment", "pay", "checkout", "invoice", "charge", "send", "email", "sms", "whatsapp",
     "invite", "invitation", "webhook", "publish", "production", "integration", "connect app",
 }
-_TESTABLE_TERMS = {"test", "demo", "lead", "booking", "project", "sample", "sandbox"}
+# Product nouns are not a safety policy. A CRM's Lead/Booking labels happened
+# to be present in an early benchmark, but privileging them made production
+# authorization application-specific. Only explicit isolated/demo language or
+# fixture state can classify a mutation as testable.
+_TESTABLE_TERMS = {"test", "demo", "sample", "sandbox", "isolated", "fixture"}
 
 
 def side_effect_decision(operation: SemanticOperation) -> str:
