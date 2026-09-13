@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import unquote, urljoin, urlsplit
 
 from playwright.async_api import Error as PlaywrightError
 
@@ -12,6 +13,18 @@ from productlens.contracts.models import OperationKind, Rect, SemanticOperation,
 
 class GroundingError(RuntimeError):
     pass
+
+
+def _route_key(value: str) -> tuple[str, str, str]:
+    parsed = urlsplit(value)
+    scheme = "https" if parsed.scheme in {"http", "https"} else parsed.scheme
+    return scheme, parsed.netloc.casefold(), unquote(parsed.path).rstrip("/") or "/"
+
+
+def _navigation_reached(current: str, expected: str, base: str) -> bool:
+    if expected.startswith("**/"):
+        return current.endswith(expected[2:])
+    return _route_key(current) == _route_key(urljoin(base, expected))
 
 
 class PlaywrightAdapter:
@@ -230,18 +243,43 @@ class PlaywrightAdapter:
                 attempts.append(f"{strategy}:query-error")
                 continue
             if count:
-                return locator.first, strategy
+                # ``get_by_text(..., exact=False)`` can match hidden responsive
+                # navigation/template nodes before the visible witness (for
+                # example ``en`` matching a hidden ``Contact Management``
+                # label while the visible control says ``English``).  A
+                # visible postcondition must select an actually visible node,
+                # never merely the first DOM match.
+                # Lightweight adapters used by contract tests expose only
+                # ``count``; retain their existence semantics while real
+                # Playwright locators take the visibility-aware path below.
+                if not hasattr(locator, "nth") or not hasattr(locator, "is_visible"):
+                    return locator.first, strategy
+                for index in range(count):
+                    candidate = locator.nth(index) if hasattr(locator, "nth") else locator
+                    try:
+                        if await candidate.is_visible():
+                            return candidate, f"{strategy}:visible"
+                    except PlaywrightError:
+                        continue
+                attempts.append(f"{strategy}:{count}-hidden")
+                continue
             attempts.append(f"{strategy}:0-matches")
         number_pattern = self._number_text_pattern(target.text)
         if number_pattern is not None:
             locator = self.page.get_by_text(number_pattern, exact=False)
             try:
-                if await locator.count():
+                count = await locator.count()
+                if count and (not hasattr(locator, "nth") or not hasattr(locator, "is_visible")):
+                    return locator.first, "normalized_number_text"
+                for index in range(count):
+                    candidate = locator.nth(index)
+                    if not await candidate.is_visible():
+                        continue
                     # Outcome verification is an existence assertion. The
                     # same displayed value can have several wrapper nodes;
                     # unlike an action, the first visible semantic witness is
                     # enough and remains traceable through its snapshot.
-                    return locator.first, "normalized_number_text"
+                    return candidate, "normalized_number_text:visible"
             except PlaywrightError:
                 attempts.append("normalized_number_text:query-error")
         raise GroundingError(
@@ -485,7 +523,7 @@ class PlaywrightAdapter:
             OperationKind.APPLY_FILTER,
         }:
             try:
-                return await locator.click()
+                result = await locator.click()
             except PlaywrightError:
                 if operation.kind is not OperationKind.OPEN_NAVIGATION_ITEM:
                     raise
@@ -493,7 +531,40 @@ class PlaywrightAdapter:
                 # overlapped by source-site transition chrome in cloud
                 # browsers. Preserve semantic targeting and retry just that
                 # non-side-effecting navigation click without coordinates.
-                return await locator.click(force=True)
+                result = await locator.click(force=True)
+            if operation.kind is OperationKind.OPEN_NAVIGATION_ITEM:
+                expected = next(
+                    (str(condition.expected) for condition in operation.postconditions if condition.kind == "url"),
+                    None,
+                )
+                if expected:
+                    await self.page.wait_for_timeout(550)
+                    if not _navigation_reached(self.page.url, expected, self.page.url):
+                        # Some reactive menus acknowledge a click before the
+                        # route handler is mounted. Re-ground and retry one
+                        # time only when the first attempt did not change the
+                        # route; navigation controls are non-side-effecting.
+                        retry_locator, _ = await self.grounded_locator(operation.target)
+                        await retry_locator.click(force=True)
+                        await self.page.wait_for_timeout(700)
+                    if not _navigation_reached(self.page.url, expected, self.page.url):
+                        # The observed control has now proved unreliable in
+                        # this fresh context. Its own same-origin href is the
+                        # permitted direct-navigation fallback; return an
+                        # auditable marker so the trace explains why it was
+                        # used instead of silently pretending the click worked.
+                        fallback_url = urljoin(self.page.url, expected)
+                        await self.page.goto(fallback_url, wait_until="domcontentloaded", timeout=20_000)
+                        await self.page.wait_for_timeout(450)
+                        if not _navigation_reached(self.page.url, expected, fallback_url):
+                            raise GroundingError(
+                                f"Navigation control and same-origin fallback did not reach {expected!r}"
+                            )
+                        return {
+                            "navigation_fallback": "direct_after_visible_noop",
+                            "fallback_url": fallback_url,
+                        }
+            return result
         raise GroundingError(f"Unsupported primitive operation: {operation.kind}")
 
     async def snapshot(self, target: Target | None) -> dict[str, Any]:

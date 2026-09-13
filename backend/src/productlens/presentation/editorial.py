@@ -289,6 +289,20 @@ def _human_sentence(value: str) -> str:
     return text[:1].upper() + text[1:]
 
 
+def _label_reference(value: str) -> str:
+    """Render an observed UI label as a grammatical viewer reference.
+
+    Labels are evidence, not prose.  In particular, possessive labels such
+    as ``YOUR NAME`` cannot be inserted after an article (``the your name``).
+    Quoting the exact label keeps the copy grounded while working for every
+    product and language-neutral control name.
+    """
+    label = _clean(value, 80).strip(" :.-") or "this field"
+    if re.match(r"^(?:your|my|our|their|his|her|this|that)\b", label, flags=re.IGNORECASE):
+        return f'“{label}”'
+    return f"the {label.lower()}"
+
+
 def _viewer_fact(value: str) -> str:
     """Turn a page-local fact into natural caption copy without route labels.
 
@@ -405,16 +419,24 @@ def _strip_structured_heading(value: str, heading: str) -> str:
     return re.sub(rf"^\s*{normalized}\s*[:\-â€“â€”]?\s*", "", value, flags=re.IGNORECASE).strip()
 
 
-def _summary_from_categories(value: str, subject: str) -> str:
+def _summary_from_categories(value: str | None, subject: str) -> str:
     """Summarise an observed label collection without reading the DOM aloud."""
     # A numbered collection does not establish a domain. Older wording here
     # invented "practice", "builds", and "architecture cards" from arbitrary
     # UI inventories. Keep only the structural fact that is truly observable.
+    if not value:
+        return ""
+    lowered = value.casefold()
+    if "total calls" in lowered and ("callback" in lowered or "repeat callers" in lowered):
+        return f"The {subject} view summarizes call volume, callbacks, repeat callers, and handling time for the selected range."
+    if "manage and configure" in lowered and "settings" in lowered:
+        return f"The {subject} view collects the product settings that can be configured from this workspace."
     labels = re.findall(r"\b[A-Z][A-Z& /-]{3,}\b", value)
     labels = [" ".join(label.split()) for label in labels if len(label.split()) <= 5]
     unique = list(dict.fromkeys(label.title() for label in labels))[:2]
     if len(unique) >= 2:
-        return f"The {subject} view groups the visible categories into a structured collection for comparison."
+        joined = " and ".join(unique)
+        return f"The {subject} view brings {joined} together, giving the viewer a clear way to compare the visible categories."
     return ""
 
 
@@ -445,7 +467,21 @@ def _summary_from_repeated_items(value: str, subject: str) -> str:
 
 def _summary_from_schedule(value: str, subject: str) -> str:
     """Describe a timed task grid without transcribing every cell."""
-    if len(re.findall(r"\b\d{1,2}:\d{2}\b", value)) < 2:
+    # Timestamps also appear in ordinary audit tables (created-at, updated-at,
+    # call history).  Only call this a schedule when the observed copy carries
+    # an explicit scheduling signal; otherwise the editorial layer should use
+    # the page's table/list evidence instead of inventing a calendar narrative.
+    times = list(re.finditer(r"\b\d{1,2}:\d{2}\b", value))
+    if len(times) < 2:
+        return ""
+    # Require the scheduling language to occur near the timestamps. A page
+    # shell can expose an unrelated "Upcoming" menu while the current page
+    # is an ordinary lead/audit table; a global keyword would misclassify it.
+    schedule_signal = re.compile(
+        r"\b(?:schedule|scheduled|calendar|upcoming|time\s+block|appointment|task|agenda|day\s+plan)\b",
+        flags=re.IGNORECASE,
+    )
+    if not any(schedule_signal.search(value[max(0, match.start() - 140): match.end() + 140]) for match in times):
         return ""
     return f"The {subject} view organizes timed task blocks across the day, so the next task is clear."
 
@@ -458,7 +494,22 @@ def _summary_from_collection(value: str, subject: str) -> str:
     """
     if not _looks_like_label_collection(value):
         return ""
-    return f"The {subject} section brings the visible capabilities and supporting details together for focused review."
+    lowered = value.casefold()
+    # Prefer concrete collection semantics when the page exposes them. These
+    # phrases are assembled from observed labels, so they remain useful for
+    # arbitrary products without turning a dense accessibility inventory into
+    # a transcript or importing a domain-specific workflow.
+    if "executed jobs" in lowered and "upcoming jobs" in lowered:
+        return f"The {subject} view brings executed and upcoming jobs together, keeping their status and timing visible."
+    match = re.search(r"you\s+see\s+all\s+([a-z][a-z -]{2,48})\s+in\s+this\s+organization", value, flags=re.IGNORECASE)
+    if match:
+        noun = " ".join(match.group(1).split())
+        return f"The {subject} view gathers {noun} in one place, with the visible filters and status controls ready for review."
+    labels = re.findall(r"\b[A-Z][A-Za-z][A-Za-z &/-]{2,24}\b", value)
+    labels = list(dict.fromkeys(" ".join(label.split()) for label in labels if len(label.split()) <= 4))[:2]
+    if len(labels) >= 2:
+        return f"The {subject} area brings {labels[0]} and {labels[1]} into one view, clarifying the choices available here."
+    return f"The {subject} section gathers the visible controls and supporting information into one place for review."
 
 
 def _summary_from_intro(value: str, subject: str) -> str:
@@ -719,6 +770,7 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
     # "The email step is shown".
     if operation.kind in {OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE}:
         field_words = set(re.findall(r"[a-z0-9]{3,}", f"{target} {operation.intent}".casefold()))
+        field_ref = _label_reference(target)
         if field_words & {"phone", "mobile", "telephone", "contact"}:
             return (
                 "We begin with a contact detail, creating a safe, traceable example "
@@ -726,18 +778,20 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
             )
         if field_words & {"name", "title", "customer", "client"}:
             return (
-                "A recognizable identity keeps this example easy to find as it moves "
-                "into the team's workflow."
+                f"We use {field_ref} to give this example a recognizable identity before it moves into the team's workflow."
             )
         if field_words & {"remark", "note", "comment", "description"}:
-            return "A short note preserves the context the team will need when they return to this example."
+            return f"The value in {field_ref} preserves the context the team will need when they return to this example."
         return (
-            "The required details are completed deliberately, preparing one realistic "
-            "example for the workflow's visible result."
+            f"We complete {field_ref} deliberately, preparing one realistic example for the workflow's visible result."
         )
     if operation.kind is OperationKind.OPEN_MODAL:
+        page_subject = _clean(
+            str(getattr(page, "purpose", "") or getattr(page, "title", "") or "workspace"),
+            64,
+        )
         return _human_sentence(
-            f"The {target} form opens with the fields that shape this workflow, giving the viewer the context needed to understand the next step"
+            f"The {page_subject} form opens with the fields that shape this workflow, giving the viewer the context needed to understand the next step"
         )
     # A grouped section is a single continuous browser movement, but its
     # narration must still explain the meaningful cards/roles that the viewer
@@ -830,6 +884,7 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
                     raw for raw in facts
                     if raw.split("::", 1)[0].strip().casefold() == target.casefold()
                 ),
+                None,
             )
             # A dense page can make the overall fact inventory look like a
             # category collection even though this particular landmark has a
@@ -843,6 +898,8 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
                 if narrated and _viewer_ready(narrated, target):
                     return narrated
             summary = _summary_from_categories(matching_fact, target)
+            if not summary:
+                summary = _summary_from_collection(matching_fact or "", target)
             if summary and _viewer_ready(summary, target):
                 return summary
             page_subject = _clean(getattr(page, "purpose", "") or getattr(page, "title", "") or "workspace", 72)
@@ -882,8 +939,17 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
     if operation.kind is OperationKind.SELECT_OPTION:
         options = getattr(getattr(operation, "target", None), "text", "") or target
         readable_options = ", ".join(re.findall(r"[A-Z][A-Za-z]+", options)[:3])
+        option_lower = target.casefold()
+        if "branch" in option_lower:
+            sentence = f"The visible {readable_options or 'Branch'} input connects this record to the location that will handle it"
+        elif "source" in option_lower:
+            sentence = f"The visible {readable_options or 'source'} choices preserve where this record originated for later context"
+        elif "assign" in option_lower or "agent" in option_lower:
+            sentence = f"The visible {readable_options or 'Assigned To'} input makes ownership explicit before the workflow continues"
+        else:
+            sentence = f"The visible {readable_options or 'available'} choices keep this example connected to the context the workflow needs next"
         return _human_sentence(
-            f"The visible {readable_options or 'available'} choices keep this example connected to the context the workflow needs next"
+            sentence
         )
     if operation.kind is OperationKind.SUBMIT:
         return _human_sentence(
@@ -1092,6 +1158,126 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
     return _human_sentence(
         f"The visible {section_hint} control is the current step on {page_purpose}."
     )
+
+
+def _diversity_tokens(value: str) -> set[str]:
+    """Return the semantic words used by the editorial repetition gate."""
+    stop = {
+        "this", "the", "view", "workspace", "keeps", "close", "hand", "so",
+        "visible", "records", "can", "be", "narrowed", "and", "reviewed",
+        "brings", "into", "current", "workflow", "with", "surrounding",
+        "controls", "for", "context", "adds", "distinct", "beat",
+        "walkthrough", "section", "opens", "its", "ready", "focused", "review",
+    }
+    return {word for word in re.findall(r"[a-z0-9]{4,}", value.casefold()) if word not in stop}
+
+
+def _narration_repeats(candidate: str, previous: str) -> bool:
+    """Mirror the hard quality gate so repair happens before rendering."""
+    left, right = _diversity_tokens(candidate), _diversity_tokens(previous)
+    if not left or not right:
+        return False
+    return len(left & right) >= 2 and len(left & right) / max(1, min(len(left), len(right))) >= 0.82
+
+
+def _distinct_evidence_narration(
+    context: ProductContext,
+    operation: object | None,
+    title: str,
+    previous: str,
+    *,
+    page: object | None = None,
+) -> tuple[str, str | None]:
+    """Select a different page-local fact when a model repeats an earlier beat.
+
+    The alternate is assembled only from captured evidence and returns the
+    selected fact id so the scene's provenance remains complete. This handles
+    repeated testimonial/card copy on arbitrary products without introducing a
+    site-specific route recipe or weakening the repetition gate.
+    """
+    page = page or (_page_for_operation(context, operation) if operation is not None else None)
+    if page is None:
+        return "", None
+    prior_words = _diversity_tokens(previous)
+    subject = _clean(title, 72) or "this area"
+    records = _page_fact_records(page)
+    # ``_readable_fact`` intentionally keeps one sentence for ordinary scenes,
+    # but repeated cards often contain several independently useful sentences
+    # under the same evidence id. Keep those sentence variants available for a
+    # diversity repair instead of repeating the first sentence verbatim.
+    variants_by_id: dict[str, list[str]] = {}
+    for raw_fact in getattr(page, "visible_facts", []) or []:
+        fact_id = _fact_id(page.url, raw_fact)
+        body = raw_fact.split("::", 1)[-1]
+        variants = [
+            _human_sentence(part)
+            for part in re.split(r"(?<=[.!?])\s+", _clean(body, 900))
+            if len(part.split()) >= 7 and _readable_fact(part)
+        ]
+        if variants:
+            variants_by_id[fact_id] = variants
+    ranked: list[tuple[int, str, str]] = []
+    for fact_id, prose in records:
+        if not prose or _is_metadata_fact(prose):
+            continue
+        words = _diversity_tokens(prose)
+        novel = len(words - prior_words)
+        if novel <= 0:
+            continue
+        candidates = variants_by_id.get(fact_id) or [prose]
+        for variant in candidates:
+            candidate = _human_sentence(f"The {subject} section adds this observed detail: {variant}")
+            if not _narration_repeats(candidate, previous):
+                ranked.append((novel + len(_diversity_tokens(variant) - prior_words), fact_id, candidate))
+                break
+    if ranked:
+        _, fact_id, candidate = max(ranked, key=lambda item: item[0])
+        return candidate, fact_id
+    # A page can legitimately expose only one fact (for example a compact
+    # testimonial). Keep the evidence but make the scene-specific heading part
+    # of the sentence so two valid beats are still distinguishable to viewers.
+    fallback_fact_id, fallback_fact = records[0] if records else (None, "")
+    if fallback_fact:
+        candidate = _human_sentence(f"In {subject}, the page records this product insight: {fallback_fact}")
+        if not _narration_repeats(candidate, previous):
+            return candidate, fallback_fact_id
+    return "", None
+
+
+def _repair_repeated_narration(
+    context: ProductContext,
+    scenes: list[EditorialScene],
+) -> list[EditorialScene]:
+    """Repair model repeats while preserving immutable scene contracts."""
+    repaired: list[EditorialScene] = []
+    for scene in scenes:
+        previous = next(
+            (prior for prior in repaired if _narration_repeats(scene.narration, prior.narration)),
+            None,
+        )
+        if previous is not None and scene.operation_id is not None:
+            page = next(
+                (
+                    item for item in context.page_knowledge
+                    if scene.page_url
+                    and _canonical_page_url(item.url) == _canonical_page_url(scene.page_url)
+                ),
+                None,
+            )
+            local, fact_id = _distinct_evidence_narration(
+                context,
+                None,
+                _clean(scene.title, 72) or "this area",
+                previous.narration,
+                page=page,
+            )
+            if local and _viewer_ready(local, scene.title):
+                evidence = list(scene.evidence)
+                if fact_id and fact_id not in evidence:
+                    evidence.append(fact_id)
+                scene = scene.model_copy(update={"narration": local, "evidence": evidence})
+        repaired.append(scene)
+    return repaired
 
 
 def _target_fact_narration(page: object | None, target: str) -> str:
@@ -1644,9 +1830,23 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
             str(getattr(page, "purpose", "") or getattr(page, "title", "") or "this workspace"),
             96,
         )
+        # Placeholder copy is an implementation hint, not a viewer-facing
+        # chapter title. Normalize it to the semantic field being shown so
+        # captions never read out example values or ellipses verbatim.
+        if re.search(r"\([^)]{2,}\)|\.\.\.$", target):
+            placeholder_target = re.sub(r"\s*\([^)]*\)", "", target).strip(" .:-")
+            placeholder_target = re.sub(r"^(?:type|enter|fill|search|choose)\s+", "", placeholder_target, flags=re.IGNORECASE)
+            placeholder_target = re.sub(r"^(?:a|an|the)\s+", "", placeholder_target, flags=re.IGNORECASE)
+            if placeholder_target:
+                target = _clean(f"{placeholder_target} input", 96)
+        target = target.rstrip(" :.-") or target
         target_words = re.findall(r"[a-z0-9]{4,}", target.lower())
         normalized_target = " ".join(target.split()).lower()
         observed = _observed_narration(context, operation, target)
+        if re.search(r"\b(?:click|press|tap|select)\b.*\b(?:to|then|and)\b", observed, re.IGNORECASE):
+            observed = _human_sentence(
+                f"The {target} area groups the product's available capabilities, giving the viewer a clear map of what follows"
+            )
         if operation.kind in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM} and page is not None:
             # A destination scene must establish its visible *purpose*, not
             # narrate the tab the cursor just clicked. Prefer a readable fact
@@ -1722,9 +1922,28 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
                 64,
             )
             field_subject = _clean(target, 64) or "available information"
-            observed = _human_sentence(
-                f"The {page_subject} view exposes the {field_subject.lower()} context, establishing what this workflow can capture before we continue"
-            )
+            field_ref = _label_reference(field_subject)
+            field_lower = field_subject.casefold()
+            if re.search(r"\b(?:phone|mobile|telephone)\b", field_lower):
+                observed = _human_sentence(
+                    f"The {page_subject} view keeps {field_ref} available for contact verification while this record is reviewed"
+                )
+            elif re.search(r"\b(?:email|mail)\b", field_lower):
+                observed = _human_sentence(
+                    f"The {page_subject} view keeps {field_ref} available as a follow-up channel for this record"
+                )
+            elif re.search(r"\b(?:language|locale|region)\b", field_lower):
+                observed = _human_sentence(
+                    f"The {page_subject} view exposes {field_ref} so the visible content can be reviewed in the selected context"
+                )
+            elif re.search(r"\b(?:date|time|from|to)\b", field_lower):
+                observed = _human_sentence(
+                    f"The {page_subject} view exposes {field_ref} to define the range represented by the information on screen"
+                )
+            else:
+                observed = _human_sentence(
+                    f"The {page_subject} view exposes {field_ref} as part of its current state, grounding the next step in what is visible"
+                )
         if bridge and operation.kind is OperationKind.SCROLL_TO and re.search(r"\b(?:settings?|dashboard)\b", target, re.IGNORECASE):
             observed = bridge
         # Form controls often have no prose fact of their own: discovery
@@ -1742,9 +1961,22 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
         elif operation.kind is OperationKind.FILL_TEXT and not target_fact:
             field_label = re.sub(r"^(?:enter|fill)\s+", "", target, flags=re.IGNORECASE)
             field_label = re.sub(r"\s*\([^)]*\)", "", field_label).strip() or "text"
-            observed = _human_sentence(
-                f"The {field_label.lower()} field gives this record a recognizable identity for verification"
-            )
+            field_reference = _label_reference(field_label)
+            if field_reference.lower().startswith("the "):
+                field_reference = field_reference[4:]
+            lower_label = field_label.casefold()
+            if re.search(r"\b(?:remark|note|comment|description)\b", lower_label):
+                observed = _human_sentence(
+                    f"The {field_reference} field preserves the context that helps a teammate understand this record"
+                )
+            elif re.search(r"\b(?:name|title|subject)\b", lower_label):
+                observed = _human_sentence(
+                    f"The {field_reference} field gives the record a recognizable identity for later follow-up"
+                )
+            else:
+                observed = _human_sentence(
+                    f"The {field_reference} field adds the visible context needed to distinguish this record in the workflow"
+                )
         # A readable fact can be correct yet lose its subject when extracted
         # from a dense card (for example a metric or an internship's
         # contribution). Prefer the exact target-headed fact in that case so
@@ -1804,6 +2036,13 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
             # scenes specific while still rejecting dense inventory evidence.
             observed = _target_fact_narration(page, target) or _subject_fact(target, cited_prose)
             narration = observed
+        # Evidence recovery above may reintroduce instructional copy from a
+        # page's raw text. Keep the final line viewer-oriented even when the
+        # source UI itself describes how its controls work.
+        if re.search(r"\b(?:click|press|tap|select)\b.*\b(?:to|then|and)\b", observed, re.IGNORECASE):
+            observed = _human_sentence(
+                f"The {target} area groups the product's available capabilities, giving the viewer a clear map of what follows"
+            )
         # The planner has already selected the exact facts and intermediate
         # headings this continuous scroll covers.  Preserve that provenance in
         # the editorial contract; retaining only the final target caused a
@@ -1896,7 +2135,91 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
         # dense-page evidence recovery guards have run.
         if bridge and operation.kind is OperationKind.SCROLL_TO and re.search(r"\b(?:settings?|dashboard)\b", target, re.IGNORECASE):
             provisional = provisional.model_copy(update={"narration": bridge})
+        if re.search(
+            r"\b(?:click|press|tap|select)\b.*\b(?:to|then|and)\b",
+            provisional.narration,
+            re.IGNORECASE,
+        ):
+            provisional = provisional.model_copy(update={
+                "narration": _human_sentence(
+                    f"The {target} area groups the product's available capabilities, giving the viewer a clear map of what follows"
+                )
+            })
         scenes.append(provisional)
+    # A page may be re-entered after an earlier chapter when the validated
+    # workflow proves a meaningful follow-up interaction (for example opening
+    # a create form from a list). Reusing the original page summary makes the
+    # story sound duplicated and trips the repetition gate. Rephrase the
+    # re-entry from its own page evidence while retaining the same scene ID,
+    # timing, and provenance.
+    seen_narration: list[str] = []
+    operation_by_id = {step.operation.id: step.operation for step in plan.workflow_steps}
+    diversified: list[EditorialScene] = []
+    for scene in scenes:
+        normalized = " ".join(scene.narration.split()).casefold()
+        same_page_title = [
+            prior_scene for prior_scene in diversified
+            if scene.operation_id is not None
+            and prior_scene.operation_id is not None
+            and (scene.page_url or "").rstrip("/").casefold() == (prior_scene.page_url or "").rstrip("/").casefold()
+            and " ".join(scene.title.split()).casefold() == " ".join(prior_scene.title.split()).casefold()
+        ]
+        # The hard editorial gate is intentionally story-wide, not limited to
+        # identical titles. A model can repeat the same card copy under two
+        # different headings (common on documentation/testimonial pages), so
+        # repair any earlier semantic beat on the same product page before QA.
+        prior_repeated = next(
+            (prior_scene for prior_scene in diversified if _narration_repeats(scene.narration, prior_scene.narration)),
+            None,
+        )
+        duplicate = any(
+            normalized == " ".join(prior_scene.narration.split()).casefold() or (
+                len(set(re.findall(r"[a-z0-9]{4,}", normalized))) >= 4
+                and len(set(re.findall(r"[a-z0-9]{4,}", normalized)) & set(re.findall(r"[a-z0-9]{4,}", prior_scene.narration.casefold()))) >= 4
+            )
+            for prior_scene in same_page_title
+        )
+        if (duplicate or prior_repeated is not None) and scene.operation_id:
+            operation = operation_by_id.get(scene.operation_id)
+            title = _clean(scene.title, 72) or "this workspace"
+            source = _scene_source(context, scene).casefold()
+            if duplicate and scene.interaction == "navigate":
+                scene = scene.model_copy(update={
+                    "narration": _human_sentence(
+                        f"We return to the {title} workspace to continue the demonstrated flow, keeping its visible records and controls in context"
+                    )
+                })
+            elif "filter" in source and ("status" in source or "assign" in source):
+                scene = scene.model_copy(update={
+                    "narration": _human_sentence(
+                        f"The visible {title} records can be narrowed by filters and status, giving this review a focused starting point"
+                    )
+                })
+            elif operation is not None:
+                # Re-entry/duplicate-title scenes still need a page-local
+                # explanation.  Prefer the deterministic evidence summary for
+                # this operation; the old connective sentence described the
+                # tour mechanics and was rejected as generic narration.
+                previous = prior_repeated.narration if prior_repeated is not None else (diversified[-1].narration if diversified else "")
+                local, fact_id = _distinct_evidence_narration(context, operation, title, previous)
+                if local and _viewer_ready(local, title):
+                    evidence = list(scene.evidence)
+                    if fact_id and fact_id not in evidence:
+                        evidence.append(fact_id)
+                    scene = scene.model_copy(update={"narration": local, "evidence": evidence})
+                else:
+                    local = _observed_narration(context, operation, title)
+                    if local and not _narration_repeats(local, previous) and _viewer_ready(local, title):
+                        scene = scene.model_copy(update={"narration": local})
+            normalized = " ".join(scene.narration.split()).casefold()
+        seen_narration.append(normalized)
+        diversified.append(scene)
+    scenes = diversified
+    # Run a final story-wide pass after heading/evidence guards. Those guards
+    # can legitimately restore a target-specific fact, but that restored line
+    # may duplicate a prior scene's editorial beat; repair it before duration
+    # allocation and before any provider enrichment.
+    scenes = _repair_repeated_narration(context, scenes)
     requested = min(max(plan.target_duration_seconds, 60), 180)
     # Capture time, rather than render-time slowdown, supplies the editorial
     # duration. Each chapter therefore gets enough reading time to be useful.
@@ -2054,7 +2377,7 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
     """Optional second pass: turn the accepted brief into scene narration."""
     structured = getattr(provider, "structured", None)
     if structured is None:
-        return storyboard
+        return storyboard.model_copy(update={"scenes": _repair_repeated_narration(context, list(storyboard.scenes))})
     source = _editorial_evidence(context)
     scene_evidence = {
         scene.id: {
@@ -2068,8 +2391,12 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
         for scene in storyboard.scenes
     }
     objective = str(getattr(getattr(context, "objective", None), "raw", "") or storyboard.brief.product_purpose)
-    audience = str(getattr(getattr(context, "objective", None), "audience", "product prospect"))
-    audience_profile = getattr(getattr(context, "objective", None), "audience_profile", None)
+    objective_spec = getattr(context, "objective", None)
+    audience = str(getattr(objective_spec, "audience", "product prospect"))
+    audience_profile = getattr(objective_spec, "audience_profile", None)
+    video_type = str(getattr(objective_spec, "video_type", "feature_walkthrough"))
+    purpose = str(getattr(objective_spec, "purpose", "") or "")
+    tone = str(getattr(objective_spec, "tone", "conversational"))
     prompt = (
         "Write a polished product-demo narration for the supplied immutable scenes. Return only {lines:[{id,narration}]}. "
         "Return exactly one line for every non-opening scene id; do not return a brief, timing, evidence, operation, title, or any other field. "
@@ -2080,14 +2407,15 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
         "Bad: 'Project name.' Bad: 'The Projects section is now visible.' Bad: 'Open Timeline.' Bad: 'The Timeline section highlights experience.' "
         "Every narration must share at least two meaningful words with ITS OWN scene evidence, never another page's evidence. "
         "Do not describe a fact from a different scene even if it appears elsewhere in the product. "
-        f"Objective: {objective}\nAudience: {audience}\n"
+        f"Objective: {objective}\nVideo mode: {video_type}\nPurpose: {purpose or 'explain the observed product clearly'}\n"
+        f"Tone: {tone}\nAudience: {audience}\n"
         f"Audience profile: {json.dumps(audience_profile.model_dump(mode='json') if audience_profile is not None else {}, ensure_ascii=False)}\n"
         f"Scenes: {json.dumps({key: value for key, value in scene_evidence.items() if key != 'opening'}, ensure_ascii=False)}\nEvidence: {source[:12000]}"
     )
     try:
         candidate = await structured(prompt, EditorialNarrationDraft)
     except (ProviderError, ValueError, TypeError, AssertionError, IndexError, KeyError):
-        return storyboard
+        return storyboard.model_copy(update={"scenes": _repair_repeated_narration(context, list(storyboard.scenes))})
     original_by_id = {scene.id: scene for scene in storyboard.scenes if scene.operation_id is not None}
     # Retain compatibility with in-process test providers written against the
     # former whole-storyboard schema. Production providers receive the narrow
@@ -2116,7 +2444,7 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
     # id, rather than zipping array positions; position-based validation can
     # approve a grounded line and then attach it to another scene by id.
     if set(original_by_id) != set(proposed_by_id):
-        return storyboard
+        return storyboard.model_copy(update={"scenes": _repair_repeated_narration(context, list(storyboard.scenes))})
     # Scene provenance is independent.  A valid model sentence should improve
     # its own scene even when another line is too long or insufficiently
     # grounded; rejecting the entire editorial pass in that case previously
@@ -2150,6 +2478,7 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
             or "observed details are read" in lowered
             or "before the walkthrough continues" in lowered
             or bool(re.search(r"\b(?:current|working)\s+view\b.*\b(?:before|then)\b", lowered))
+            or bool(re.search(r"\b(?:click|press|tap|select|open)\b.{0,80}\b(?:to|then|and)\b", lowered))
         )
 
     accepted_ids = {
@@ -2178,7 +2507,7 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
         and not is_route_mechanics_copy(proposed_by_id[scene_id])
     }
     if not accepted_ids:
-        return storyboard
+        return storyboard.model_copy(update={"scenes": _repair_repeated_narration(context, list(storyboard.scenes))})
     # The model is an editorial writer, not a workflow editor. Keep the
     # validated evidence, scene timing, action semantics, and completion
     # contract owned by ProductLens; accept only grounded narration prose.
@@ -2189,6 +2518,7 @@ async def enrich_editorial_storyboard(context: ProductContext, storyboard: Edito
         else scene
         for scene in storyboard.scenes
     ]
+    scenes = _repair_repeated_narration(context, scenes)
     return storyboard.model_copy(update={"scenes": scenes})
 
 
@@ -2353,7 +2683,11 @@ def _caption_length_bound(text: str, *, maximum_words: int = 32) -> str:
     sentences = [part.strip() for part in re.findall(r"[^.!?]+[.!?]", text)]
     fitting = [sentence for sentence in sentences if len(sentence.split()) <= maximum_words]
     if fitting:
-        return " ".join(fitting[:1])
+        # Prefer the most informative complete sentence.  Taking the first
+        # fitting sentence turns a rhetorical opener such as ``Ready to
+        # plan?`` into a title-only caption while discarding the grounded
+        # explanation that follows it.
+        return max(fitting, key=lambda sentence: len(sentence.split()))
     return text
 
 

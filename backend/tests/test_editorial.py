@@ -21,14 +21,40 @@ from productlens.contracts.models import (
 )
 from productlens.planning.production import ProductionPlanningService
 from productlens.presentation.editorial import (
+    _caption_length_bound,
+    _label_reference,
     _mentions_scene_element,
     _mentions_scene_subject,
     _observed_narration,
+    _summary_from_categories,
     _summary_from_collection,
+    _summary_from_schedule,
     _viewer_ready,
     editorial_script,
     narrated_storyboard_scenes,
 )
+
+
+def test_category_summary_handles_missing_page_fact():
+    assert _summary_from_categories(None, "Categories") == ""
+
+
+def test_schedule_summary_requires_observed_schedule_semantics_not_timestamps_alone():
+    table = "Created 3:37 AM, 9th Sep 2026 Updated 3:45 AM, 9th Sep 2026"
+    assert _summary_from_schedule(table, "Records") == ""
+    schedule = "Upcoming appointments schedule 9:00 AM and 10:30 AM"
+    assert _summary_from_schedule(schedule, "Appointments")
+
+
+def test_caption_length_bound_keeps_the_longest_informative_sentence():
+    text = "Ready to plan? Create a roadmap now. Runs in your browser, saves to your device. No account, no setup."
+    result = _caption_length_bound(text, maximum_words=10)
+    assert result == "Runs in your browser, saves to your device."
+
+
+def test_ui_label_reference_keeps_possessive_labels_grammatical_and_exact():
+    assert _label_reference("YOUR NAME") == "“YOUR NAME”"
+    assert _label_reference("Email address") == "the email address"
 
 
 def test_viewer_ready_allows_an_explanatory_named_feature_but_not_a_title_dump():
@@ -52,6 +78,22 @@ def test_form_narration_explains_the_flow_instead_of_reading_the_input_label():
 
     assert "Enter Phone Number" not in narration
     assert "traceable example" in narration
+
+
+def test_text_field_narration_keeps_the_field_role_grounded():
+    context = ProductContext(
+        url="https://example.test/roadmap", title="Example", application_type="web_application",
+    )
+    operation = SemanticOperation(
+        kind=OperationKind.FILL_TEXT,
+        intent="Enter the observed Roadmap title value",
+        target=Target(name="Roadmap title"),
+    )
+
+    narration = _observed_narration(context, operation, "Roadmap title")
+
+    assert "roadmap title" in narration.casefold()
+    assert "recognizable identity" in narration
 
 
 def test_editorial_script_compresses_repeated_scroll_landmarks_without_losing_navigation_or_closing():
@@ -195,6 +237,31 @@ def test_category_landmark_uses_viewer_value_instead_of_route_mechanics():
     assert "focused review" not in narration.casefold()
     assert "DATABASES, TOOLS & CLOUD" in narration
     assert _viewer_ready(narration, "DATABASES, TOOLS & CLOUD")
+
+
+def test_category_landmark_without_exact_fact_uses_safe_fallback_instead_of_crashing():
+    root = "https://example.test/dashboard"
+    context = ProductContext(
+        url=root,
+        title="OnlyDash",
+        application_type="dashboard",
+        page_knowledge=[PageKnowledge(
+            url=root,
+            title="OnlyDash",
+            purpose="analytics workspace",
+            visible_facts=["Users 213 42 19.7%"],
+            fingerprint="onlydash",
+        )],
+        confidence=1,
+    )
+    operation = SemanticOperation(
+        kind=OperationKind.SCROLL_TO,
+        intent="Review integrations",
+        target=Target(name="Integrations", source_url=root),
+    )
+    narration = _observed_narration(context, operation, "Integrations")
+    assert narration
+    assert "Integrations" in narration
 
 
 def test_grouped_scroll_narration_explains_each_visible_subject():
@@ -978,6 +1045,55 @@ def test_editorial_qa_rejects_trace_that_leaves_a_tab_without_local_exploration(
     assert "TRACE_NAVIGATED_PAGE_NOT_EXPLORED" in report["hard_failures"]
 
 
+def test_editorial_qa_accepts_grounded_required_group_without_element_prefix():
+    """Section/fact evidence plus a required group is a real page inspection."""
+    now = datetime.now(UTC)
+    nav = SemanticOperation(
+        kind=OperationKind.OPEN_NAVIGATION_ITEM,
+        intent="Open documentation",
+        target=Target(name="Documentation", text="Documentation"),
+        page_url="https://example.test/docs",
+        story_phase="transition",
+        evidence_refs=["page:https://example.test/docs", "section:Latest guidance"],
+    )
+    verify = SemanticOperation(
+        kind=OperationKind.VERIFY_STATE,
+        intent="Inspect the latest guidance",
+        target=Target(name="Latest guidance", text="Latest guidance"),
+        page_url="https://example.test/docs",
+        story_phase="establish",
+        page_contract_phases=["establish", "explore", "explain", "verify"],
+        evidence_refs=["page:https://example.test/docs", "section:Latest guidance", "fact:guidance"],
+        required_content_groups=["Latest guidance"],
+    )
+    plan = __import__("productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]).DemoPlan(
+        objective="walkthrough", narrative_goal="demo", audience="prospect", target_duration_seconds=60,
+        selected_workflow="demo", workflow_steps=[
+            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(id="nav", intent=nav.intent, operation=nav),
+            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(id="verify", intent=verify.intent, operation=verify),
+        ], expected_outcomes=["Documentation"], viewport_strategy="native", stop_conditions=["done"],
+    )
+    context = ProductContext(
+        url="https://example.test/", title="Example", application_type="documentation",
+        visible_text="Latest guidance explains the current release.",
+        page_knowledge=[PageKnowledge(url="https://example.test/docs", title="Documentation", purpose="Reference", visible_facts=["Latest guidance explains the current release."], fingerprint="docs")],
+        confidence=1,
+    )
+    board = build_editorial_storyboard(context, plan)
+    events = [
+        InteractionEvent(operation_id=nav.id, kind=nav.kind, intent=nav.intent, occurred_at=now + timedelta(seconds=8), success=True, duration_ms=5_000),
+        InteractionEvent(
+            operation_id=verify.id, kind=verify.kind, intent=verify.intent,
+            occurred_at=now + timedelta(seconds=14), success=True, duration_ms=6_000,
+            page_contract_phases=list(verify.page_contract_phases),
+            required_content_groups=list(verify.required_content_groups),
+        ),
+    ]
+    trace = DemoTrace(run_id="run", objective="walkthrough", started_at=now, recording_started_at=now, events=events, outcome_verified=True)
+    report = inspect_editorial(context=context, plan=plan, trace=trace, storyboard=board, script=editorial_script(board, {e.operation_id: e.id for e in events}))
+    assert "TRACE_NAVIGATED_PAGE_NOT_EXPLORED" not in report["hard_failures"]
+
+
 @pytest.mark.asyncio
 async def test_editorial_writer_can_change_only_grounded_prose_not_scene_contract():
     context = ProductContext(
@@ -1061,3 +1177,28 @@ async def test_editorial_writer_rejects_reading_dwell_boilerplate():
 
     enriched = await enrich_editorial_storyboard(context, board, Writer())
     assert enriched == board
+
+
+def test_reentry_narration_is_diversified_only_for_the_same_page():
+    """A meaningful re-entry must not repeat an earlier page summary."""
+    root = "https://example.test/"
+    page = PageKnowledge(
+        url=root,
+        title="Leads",
+        purpose="lead records",
+        visible_facts=["Leads :: You see all leads in this organization. Filters and status controls support review."],
+        fingerprint="leads",
+    )
+    first = SemanticOperation(kind=OperationKind.OPEN_NAVIGATION_ITEM, intent="Open leads", target=Target(name="Leads", source_url=root))
+    second = SemanticOperation(kind=OperationKind.OPEN_NAVIGATION_ITEM, intent="Return to leads for the next step", target=Target(name="Leads", source_url=root))
+    plan = __import__("productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]).DemoPlan(
+        objective="walkthrough", narrative_goal="demo", audience="prospect", target_duration_seconds=60,
+        selected_workflow="demo", workflow_steps=[
+            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(id="one", intent=first.intent, operation=first),
+            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(id="two", intent=second.intent, operation=second),
+        ], expected_outcomes=["leads"], viewport_strategy="native", stop_conditions=["done"],
+    )
+    context = ProductContext(url=root, title="Example", application_type="dashboard", visible_text="Example", page_knowledge=[page], confidence=1)
+    board = build_editorial_storyboard(context, plan)
+    assert board.scenes[1].narration != board.scenes[2].narration
+    assert "return" in board.scenes[2].narration.lower()

@@ -37,7 +37,8 @@ class AudienceProfile(BaseModel):
 
     type: Literal[
         "general_user", "sales", "recruiter", "founder", "prospect",
-        "support", "onboarding", "internal",
+        "support", "onboarding", "internal", "developer", "administrator",
+        "end_user", "buyer",
     ] = "prospect"
     priorities: list[str] = Field(default_factory=list, max_length=12)
     vocabulary: Literal["plain", "technical", "executive"] = "plain"
@@ -448,6 +449,7 @@ class ProductContext(BaseModel):
     objective: ObjectiveSpec | None = None
     page_knowledge: list[PageKnowledge] = Field(default_factory=list)
     feature_knowledge: list[FeatureKnowledge] = Field(default_factory=list)
+    relationships: list[ProductRelationship] = Field(default_factory=list, max_length=80)
     candidate_demo_flows: list[CandidateDemoFlow] = Field(default_factory=list)
     # Concrete interaction capabilities are collected during reversible
     # exploration. They remain dictionaries here to preserve resumability of
@@ -474,6 +476,7 @@ class ProductKnowledge(BaseModel):
     routes: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
     feature_map: list[FeatureKnowledge] = Field(default_factory=list)
+    relationships: list[ProductRelationship] = Field(default_factory=list, max_length=120)
     page_knowledge: list[PageKnowledge] = Field(default_factory=list)
     workflow_knowledge: list[CandidateDemoFlow] = Field(default_factory=list)
     form_schemas: list[FormSchema] = Field(default_factory=list)
@@ -516,11 +519,37 @@ class ObjectiveRelationship(BaseModel):
     required: bool = True
 
 
+class ProductRelationship(BaseModel):
+    """Observed relationship between product surfaces or concepts.
+
+    Relationships are evidence, not executable routing rules. Explicit
+    endpoints and citations let planning explain supporting pages generically.
+    """
+
+    source: str = Field(min_length=1, max_length=160)
+    target: str = Field(min_length=1, max_length=160)
+    relation: Literal[
+        "context_for", "configures", "depends_on", "enables",
+        "reveals", "proves", "related_to",
+    ] = "related_to"
+    source_url: str | None = None
+    target_url: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+
+
 class ObjectiveSpec(BaseModel):
+    schema_version: int = Field(default=1, ge=1)
     raw: str
     demo_type: Literal["full_walkthrough", "feature_walkthrough", "workflow_demo"] = "workflow_demo"
+    video_type: Literal[
+        "sales_demo", "feature_walkthrough", "full_tour", "onboarding",
+        "training", "changelog", "support", "portfolio",
+    ] = "feature_walkthrough"
     audience: str = "product prospect"
     audience_profile: AudienceProfile = Field(default_factory=AudienceProfile)
+    purpose: str = Field(default="", max_length=240)
+    tone: Literal["conversational", "concise", "technical", "persuasive"] = "conversational"
     depth: Literal["overview", "standard", "thorough"] = "standard"
     requested_features: list[str] = Field(default_factory=list)
     primary_entity: str | None = Field(default=None, max_length=160)
@@ -535,6 +564,33 @@ class ObjectiveSpec(BaseModel):
     target_duration_seconds: int = Field(default=120, ge=30, le=600)
     maximum_duration_seconds: int = Field(default=180, ge=30, le=900)
     safe_actions_only: bool = True
+
+
+class UnderstandingPreview(BaseModel):
+    """Bounded, non-recording product understanding returned before generation.
+
+    This contract is deliberately descriptive: it contains no selectors,
+    credentials, or executable browser instructions.  A later generation run
+    must still re-ground the evidence before planning and recording.
+    """
+
+    status: Literal["READY", "AUTH_REQUIRED", "BLOCKED", "FAILED"] = "READY"
+    url: str
+    prompt: str = ""
+    suggested_prompt: str
+    objective: ObjectiveSpec
+    product_title: str = ""
+    application_type: str = "web_application"
+    product_fingerprint: str = ""
+    knowledge_version: str = ""
+    relevant_areas: list[str] = Field(default_factory=list, max_length=40)
+    relationships: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+    assumptions: list[str] = Field(default_factory=list, max_length=20)
+    blockers: list[str] = Field(default_factory=list, max_length=20)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=80)
+    pages_inspected: list[str] = Field(default_factory=list, max_length=20)
+    cached: bool = False
+    inspected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class PageKnowledge(BaseModel):
@@ -613,6 +669,7 @@ class ExplorationReport(BaseModel):
     blockers: list[str] = Field(default_factory=list)
     rejected_routes: list[str] = Field(default_factory=list)
     candidate_flow_names: list[str] = Field(default_factory=list)
+    relationships: list[ProductRelationship] = Field(default_factory=list, max_length=80)
     stop_reason: str = ""
 
 

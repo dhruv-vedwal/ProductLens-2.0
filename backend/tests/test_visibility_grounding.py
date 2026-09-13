@@ -26,6 +26,37 @@ class FormattedNumberPage:
         return Locator(2 if "\\D*" in getattr(value, "pattern", "") else 0)
 
 
+class VisibilityLocator:
+    def __init__(self, visibility):
+        self._visibility = list(visibility)
+        self.first = VisibilityItem(self._visibility[0]) if self._visibility else self
+
+    async def count(self):
+        return len(self._visibility)
+
+    def nth(self, index):
+        return VisibilityItem(self._visibility[index])
+
+    async def is_visible(self):
+        return bool(self._visibility and self._visibility[0])
+
+
+class VisibilityItem:
+    def __init__(self, visible):
+        self.visible = visible
+
+    async def is_visible(self):
+        return self.visible
+
+
+class HiddenFirstPage:
+    def get_by_test_id(self, _: str):
+        return VisibilityLocator([])
+
+    def get_by_text(self, *_args, **_kwargs):
+        return VisibilityLocator([False, True])
+
+
 @pytest.mark.asyncio
 async def test_visibility_evidence_can_use_repeated_responsive_markup():
     locator, strategy = await PlaywrightAdapter(Page()).visible_locator(
@@ -48,6 +79,15 @@ async def test_visible_outcome_can_match_a_formatted_generated_phone_value():
     )
     assert strategy == "normalized_number_text"
     assert await locator.count() == 2
+
+
+@pytest.mark.asyncio
+async def test_visible_outcome_skips_hidden_duplicate_dom_witness():
+    locator, strategy = await PlaywrightAdapter(HiddenFirstPage()).visible_locator(
+        Target(name="language", text="en")
+    )
+    assert strategy == "text:visible"
+    assert await locator.is_visible()
 
 
 @pytest.mark.asyncio

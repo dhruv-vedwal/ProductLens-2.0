@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "selection_policy": "Temporary operator-selected retry set; behavior remains generic and evidence-gated.",
+  "targets": [
+    {
+      "name": "npm",
+      "url": "https://www.npmjs.com/",
+      "category": "package registry",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "DemoQA",
+      "url": "https://demoqa.com/",
+      "category": "interactive component demo",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "DemoBlaze",
+      "url": "https://www.demoblaze.com/",
+      "category": "commerce application",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    }
+  ],
+  "fallback_targets": []
+}

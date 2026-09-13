@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -21,6 +23,7 @@ from productlens.contracts.models import (
     ObjectiveSpec,
     ObservedElement,
     PageKnowledge,
+    ProductRelationship,
     ProductContext,
     Target,
 )
@@ -59,7 +62,11 @@ def adaptive_exploration_budget(
     return budget.model_copy(update={
         "max_pages": expanded_pages,
         "max_actions": min(72, max(budget.max_actions, expanded_pages * 4)),
-        "max_time_seconds": min(300, max(budget.max_time_seconds, expanded_pages * 20)),
+        # Full walkthroughs are explicitly allowed to inspect more than the
+        # narrow default.  Keep the cap bounded below the Browserbase lease,
+        # but do not force rich documentation/canvas products to time out at
+        # the same five-minute ceiling used for a focused feature scan.
+        "max_time_seconds": min(900, max(budget.max_time_seconds, expanded_pages * 45)),
     })
 
 
@@ -104,6 +111,22 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
         or "entire" in lower
         or "whole product" in lower
     )
+    if re.search(r"\b(?:sales|selling|prospect|buyer)\b", lower):
+        video_type = "sales_demo"
+    elif re.search(r"\b(?:onboard|onboarding|getting started)\b", lower):
+        video_type = "onboarding"
+    elif re.search(r"\b(?:train|training|tutorial|teach)\b", lower):
+        video_type = "training"
+    elif re.search(r"\b(?:changelog|release notes?|what(?:'s| is) new|new release)\b", lower):
+        video_type = "changelog"
+    elif re.search(r"\b(?:support|troubleshoot|troubleshooting|debug)\b", lower):
+        video_type = "support"
+    elif re.search(r"\b(?:portfolio|recruiter|career)\b", lower):
+        video_type = "portfolio"
+    elif full:
+        video_type = "full_tour"
+    else:
+        video_type = "feature_walkthrough"
     # Keep product concepts separate from the prose used to ask for a demo.
     # Feeding duration, connective, or orchestration words into relevance
     # scoring makes unrelated pages look useful simply because they mention
@@ -112,13 +135,16 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
     objective_noise = {
         "the", "and", "for", "with", "from", "into", "this", "that", "its", "show", "give",
         "explain", "demonstrate", "demo", "walkthrough", "tour", "full", "complete",
-        "brief", "detailed", "evidence", "grounded", "feature", "flow", "workflow",
+        "brief", "detailed", "concise", "overview", "evidence", "grounded", "feature", "flow", "workflow",
         "application", "product", "create", "produce", "record", "minute", "minutes",
         "second", "seconds", "context", "during", "then", "establish", "relationship",
         "exploration", "explore", "safe", "isolated", "actual", "experience", "only", "thorough",
         "production", "workspace", "visible", "state", "result", "close", "viewer",
         "screen", "page", "pages", "content", "current", "requested", "relevant",
         "discovery", "list", "visibly", "verify", "one", "not", "visit", "unless",
+        "every", "each", "all", "primary", "section", "sections", "tab", "tabs", "meaningful",
+        "prospect", "user", "users", "business", "website", "web",
+        "sales", "onboarding", "training", "changelog", "support", "portfolio", "video",
     }
     words = [
         word for word in re.findall(r"[a-z0-9]{3,}", lower)
@@ -155,6 +181,27 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
             "", walkthrough_entity,
         )
         walkthrough_entity = " ".join(walkthrough_entity.split()) or None
+        # A focused objective may use a generic subject ("the observed public
+        # product experience") rather than naming a feature.  Do not promote
+        # that editorial framing into a required entity that can never be
+        # grounded by page evidence.
+        if walkthrough_entity:
+            entity_words = set(re.findall(r"[a-z0-9]{3,}", walkthrough_entity))
+            generic_entity_words = objective_noise | {
+                "focused", "observed", "public", "meaningful", "safe",
+                "information", "browsing", "resource", "resources", "detail",
+                "most", "workflow", "experience",
+            }
+            if entity_words and entity_words <= generic_entity_words:
+                walkthrough_entity = None
+    # A completeness clause such as "walkthrough of every safe primary
+    # section" describes breadth, not a product entity. Treating it as a
+    # must-show feature makes full-tour planning fail before discovery can
+    # inspect the actual navigation inventory.
+    if full and walkthrough_entity and re.match(
+        r"^(?:every|each|all|the whole|the entire)\b", walkthrough_entity
+    ):
+        walkthrough_entity = None
     # An objective may explicitly require that a setup/configuration area
     # explains an operational feature. Keep that relationship as data rather
     # than making a product-specific route rule.
@@ -219,11 +266,20 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
     relationships = list({(item.source, item.target, item.relation): item for item in relationships}.values())
     generic = {
         *objective_noise, "config", "configuration", "settings", "setting",
+        "every", "each", "all", "safe", "primary", "section", "sections",
+        "meaningful", "visible", "content", "tab", "tabs",
+        # Scope/presentation words are not a requested product entity.  Keep
+        # them out of primary_entity so focused objectives remain grounded in
+        # observed page evidence rather than their editorial wording.
+        "focused", "feature", "observed", "public", "product", "experience",
+        "demo", "demonstration", "evidence", "grounded", "safe", "workflow",
+        "most", "information", "browsing", "resource", "resources", "detail",
     }
     primary_entity = walkthrough_entity or next((word for word in requested if word not in generic), None)
     if primary_entity is None and relationships:
         primary_entity = re.sub(r"\s+(?:workflow|flow)$", "", relationships[0].target).strip() or None
     return ObjectiveSpec(
+        video_type=video_type,
         raw=objective,
         demo_type="full_walkthrough" if full else "feature_walkthrough",
         depth="thorough" if full else "standard",
@@ -518,6 +574,66 @@ def _relationship_page_roles(
     return operational, supporting
 
 
+def _derive_product_relationships(
+    pages: list[PageKnowledge], objective: ObjectiveSpec
+) -> list[ProductRelationship]:
+    """Compile an evidence-backed relationship graph from observed pages.
+
+    This intentionally starts with relationships requested by the user.  The
+    endpoints are matched against page-local headings, prose, and canonical
+    route terms; a lexical match alone never becomes an executable action.
+    Unknown endpoints remain represented with low confidence so the planner
+    can report the missing evidence instead of inventing a route.
+    """
+    if not objective.supporting_relationships:
+        return []
+
+    def page_terms(page: PageKnowledge) -> set[str]:
+        return _normalized_terms(" ".join([
+            page.title, page.purpose, urlparse(page.url).path,
+            *page.visible_sections, *page.visible_facts[:16],
+        ]))
+
+    result: list[ProductRelationship] = []
+    for requested in objective.supporting_relationships:
+        source_terms = _normalized_terms(requested.source)
+        target_terms = _normalized_terms(requested.target)
+        source_candidates: list[tuple[int, PageKnowledge]] = []
+        target_candidates: list[tuple[int, PageKnowledge]] = []
+        for page in pages:
+            terms = page_terms(page)
+            route_terms = _normalized_terms(urlparse(page.url).path)
+            source_score = len(source_terms & terms) + 2 * len(source_terms & route_terms)
+            target_score = len(target_terms & terms) + 2 * len(target_terms & route_terms)
+            if source_score:
+                source_candidates.append((source_score, page))
+            if target_score:
+                target_candidates.append((target_score, page))
+        source_page = max(source_candidates, key=lambda item: item[0])[1] if source_candidates else None
+        target_page = next(
+            (page for _score, page in sorted(target_candidates, key=lambda item: -item[0])
+             if not source_page or _canonical_route(page.url) != _canonical_route(source_page.url)),
+            None,
+        )
+        evidence = [f"objective_relationship:{requested.source}->{requested.target}"]
+        if source_page:
+            evidence.append(f"page:{source_page.url}")
+        if target_page:
+            evidence.append(f"page:{target_page.url}")
+        confidence = 0.35 + (0.3 if source_page else 0) + (0.3 if target_page else 0)
+        result.append(ProductRelationship(
+            source=requested.source,
+            target=requested.target,
+            relation={"context_for": "context_for", "configures": "configures",
+                      "depends_on": "depends_on", "proves": "proves"}.get(requested.relation, "related_to"),
+            source_url=source_page.url if source_page else None,
+            target_url=target_page.url if target_page else None,
+            evidence_refs=evidence[:20],
+            confidence=min(1.0, confidence),
+        ))
+    return result
+
+
 _REVERSIBLE_ACTION_WORDS = {"new", "create", "add", "start", "open", "schedule", "book"}
 _UNSAFE_ACTION_WORDS = {"delete", "remove", "send", "email", "message", "pay", "charge", "publish", "invite"}
 
@@ -704,9 +820,23 @@ class LiveDiscovery:
                     '[role="group"], .MuiFormControl-root, [data-field], [data-slot="field"]'
                 ) || node.parentElement?.parentElement || node.parentElement;
                 const localContext = text([fieldContainer?.innerText || '', describedBy].filter(Boolean).join(' '));
+                const selectedText = node.tagName.toLowerCase() === 'select' && node.selectedOptions?.length
+                    ? text(node.selectedOptions[0].innerText || node.selectedOptions[0].textContent || '')
+                    : '';
+                const displayText = text(selectedText || node.innerText || node.value || '');
+                const ariaLabel = text(node.getAttribute('aria-label') || '');
+                // Some component libraries expose a locale/value code such
+                // as ``en`` through aria-label while the visible control says
+                // ``English``.  A short code is not useful narration or
+                // grounding evidence when a readable selected label exists,
+                // so prefer the visible label without relying on any product
+                // vocabulary.
+                const accessibleLabel = ariaLabel && ariaLabel.length <= 3 && displayText.length > ariaLabel.length
+                    ? displayText
+                    : ariaLabel;
                 const semanticLabel = text(
-                    node.getAttribute('aria-label') || labelled || labels || enclosingLabel || idLabel ||
-                    node.getAttribute('placeholder') || node.getAttribute('name') || ''
+                    accessibleLabel || labelled || labels || enclosingLabel || idLabel ||
+                    node.getAttribute('placeholder') || node.getAttribute('name') || displayText || ''
                 );
                 // A visible asterisk is direct required-field evidence, not
                 // part of the label later used for semantic grounding.
@@ -1050,7 +1180,19 @@ class LiveDiscovery:
                 canonical_routes.add(canonical)
             if len(routes) >= max(1, budget.max_pages - 1):
                 break
-        login = any("password" in (item.element_type or "").lower() for item in elements)
+        password_control = any("password" in (item.element_type or "").lower() for item in elements)
+        # A public automation sandbox may intentionally expose a *login
+        # example* alongside many other controls.  Treating any visible
+        # password input as an authentication wall incorrectly blocks
+        # preflight and full-tour planning.  Require a semantic auth heading
+        # or an auth-like route before classifying the opening page as gated.
+        auth_heading = any(
+            item.tag in {"h1", "h2", "h3"}
+            and re.search(r"\b(?:sign[ -]?in|log[ -]?in|authenticate)\b", item.name, re.IGNORECASE)
+            for item in elements
+        )
+        auth_route = bool(re.search(r"/(?:login|signin|sign-in|auth)(?:/|$)", origin.path, re.IGNORECASE))
+        login = password_control and (auth_heading or auth_route)
         return ProductContext(
             url=page.url,
             title=title[:500],
@@ -1212,7 +1354,60 @@ class LiveDiscovery:
         """Explore a bounded set of objective-ranked, same-origin routes and restore the entry URL."""
         budget = budget or DiscoveryBudget()
         entry_url = page.url
-        async def inspect_with_scroll_evidence() -> ProductContext:
+        discovery_started = asyncio.get_running_loop().time()
+
+        async def revive_page_if_closed() -> bool:
+            """Reopen the authenticated entry state after a transient probe closure.
+
+            Remote CDP browsers can close a page when a reversible control opens
+            a portal/new target or when an extension probe tears down its target.
+            Discovery evidence collected before that event is still valid; the
+            route collector only needs a live page to continue.  Reusing the
+            existing browser context preserves cookies without replaying a
+            production navigation (this helper is exploration-only).
+            """
+            nonlocal page
+            try:
+                if not page.is_closed():
+                    return True
+            except PlaywrightError:
+                pass
+            try:
+                browser_context = page.context
+                page = await browser_context.new_page()
+                await page.goto(entry_url, wait_until="domcontentloaded", timeout=30_000)
+                await page.wait_for_timeout(1_100)
+                return not page.is_closed()
+            except PlaywrightError:
+                return False
+
+        async def reopen_unresponsive_page(url: str) -> bool:
+            """Replace a live-but-unresponsive remote target without losing auth.
+
+            CDP can leave ``page.is_closed()`` false while a renderer target
+            stops answering (a common failure after a long SPA transition).
+            Reusing the existing context preserves authenticated storage and
+            avoids replaying credentials; the old target is closed only on a
+            best-effort basis.
+            """
+            nonlocal page
+            try:
+                browser_context = page.context
+                replacement = await asyncio.wait_for(browser_context.new_page(), timeout=10)
+                await asyncio.wait_for(
+                    replacement.goto(url, wait_until="domcontentloaded", timeout=20_000),
+                    timeout=25,
+                )
+                await replacement.wait_for_timeout(700)
+                old_page = page
+                page = replacement
+                with suppress(Exception):
+                    await asyncio.wait_for(old_page.close(), timeout=5)
+                return not page.is_closed()
+            except (PlaywrightError, TimeoutError):
+                return False
+
+        async def inspect_with_scroll_evidence(recovery_url: str | None = None) -> ProductContext:
             """Collect bounded lower-page evidence without turning discovery into capture.
 
             Animated timelines and card collections often hydrate their detailed
@@ -1225,7 +1420,21 @@ class LiveDiscovery:
             # window makes visible contribution text discoverable without
             # coupling discovery to arbitrary long sleeps.
             await page.wait_for_timeout(1_100)
-            initial = await self.inspect(page, objective, budget)
+            try:
+                initial = await asyncio.wait_for(
+                    self.inspect(page, objective, budget), timeout=30
+                )
+            except TimeoutError:
+                # A remote renderer may remain nominally open but stop
+                # answering DOM calls. Recreate only the exploration target,
+                # then retry once against the same route; production remains
+                # isolated and never inherits this recovery.
+                target_url = recovery_url or entry_url
+                if not await reopen_unresponsive_page(target_url):
+                    raise
+                initial = await asyncio.wait_for(
+                    self.inspect(page, objective, budget), timeout=30
+                )
             if screenshot_directory is not None:
                 screenshot_directory.mkdir(parents=True, exist_ok=True)
                 digest = hashlib.sha256(_canonical_route(page.url).encode("utf-8")).hexdigest()[:16]
@@ -1249,7 +1458,9 @@ class LiveDiscovery:
                     for fraction in (0.45, 0.9):
                         await page.evaluate("y => window.scrollTo({top: y, behavior: 'instant'})", max(0, height * fraction - viewport * 0.4))
                         await page.wait_for_timeout(1_000)
-                        samples.append(await self.inspect(page, objective, budget))
+                        samples.append(await asyncio.wait_for(
+                            self.inspect(page, objective, budget), timeout=30
+                        ))
             finally:
                 await page.evaluate("() => window.scrollTo({top: 0, behavior: 'instant'})")
             elements: list[ObservedElement] = []
@@ -1294,6 +1505,12 @@ class LiveDiscovery:
         capabilities, capability_actions, capability_blockers = await self._probe_reversible_capabilities(
             page, primary, objective, remaining=max(0, min(3, budget.max_actions // 6))
         )
+        # A probe must never make the rest of discovery unusable. If a remote
+        # target disappeared, reopen the same authenticated entry state and
+        # refresh its page-local evidence before traversing visible routes.
+        if await revive_page_if_closed():
+            if any("Target page" in item for item in capability_blockers):
+                primary = await inspect_with_scroll_evidence()
         if explore_visible_routes:
             origin = urlparse(entry_url)
             visible_routes: list[str] = []
@@ -1399,6 +1616,12 @@ class LiveDiscovery:
                     continue
                 visible_controls_by_route.setdefault(_canonical_route(destination), item)
             for route_index, route in enumerate(routes_to_inspect):
+                if asyncio.get_running_loop().time() - discovery_started >= budget.max_time_seconds:
+                    rejected_routes.append("discovery_time_budget_exhausted")
+                    break
+                if not await revive_page_if_closed():
+                    rejected_routes.append(f"page_unavailable:{route}")
+                    continue
                 # The opening page is already represented by ``primary``.
                 # Skipping its canonical equivalents preserves the bounded
                 # budget for actual primary sections.
@@ -1449,12 +1672,15 @@ class LiveDiscovery:
                     # Navigation is direct only when no visible, uniquely
                     # resolvable same-origin link is available at this state.
                     try:
-                        await page.goto(route, wait_until="domcontentloaded")
+                        # A route probe is bounded discovery evidence, not a
+                        # production navigation. Keep an unresponsive SPA
+                        # route from consuming the entire adaptive budget.
+                        await page.goto(route, wait_until="domcontentloaded", timeout=15_000)
                     except PlaywrightError:
                         rejected_routes.append(f"navigation_failed:{route}")
                         continue
                     navigation_probes.append(f"direct_navigation_fallback:{route}")
-                inspected = await inspect_with_scroll_evidence()
+                inspected = await inspect_with_scroll_evidence(recovery_url=route)
                 remaining_capabilities = max(0, min(3, budget.max_actions // 6) - len(capabilities))
                 if remaining_capabilities:
                     found, actions, blockers = await self._probe_reversible_capabilities(
@@ -1478,6 +1704,9 @@ class LiveDiscovery:
                 # knowledge. This is discovery evidence, never a production
                 # shortcut or a data-changing action.
                 for relationship_control in _relationship_child_controls(inspected, objective_spec):
+                    if asyncio.get_running_loop().time() - discovery_started >= budget.max_time_seconds:
+                        rejected_routes.append("discovery_time_budget_exhausted")
+                        break
                     if len(collected) >= budget.max_pages:
                         break
                     try:
@@ -1590,6 +1819,7 @@ class LiveDiscovery:
                 action_hints.append(hint)
         pages = [_page_knowledge(context) for context in collected]
         elements = _restore_missing_page_landmarks(elements, pages)
+        relationships = _derive_product_relationships(pages, objective_spec)
         objective_words = _tokens(objective)
         features = []
         for page_info in pages:
@@ -1603,7 +1833,12 @@ class LiveDiscovery:
                 score = max(score, 0.82)
             if {"report", "export", "csv"} & objective_words and {"report", "reports", "analytics"} & terms:
                 score = max(score, 0.82)
-            features.append(FeatureKnowledge(name=page_info.purpose, purpose=page_info.purpose, entry_urls=[page_info.url], related_urls=[], evidence=[f"page:{page_info.url}", *[f"section:{section}" for section in page_info.visible_sections[:4]]], relevance_score=score))
+            related_urls = list(dict.fromkeys(
+                url for relationship in relationships
+                for url in (relationship.source_url, relationship.target_url)
+                if url and _canonical_route(url) != _canonical_route(page_info.url)
+            ))
+            features.append(FeatureKnowledge(name=page_info.purpose, purpose=page_info.purpose, entry_urls=[page_info.url], related_urls=related_urls[:12], evidence=[f"page:{page_info.url}", *[f"section:{section}" for section in page_info.visible_sections[:4]]], relevance_score=score))
         ranked_pages = sorted(pages, key=lambda page_info: next((feature.relevance_score for feature in features if feature.name == page_info.purpose), 0), reverse=True)
         operational_pages, supporting_pages = _relationship_page_roles(pages, objective_spec)
         if objective_spec.demo_type == "full_walkthrough":
@@ -1703,6 +1938,7 @@ class LiveDiscovery:
                 "objective": objective_spec,
                 "page_knowledge": pages,
                 "feature_knowledge": features,
+                "relationships": relationships,
                 "candidate_demo_flows": sorted(candidates, key=lambda candidate: candidate.score, reverse=True),
                 "capabilities": [capability.model_dump(mode="json") for capability in capabilities],
                 "exploration_actions": [*navigation_probes, *capability_actions],

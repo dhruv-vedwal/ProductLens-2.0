@@ -87,6 +87,21 @@ def test_journey_rejects_a_return_to_the_completed_opening_page():
     assert "JOURNEY_REVISITS_COMPLETED_PAGE" in inspect_journey(build_journey(trace, scenes))["hard_failures"]
 
 
+def test_journey_allows_reentry_when_it_proves_a_meaningful_validated_interaction():
+    trace = DemoTrace(run_id="meaningful-return", objective="walkthrough", started_at=datetime.now(UTC), events=[
+        _event("opening", OperationKind.VERIFY_STATE, "https://example.test/"),
+        _event("list", OperationKind.OPEN_NAVIGATION_ITEM, "https://example.test/list"),
+        _event("list-content", OperationKind.SCROLL_TO, "https://example.test/list"),
+        _event("detail", OperationKind.OPEN_NAVIGATION_ITEM, "https://example.test/detail"),
+        _event("detail-content", OperationKind.SCROLL_TO, "https://example.test/detail"),
+        _event("return", OperationKind.OPEN_NAVIGATION_ITEM, "https://example.test/list"),
+        _event("composer", OperationKind.OPEN_MODAL, "https://example.test/list"),
+        _event("field", OperationKind.FILL_TEXT, "https://example.test/list"),
+    ], outcome_verified=True)
+    report = inspect_journey(build_journey(trace, [{"event_id": event.id} for event in trace.events]))
+    assert "JOURNEY_REVISITS_COMPLETED_PAGE" not in report["hard_failures"]
+
+
 def test_journey_rejects_a_page_that_skips_a_required_content_group():
     trace = DemoTrace(run_id="missing-group", objective="portfolio", started_at=datetime.now(UTC), events=[
         _event("opening", OperationKind.VERIFY_STATE, "https://example.test/"),

@@ -59,3 +59,16 @@ def test_relevance_graph_links_observed_pages_features_and_controls():
     assert graph["schema_version"] == 1
     assert {node["kind"] for node in graph["nodes"]} == {"page", "feature", "control"}
     assert {edge["relation"] for edge in graph["edges"]} == {"exposes", "contains"}
+
+
+def test_relevance_graph_preserves_observed_relationship_edges():
+    context = ProductContext(
+        url="https://example.test/", title="Example", application_type="dashboard",
+        relationships=[{
+            "source": "configuration", "target": "approval queue",
+            "relation": "configures", "evidence_refs": ["page:https://example.test/settings"],
+            "confidence": 0.9,
+        }],
+    )
+    graph = _relevance_graph(context)
+    assert any(edge["relation"] == "configures" for edge in graph["edges"])

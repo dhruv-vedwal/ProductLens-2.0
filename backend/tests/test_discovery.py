@@ -16,6 +16,7 @@ from productlens.contracts.models import (
 from productlens.discovery.live import (
     LiveDiscovery,
     _canonical_route,
+    _derive_product_relationships,
     adaptive_exploration_budget,
     _focused_relationship_evidence_complete,
     _objective_spec,
@@ -44,6 +45,7 @@ def test_export_targets_reports():
 def test_full_walkthrough_objective_requires_thorough_exploration_contract():
     objective = _objective_spec("Create a full walkthrough of every primary tab")
     assert objective.depth == "thorough"
+    assert objective.video_type == "full_tour"
     assert objective.minimum_duration_seconds >= 110
     assert "each selected page is explored before transition" in objective.success_criteria
 
@@ -51,6 +53,13 @@ def test_full_walkthrough_objective_requires_thorough_exploration_contract():
 def test_duration_words_do_not_break_full_walkthrough_detection():
     objective = _objective_spec("Create a full 2 to 3 minute walkthrough of each primary section")
     assert objective.demo_type == "full_walkthrough"
+
+
+def test_focused_editorial_scope_is_not_mistaken_for_primary_entity():
+    objective = _objective_spec(
+        "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    )
+    assert objective.primary_entity is None
 
 
 def test_complete_every_primary_section_is_full_walkthrough_intent():
@@ -67,9 +76,50 @@ def test_punctuated_complete_duration_request_is_a_full_walkthrough():
     assert objective.maximum_duration_seconds == 240
 
 
+def test_full_tour_completeness_clause_is_not_a_fake_feature_entity():
+    objective = _objective_spec(
+        "Create a complete, evidence-grounded walkthrough of every safe primary section and meaningful visible content."
+    )
+    assert objective.demo_type == "full_walkthrough"
+    assert objective.primary_entity is None
+    assert objective.requested_features == []
+
+
+def test_objective_spec_classifies_generic_video_intent_without_making_mode_the_feature():
+    assert _objective_spec("Create a sales demo of invoice export").video_type == "sales_demo"
+    assert _objective_spec("Create a training walkthrough of the task board").video_type == "training"
+    assert _objective_spec("Create a changelog video for the new release").video_type == "changelog"
+    assert _objective_spec("Give a concise product overview for a product prospect").primary_entity is None
+
+
 def test_objective_spec_does_not_privilege_a_known_application_label():
     objective = _objective_spec("Demonstrate the invoice approval queue")
     assert "invoice" in objective.must_show
+
+
+def test_relationship_graph_grounds_requested_context_to_distinct_pages():
+    objective = _objective_spec(
+        "Demonstrate invoice approval in the context of invoice configuration"
+    )
+    pages = [
+        PageKnowledge(
+            url="https://example.test/settings/invoice-config", title="Invoice Configuration",
+            purpose="Invoice Configuration", visible_sections=["Rules"],
+            visible_facts=["Approval thresholds determine who reviews invoices"],
+            fingerprint="config",
+        ),
+        PageKnowledge(
+            url="https://example.test/invoices", title="Invoices",
+            purpose="Invoice approval", visible_sections=["Approval queue"],
+            visible_facts=["Review and approve pending invoices"], fingerprint="invoices",
+        ),
+    ]
+    relationships = _derive_product_relationships(pages, objective)
+    assert len(relationships) == 1
+    edge = relationships[0]
+    assert edge.source_url.endswith("invoice-config")
+    assert edge.target_url.endswith("invoices")
+    assert edge.confidence >= 0.9
     assert "today" not in objective.must_show
 
 
@@ -381,6 +431,31 @@ async def test_scoped_form_extraction_reads_component_label_and_described_valida
     assert by_name["Source"].required
     assert not by_name["Branch (optional)"].required
     assert not schema.unresolved_required_fields
+
+
+@pytest.mark.asyncio
+async def test_form_extraction_prefers_readable_selected_label_over_short_value_code():
+    """Locale/value codes must not become opaque production targets."""
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        context = await browser.new_context()
+        page = await context.new_page()
+        await page.set_content("""
+            <form>
+              <label>Language
+                <select aria-label="en" name="language">
+                  <option value="en" selected>English</option>
+                  <option value="hi">Hindi</option>
+                </select>
+              </label>
+            </form>
+        """)
+        schema = await LiveDiscovery()._form_schema_from_scope(page.locator("form"), page.url)
+        await context.close()
+        await browser.close()
+
+    assert schema.fields
+    assert schema.fields[0].name == "English"
 
 
 @pytest.mark.asyncio

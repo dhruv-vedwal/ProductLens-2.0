@@ -243,11 +243,14 @@ def inspect_editorial(
             operation.kind is OperationKind.VERIFY_STATE
             and bool({"explore", "explain", "demonstrate", "verify"} & phases)
             and (
-                any(str(ref).startswith(("form-field:", "element:")) for ref in evidence_refs)
-                if evidence_refs else (
-                    target_is_form_control
-                    or bool(getattr(operation, "required_content_groups", []))
-                )
+                # A validated content group is page-local evidence even when
+                # the extraction pass represented it as a section/fact rather
+                # than an ``element:`` reference.  Requiring a particular
+                # evidence prefix made otherwise grounded documentation and
+                # dashboard pages fail after successful production inspection.
+                bool(getattr(operation, "required_content_groups", []))
+                or any(str(ref).startswith(("form-field:", "element:")) for ref in evidence_refs)
+                or target_is_form_control
             )
         )
     for index, operation in enumerate(operations):

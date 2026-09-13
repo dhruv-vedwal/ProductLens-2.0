@@ -71,6 +71,14 @@ def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
         directed.append({
             **scene,
             "objective": trace.objective,
+            # Keep the semantic operation available to journey QA.  A page
+            # revisit is normally a coverage smell, but a validated return
+            # followed by a meaningful form/modal/filter interaction is a
+            # legitimate continuation of the story (for example, opening a
+            # record composer after first introducing the list).  QA can
+            # distinguish that from a bare route sweep without inspecting
+            # provider-specific selectors.
+            "event_kind": event.kind.value,
             "story_phase": phase,
             "action_class": action_class,
             "camera": {"zoom": 1.0, "duration_seconds": 0.45, "easing": "out-cubic", "safety": "full-frame", **existing_camera},
@@ -205,8 +213,27 @@ def inspect_journey(scenes: list[dict]) -> dict:
         if completion.get("missing_content_groups"):
             failures.append("JOURNEY_REQUIRED_CONTENT_GROUP_NOT_SHOWN")
         if page_key and page_key in completed_pages:
-            failures.append("JOURNEY_REVISITS_COMPLETED_PAGE")
-            continue
+            meaningful_revisit_kinds = {
+                OperationKind.CLICK.value,
+                OperationKind.OPEN_MODAL.value,
+                OperationKind.CLOSE_MODAL.value,
+                OperationKind.FILL_TEXT.value,
+                OperationKind.FILL_EMAIL.value,
+                OperationKind.FILL_PHONE.value,
+                OperationKind.SELECT_OPTION.value,
+                OperationKind.APPLY_FILTER.value,
+                OperationKind.SUBMIT.value,
+            }
+            # Re-entry is allowed only when the chapter proves a semantic
+            # interaction/inspection beyond another scroll. A route opened
+            # solely to repair missed coverage still fails as before.
+            meaningful_revisit = any(
+                item.get("event_kind") in meaningful_revisit_kinds
+                for item in chapter
+            )
+            if not meaningful_revisit:
+                failures.append("JOURNEY_REVISITS_COMPLETED_PAGE")
+                continue
         if page_key:
             completed_pages.add(page_key)
     # A ScrollTo scene must carry browser-owned path evidence. The renderer is

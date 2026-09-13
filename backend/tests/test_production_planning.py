@@ -74,6 +74,64 @@ def test_page_compiler_does_not_turn_table_chrome_into_fake_scroll_scenes():
     assert local[1].kind is OperationKind.VERIFY_STATE
 
 
+def test_navigation_query_state_is_allowed_when_canonical_route_was_observed():
+    """Filters and SPA state must not turn a visible same-origin route into a false rejection."""
+    root = "https://example.test/app"
+    scoped = ProductContext(
+        url=root,
+        title="Example",
+        application_type="dashboard",
+        relevant_routes=["https://example.test/leads"],
+        navigation=[ObservedElement(
+            tag="a", name="Leads", selector="a[href='/leads']",
+            href="/leads", source_url=root, actionable=True,
+        )],
+        elements=[ObservedElement(tag="h1", name="Leads", selector="h1", source_url=root)],
+        confidence=0.9,
+    )
+    proposal = WorkflowProposal(
+        narrative_goal="Show leads",
+        selected_workflow="leads",
+        steps=[SemanticOperation(
+            kind=OperationKind.NAVIGATE,
+            intent="Open filtered leads",
+            value="/leads?status=open&page=1",
+            postconditions=[Postcondition(kind="url", expected="https://example.test/leads?status=open&page=1")],
+        )],
+        expected_outcomes=["Leads are visible"],
+    )
+    ProductionPlanningService._validate(proposal, scoped, allow_side_effects=False)
+
+
+def test_visible_navigation_accepts_query_state_postcondition_for_same_route():
+    """A visible link may omit transient filters that the planner observes after navigation."""
+    root = "https://example.test/app"
+    scoped = ProductContext(
+        url=root, title="Example", application_type="dashboard", confidence=0.9,
+        navigation=[ObservedElement(
+            tag="a", name="Leads", selector="a[href='/leads']", href="/leads", source_url=root,
+            actionable=True,
+        )],
+        elements=[
+            # Same accessible name on another discovered page must not win
+            # over the operation's source/selector provenance.
+            ObservedElement(tag="a", name="Leads", selector="a[href='/leads']", href="/wrong", source_url="https://example.test/other", actionable=True),
+            ObservedElement(tag="a", name="Leads", selector="a[href='/leads']", href="/leads", source_url=root, actionable=True),
+        ],
+        relevant_routes=["https://example.test/leads"],
+    )
+    proposal = WorkflowProposal(
+        narrative_goal="Open filtered leads", selected_workflow="leads",
+        steps=[SemanticOperation(
+            kind=OperationKind.OPEN_NAVIGATION_ITEM, intent="Open filtered leads",
+            target=Target(name="Leads", selector="a[href='/leads']", source_url=root),
+            postconditions=[Postcondition(kind="url", expected="https://example.test/leads?status=open")],
+        )],
+        expected_outcomes=["Leads are visible"],
+    )
+    ProductionPlanningService._validate(proposal, scoped, allow_side_effects=False)
+
+
 def test_planner_rejects_candidate_missing_required_objective_context_relationship():
     scoped = context().model_copy(update={
         "objective": ObjectiveSpec(

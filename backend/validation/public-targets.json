@@ -1,0 +1,281 @@
+{
+  "schema_version": 1,
+  "selection_policy": "Public, safe-to-browse products with materially different interaction surfaces. Replace a target if it becomes blocked; never add a site-specific fallback.",
+  "targets": [
+    {
+      "name": "RoadForge",
+      "url": "https://roadforge.anvilary.tools/",
+      "category": "roadmap and decision workspace",
+      "rationale": "Public no-account roadmap workspace with a distinct planning and notes surface; safe read-only interactions are available."
+    },
+    {
+      "name": "OnlyDash Guest Demo",
+      "url": "https://onlydash.io/",
+      "category": "admin/data dashboard",
+      "rationale": "Public guest demo with generated schema, tables, filters and read-only admin interactions without login."
+    },
+    {
+      "name": "Webkio Live Demo",
+      "url": "https://webkio.com/demo",
+      "category": "business dashboard",
+      "rationale": "Public no-signup product demo covering dashboard, orders, booking calendar, page builder, analytics and settings."
+    },
+    {
+      "name": "EasyRoadmap",
+      "url": "https://easyroadmap.app/",
+      "category": "project management",
+      "rationale": "Public no-signup project-management application suitable for demonstrating roadmap and task workflows."
+    },
+    {
+      "name": "diagrams.net",
+      "url": "https://app.diagrams.net/",
+      "category": "interactive canvas/editor",
+      "rationale": "Public browser-based diagram editor with a materially different canvas, menus and document workflow."
+    }
+  ],
+  "fallback_targets": [
+    {
+      "name": "Gantts.app",
+      "url": "https://gantts.app/",
+      "category": "timeline planner",
+      "rationale": "Public no-login browser planner with a materially different timeline editing surface."
+    },
+    {
+      "name": "Will Be Done",
+      "url": "https://will-be-done.app/",
+      "category": "local-first task manager",
+      "rationale": "Public no-signup task manager with week/month/ideas workspaces and safe local interactions."
+    },
+    {
+      "name": "Excalidraw",
+      "url": "https://excalidraw.com/",
+      "category": "collaborative canvas",
+      "rationale": "Public browser canvas with a distinct drawing surface, toolbar, export and sharing controls."
+    },
+    {
+      "name": "Material Design 3",
+      "url": "https://m3.material.io/",
+      "category": "design system documentation",
+      "rationale": "Public design-system site with structured navigation, component guidance and interactive examples."
+    },
+    {
+      "name": "Bootstrap Documentation",
+      "url": "https://getbootstrap.com/docs/5.3/",
+      "category": "developer documentation",
+      "rationale": "Public documentation product with searchable navigation, examples and component sections."
+    },
+    {
+      "name": "MDN Web Docs",
+      "url": "https://developer.mozilla.org/en-US/",
+      "category": "developer reference",
+      "rationale": "Public reference application with topic navigation, search, guides and structured content."
+    },
+    {
+      "name": "Figma Community",
+      "url": "https://www.figma.com/community",
+      "category": "design community",
+      "rationale": "Public community surface with cards, search, filters and detail navigation without account creation."
+    },
+    {
+      "name": "React Documentation",
+      "url": "https://react.dev/",
+      "category": "developer documentation",
+      "rationale": "Public documentation product with tutorials, reference navigation and runnable examples."
+    },
+    {
+      "name": "Tailwind CSS",
+      "url": "https://tailwindcss.com/",
+      "category": "developer tooling",
+      "rationale": "Public product site with documentation, component examples and structured navigation."
+    },
+    {
+      "name": "Framer",
+      "url": "https://www.framer.com/",
+      "category": "site builder",
+      "rationale": "Public site-builder product with product areas, examples and feature-focused navigation."
+    },
+    {
+      "name": "Linear",
+      "url": "https://linear.app/",
+      "category": "issue tracking product",
+      "rationale": "Public product surface with feature pages, workflows and visual examples."
+    },
+    {
+      "name": "Shopify",
+      "url": "https://www.shopify.com/",
+      "category": "commerce platform",
+      "rationale": "Public commerce-platform site with product areas, use cases and navigable resources."
+    },
+    {
+      "name": "Notion",
+      "url": "https://www.notion.so/product",
+      "category": "workspace product",
+      "rationale": "Public workspace product page with feature navigation and representative workflows."
+    },
+    {
+      "name": "Vite Documentation",
+      "url": "https://vite.dev/",
+      "category": "developer tooling",
+      "rationale": "Public developer-tool product with documentation, guides, and visible navigation."
+    },
+    {
+      "name": "Vue Documentation",
+      "url": "https://vuejs.org/",
+      "category": "developer framework",
+      "rationale": "Public framework product site with guide, API, ecosystem, and example content."
+    },
+    {
+      "name": "Python",
+      "url": "https://www.python.org/",
+      "category": "developer platform",
+      "rationale": "Public developer platform with downloads, documentation, community, and event sections."
+    },
+    {
+      "name": "Django",
+      "url": "https://www.djangoproject.com/",
+      "category": "web framework",
+      "rationale": "Public framework product with overview, documentation, downloads, and community resources."
+    },
+    {
+      "name": "Rust",
+      "url": "https://www.rust-lang.org/",
+      "category": "developer language",
+      "rationale": "Public language product with learning, tooling, community, and project information."
+    },
+    {
+      "name": "W3C",
+      "url": "https://www.w3.org/",
+      "category": "standards organization",
+      "rationale": "Public standards product with specifications, groups, resources, and news navigation."
+    },
+    {
+      "name": "Svelte",
+      "url": "https://svelte.dev/",
+      "category": "developer framework",
+      "rationale": "Public framework product with interactive examples, documentation, and ecosystem content."
+    },
+    {
+      "name": "Astro",
+      "url": "https://astro.build/",
+      "category": "web framework",
+      "rationale": "Public framework product with feature explanations, integrations, and documentation."
+    },
+    {
+      "name": "Playwright TodoMVC",
+      "url": "https://demo.playwright.dev/todomvc/",
+      "category": "task application",
+      "rationale": "Public safe task application with visible add, complete, filter, and persistence interactions."
+    },
+    {
+      "name": "The Internet Demonstration App",
+      "url": "https://the-internet.herokuapp.com/",
+      "category": "interaction showcase",
+      "rationale": "Public safe demonstration app with distinct navigation, forms, dynamic controls, and status pages."
+    },
+    {
+      "name": "Automation Exercise",
+      "url": "https://automationexercise.com/",
+      "category": "commerce demonstration",
+      "rationale": "Public e-commerce demonstration with catalog, product detail, and searchable browsing flows."
+    },
+    {
+      "name": "Applitools Demo",
+      "url": "https://demo.applitools.com/",
+      "category": "application dashboard",
+      "rationale": "Public demonstration dashboard with safe sign-in form and representative account views."
+    },
+    {
+      "name": "TodoMVC",
+      "url": "https://todomvc.com/examples/react/dist/",
+      "category": "task application",
+      "rationale": "Public React task application with safe local interactions and clear state transitions."
+    },
+    {
+      "name": "Chrome for Developers",
+      "url": "https://developer.chrome.com/",
+      "category": "developer documentation",
+      "rationale": "Public developer product with guides, tooling, reference content, and structured navigation."
+    },
+    {
+      "name": "W3Schools",
+      "url": "https://www.w3schools.com/",
+      "category": "learning platform",
+      "rationale": "Public learning product with searchable tutorials, examples, references, and interactive practice."
+    },
+    {
+      "name": "npm",
+      "url": "https://www.npmjs.com/",
+      "category": "package registry",
+      "rationale": "Public package product with search, package detail, documentation, and download metadata.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "Supabase",
+      "url": "https://supabase.com/",
+      "category": "developer platform",
+      "rationale": "Public developer platform with database, authentication, storage, and product documentation areas.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "Flowbite",
+      "url": "https://flowbite.com/",
+      "category": "component library",
+      "rationale": "Public component product with interactive examples, component navigation, and implementation guidance.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "shadcn/ui",
+      "url": "https://ui.shadcn.com/",
+      "category": "component toolkit",
+      "rationale": "Public component toolkit with searchable navigation, examples, and installation guidance.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "PostgreSQL",
+      "url": "https://www.postgresql.org/",
+      "category": "database product",
+      "rationale": "Public database product with releases, documentation, downloads, and community resources.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "DemoBlaze",
+      "url": "https://www.demoblaze.com/",
+      "category": "commerce application",
+      "rationale": "Public commerce demo with catalog navigation, product detail, and safe browsing interactions.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "DemoQA",
+      "url": "https://demoqa.com/",
+      "category": "interactive component demo",
+      "rationale": "Public component demonstration product with forms, widgets, interactions, and structured navigation.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "OpenCart",
+      "url": "https://www.opencart.com/",
+      "category": "commerce platform",
+      "rationale": "Public commerce platform with product, extension, marketplace, and resource surfaces.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "Swagger Petstore",
+      "url": "https://petstore.swagger.io/",
+      "category": "API demonstration",
+      "rationale": "Public API demonstration with documented resources and safe read-only endpoint exploration.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    },
+    {
+      "name": "TypeScript",
+      "url": "https://www.typescriptlang.org/",
+      "category": "developer language product",
+      "rationale": "Public developer product with a clear landing story, handbook navigation, playground, and reference content.",
+      "objective": "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
+    }
+  ],
+  "supplied_targets": [
+    {"name": "Portfolio", "url": "https://dhruv-sys.vercel.app/"},
+    {"name": "Study Plan", "url": "https://study-plan-red.vercel.app/"},
+    {"name": "SmartSevak", "url": "https://dashboard.smartsevak.com", "credential_reference": "secret://productlens/smartsevak"}
+  ]
+}

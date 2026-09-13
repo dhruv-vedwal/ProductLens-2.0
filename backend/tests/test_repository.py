@@ -101,6 +101,15 @@ def test_generic_run_document_ledger_mirrors_architectural_artifacts(tmp_path: P
     assert refreshed["objective"]["payload"] == {"demo_type": "feature"}
 
 
+def test_understanding_preview_is_persisted_and_reused(tmp_path: Path):
+    repository = RunRepository(tmp_path / "productlens.sqlite3")
+    payload = {"status": "READY", "url": "https://example.test/", "suggested_prompt": "Show reports"}
+    repository.save_understanding_preview("https://EXAMPLE.test", "show reports", payload)
+    cached = repository.fresh_understanding_preview("https://example.test/", "show reports")
+    assert cached == payload
+    assert repository.fresh_understanding_preview("https://example.test/", "different") is None
+
+
 def test_idempotent_run_does_not_duplicate_a_nonfailed_request(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
     request = repository.create_request(

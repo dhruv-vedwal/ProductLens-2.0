@@ -11,11 +11,14 @@ from productlens.contracts.models import (
     PageKnowledge,
     PresentationPlan,
     ProductKnowledge,
+    ProductRelationship,
     ScenePlan,
+    UnderstandingPreview,
 )
 
 __all__ = [
     "CandidateDemoFlow", "DemoPlan", "DemoTrace", "EditorialBrief",
     "EditorialScene", "FeatureKnowledge", "ObjectiveSpec", "PageKnowledge",
-    "PresentationPlan", "ProductKnowledge", "ScenePlan",
+    "PresentationPlan", "ProductKnowledge", "ProductRelationship", "ScenePlan",
+    "UnderstandingPreview",
 ]

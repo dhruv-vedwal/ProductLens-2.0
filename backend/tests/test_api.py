@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 import productlens.api.main as api_main
 from productlens.api.main import app, repository, settings
+from productlens.contracts.models import ObjectiveSpec, UnderstandingPreview
 
 
 @pytest.fixture(autouse=True)
@@ -130,3 +131,34 @@ def test_knowledge_invalidation_requires_workspace_access():
     repository.upsert_knowledge("https://example.test", {"title": "Example"}, 0.9)
     response = client.post("/knowledge/invalidate", json={"url": "https://example.test"}, headers=headers)
     assert response.status_code == 200 and response.json()["invalidated"] is True
+
+
+def test_understanding_preview_is_separate_from_generation(monkeypatch: pytest.MonkeyPatch):
+    client = TestClient(app)
+    headers, _ = account(client, f"preflight-{uuid4().hex}@example.test")
+
+    async def preview(**kwargs):
+        assert kwargs["url"] == "https://public.example/"
+        assert kwargs["prompt"] == "Show the reporting workflow"
+        return UnderstandingPreview(
+            url=kwargs["url"],
+            prompt=kwargs["prompt"],
+            suggested_prompt="Show the reporting workflow for a product prospect.",
+            objective=ObjectiveSpec(raw=kwargs["prompt"], primary_entity="reporting workflow"),
+            product_title="Public Example",
+            relevant_areas=["Reports"],
+            evidence_refs=["preflight:visible-dom"],
+            pages_inspected=["https://public.example/"],
+        )
+
+    monkeypatch.setattr(api_main.preflight_service, "preview", preview)
+    response = client.post(
+        "/understanding/preview",
+        json={"url": "https://public.example/", "prompt": "Show the reporting workflow"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "READY"
+    assert payload["suggested_prompt"].startswith("Show the reporting")
+    assert payload["cached"] is False

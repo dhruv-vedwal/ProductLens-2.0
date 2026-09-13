@@ -211,6 +211,11 @@ class RunRepository:
               url TEXT NOT NULL, evidence_json TEXT NOT NULL, confidence REAL NOT NULL, last_verified_at TEXT NOT NULL,
               UNIQUE(product_knowledge_id, url)
             );
+            CREATE TABLE IF NOT EXISTS understanding_previews (
+              id TEXT PRIMARY KEY, product_key TEXT NOT NULL, prompt_hash TEXT NOT NULL,
+              payload_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              UNIQUE(product_key, prompt_hash)
+            );
             CREATE TABLE IF NOT EXISTS form_schemas (
               id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id),
               payload_json TEXT NOT NULL, created_at TEXT NOT NULL
@@ -1470,6 +1475,40 @@ class RunRepository:
             "confidence": row["confidence"],
             "last_verified_at": row["last_verified_at"],
         }
+
+    def save_understanding_preview(self, product_key: str, prompt: str, payload: dict[str, Any]) -> None:
+        """Persist a non-secret preflight result for prompt assistance reuse."""
+        product_key = _canonical_product_key(product_key)
+        prompt_hash = hashlib.sha256(prompt.strip().encode("utf-8")).hexdigest()
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """INSERT INTO understanding_previews(id, product_key, prompt_hash, payload_json, created_at, updated_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(product_key, prompt_hash) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at""",
+            (str(uuid4()), product_key, prompt_hash, json.dumps(payload), now, now),
+        )
+        self.connection.commit()
+
+    def fresh_understanding_preview(
+        self, product_key: str, prompt: str, max_age_seconds: int = 86_400
+    ) -> dict[str, Any] | None:
+        """Return a recent preflight payload, or None when it needs re-grounding."""
+        product_key = _canonical_product_key(product_key)
+        prompt_hash = hashlib.sha256(prompt.strip().encode("utf-8")).hexdigest()
+        row = self.connection.execute(
+            "SELECT payload_json, updated_at FROM understanding_previews WHERE product_key=? AND prompt_hash=?",
+            (product_key, prompt_hash),
+        ).fetchone()
+        if not row:
+            return None
+        updated = datetime.fromisoformat(row["updated_at"])
+        if (datetime.now(UTC) - updated).total_seconds() > max_age_seconds:
+            return None
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def invalidate_knowledge(self, product_key: str) -> bool:
         """Remove a reusable product snapshot and all page snapshots atomically.

@@ -85,6 +85,7 @@ def _product_knowledge_for_context(context, *, project_id: str | None = None) ->
         navigation=getattr(context, "navigation", []),
         routes=getattr(context, "relevant_routes", []),
         feature_map=getattr(context, "feature_knowledge", []),
+        relationships=getattr(context, "relationships", []),
         page_knowledge=getattr(context, "page_knowledge", []),
         workflow_knowledge=getattr(context, "candidate_demo_flows", []),
         capabilities=getattr(context, "capabilities", []),
@@ -625,6 +626,11 @@ class DemoJobService:
         target_duration_seconds: int = 120,
         allow_isolated_record_creation: bool = False,
     ) -> None:
+        # A cloud discovery session always has the Stagehand bridge available
+        # as an AI observation/re-grounding aid.  Keep the legacy argument for
+        # API compatibility, but do not let callers accidentally disable the
+        # capability on Browserbase runs; local fixture runs may still opt in.
+        stagehand_assist = bool(stagehand_assist or cloud_discovery)
         run = self.repository.get_run(run_id)
         request = self.repository.get_request(run["request_id"])
         bind_run_context(request_id=request["request_id"], project_id=request.get("project_id"))
@@ -683,6 +689,7 @@ class DemoJobService:
         target_duration_seconds: int = 120,
         allow_isolated_record_creation: bool = False,
     ) -> None:
+        stagehand_assist = bool(stagehand_assist or cloud_discovery)
         attempt = self.repository.start_attempt(run_id, RunStage.FEASIBILITY_CHECK)
         bind_run_context(attempt_id=attempt, stage=RunStage.FEASIBILITY_CHECK)
         artifacts = RunArtifacts(self.artifact_root, run_id)

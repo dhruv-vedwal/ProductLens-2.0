@@ -90,10 +90,29 @@ Provider-backed checks are deliberately not part of ordinary regression runs. Wh
 3. **Stagehand:** repeat the scoped Browserbase run with `stagehand_assist: true`; confirm `discovery/stagehand-observation.json` exists and only re-grounded candidates contribute to the plan.
 4. **ElevenLabs:** enable `PRODUCTLENS_CAPTION_ONLY=false` for one fixture run; confirm audio duration, captions, screen timing, and the final MP4 remain synchronized.
 
+## Public acceptance batch
+
+The generic target inventory is kept in `validation/public-targets.json`. After
+static checks, run the provider-backed acceptance set without a polling loop:
+
+```powershell
+python -m scripts.run_public_acceptance --cloud --render --limit 8
+```
+
+The command writes run IDs, artifact paths, and classified outcomes to
+`artifacts/acceptance/public-runs.json`; each run retains its normal discovery,
+plan, trace, presentation, narration, and QA artifacts. Once the batch exits,
+audit the complete set without contacting providers:
+
+```powershell
+python -m scripts.audit_public_acceptance
+```
+
 ## API workflow
 
 1. `GET /readiness` confirms database and provider capability state.
-2. `POST /fixture-runs` starts a supplied test-gate run.
-3. `POST /runs` starts a live URL run once OpenRouter is configured.
-4. Poll `GET /runs/{run_id}`, inspect `GET /runs/{run_id}/details`, then retrieve `GET /runs/{run_id}/artifacts` or `GET /runs/{run_id}/video`.
-5. `GET /runs` provides a paginated run-history feed for the frontend.
+2. `POST /understanding/preview` performs a bounded, non-recording scan from a URL and rough prompt; its evidence is advisory and the generation run re-grounds it.
+3. `POST /fixture-runs` starts a supplied test-gate run.
+4. `POST /runs` starts a live URL run once OpenRouter is configured.
+5. Inspect `GET /runs/{run_id}/details` when needed, then retrieve `GET /runs/{run_id}/artifacts` or `GET /runs/{run_id}/video`; workers execute asynchronously so clients need not poll aggressively.
+6. `GET /runs` provides a paginated run-history feed for the frontend.

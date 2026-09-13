@@ -19,8 +19,11 @@ from productlens.auth.security import (
     verify_password,
 )
 from productlens.config.settings import Settings
+from productlens.contracts.models import UnderstandingPreview
 from productlens.observability.logging import configure_logging
+from productlens.providers.errors import ProviderError
 from productlens.providers.readiness import provider_readiness
+from productlens.services.preflight import PreflightService
 from productlens.services.runtime import build_job_service
 from productlens.workers.tasks import process_generation_job
 
@@ -42,6 +45,12 @@ for provider_type, name, configured, reference in (
         active=configured,
     )
 url_generator = jobs.url_generator
+preflight_service = PreflightService(
+    generator=url_generator,
+    artifact_root=settings.artifact_root,
+    stagehand_provider=getattr(url_generator, "stagehand_provider", None),
+    repository=repository,
+)
 app = FastAPI(title="ProductLens 2.0 Generation Engine")
 app.add_middleware(
     CORSMiddleware,
@@ -94,6 +103,17 @@ class GenerationRequest(BaseModel):
         if value is not None and not value.startswith("secret://productlens/"):
             raise ValueError("credential_reference must be an opaque ProductLens secret reference")
         return value
+
+
+class UnderstandingRequest(BaseModel):
+    """Small non-recording scan used before a user commits to generation."""
+
+    url: HttpUrl
+    prompt: str = Field(default="", max_length=2_000)
+    audience: str | None = Field(default=None, max_length=120)
+    max_pages: int = Field(default=3, ge=1, le=4)
+    use_stagehand: bool = True
+    force_refresh: bool = False
 
 
 class ProjectRequest(BaseModel):
@@ -232,6 +252,31 @@ def health() -> dict[str, str]:
             for name, ready in provider_readiness(settings).items()
         },
     }
+
+
+@app.post("/understanding/preview", response_model=UnderstandingPreview)
+async def understanding_preview(
+    payload: UnderstandingRequest,
+    _: dict = Depends(current_user),
+) -> UnderstandingPreview:
+    """Run a bounded, non-recording product scan before generation.
+
+    This endpoint is intentionally separate from ``POST /runs``.  It gives a
+    prompt assistant enough grounded context to refine a request, while the
+    eventual generation run still performs its own fresh discovery and
+    validation.
+    """
+    try:
+        return await preflight_service.preview(
+            url=str(payload.url),
+            prompt=payload.prompt,
+            audience=payload.audience,
+            max_pages=payload.max_pages,
+            use_stagehand=payload.use_stagehand,
+            force_refresh=payload.force_refresh,
+        )
+    except (ProviderError, RuntimeError, OSError, ValueError) as error:
+        raise HTTPException(status_code=502, detail=f"preflight understanding failed: {type(error).__name__}") from error
 
 
 @app.get("/readiness")

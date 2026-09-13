@@ -68,13 +68,19 @@ class EnvironmentCredentialService:
         action_observer: Callable[[str, str, str, str], Awaitable[None]] | None = None,
     ) -> bool:
         """Authenticate and optionally report redacted login UI actions."""
-        password = page.locator('input[type="password"]')
+        # Public products often keep a sign-in dialog/template in the DOM
+        # while the visitor experience is already available.  Only a visible
+        # password control is evidence that authentication is required; hidden
+        # controls must not turn an otherwise demoable URL into AUTH_REQUIRED.
+        password = page.locator('input[type="password"]:visible')
         if await password.count() == 0:
             return False
         if not reference:
             raise CredentialError("AUTH_REQUIRED: a browser credential reference is required")
         credentials = self.resolve(reference)
-        username = page.locator('input[type="email"], input[name*="user" i], input[name*="email" i]')
+        username = page.locator(
+            'input[type="email"]:visible, input[name*="user" i]:visible, input[name*="email" i]:visible'
+        )
         if await username.count() != 1 or await password.count() != 1:
             raise CredentialError("AUTH_UNSUPPORTED: could not uniquely identify login inputs")
         # Authentication is part of a product demo when the user requests it.
@@ -99,7 +105,7 @@ class EnvironmentCredentialService:
         if action_observer is not None:
             await action_observer("auth:password", "FillText", "Password", 'input[type="password"]')
         await page.wait_for_timeout(5_000)
-        submit = page.locator('button[type="submit"], input[type="submit"]')
+        submit = page.locator('button[type="submit"]:visible, input[type="submit"]:visible')
         if await submit.count() != 1:
             raise CredentialError("AUTH_UNSUPPORTED: could not uniquely identify login submit control")
         # CAPTCHA/anti-bot widgets commonly enable the submit control only
@@ -109,8 +115,10 @@ class EnvironmentCredentialService:
         # enabled, then classify an unresolved challenge explicitly.
         try:
             await page.wait_for_function(
-                """(selector) => { const el = document.querySelector(selector); return !!el && !el.disabled; }""",
-                arg='button[type="submit"], input[type="submit"]',
+                """() => [...document.querySelectorAll('button[type="submit"], input[type="submit"]')].some(el => {
+                    const r = el.getBoundingClientRect();
+                    return !el.disabled && r.width > 0 && r.height > 0;
+                })""",
                 timeout=45_000,
             )
         except PlaywrightError as error:

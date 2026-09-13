@@ -67,7 +67,16 @@ const BrowserMotion: React.FC<{ video: string; sourceWidth: number; sourceHeight
         (beat.width >= sourceWidth * 0.22 || Boolean(activeScene.required_content_groups?.length)))
     ),
   );
-  const captionAtTop = activeScene?.caption_safe_zone === 'top' || targetIntroducesDenseContent;
+  // A planner-selected safe zone is a useful default, but it can become
+  // unsafe after a responsive layout or a recovered target geometry changes.
+  // Keep captions away from the active evidence region at render time: a
+  // top caption over a header/navigation target reads as a covered frame,
+  // while a bottom caption over a form/result hides the proof being discussed.
+  const preferredCaptionAtTop = activeScene?.caption_safe_zone === 'top' || targetIntroducesDenseContent;
+  const targetY = beat?.y ?? sourceHeight / 2;
+  const captionAtTop = preferredCaptionAtTop
+    ? targetY >= sourceHeight * 0.34
+    : targetY > sourceHeight * 0.68;
   const captionFadeSeconds = 0.18;
   const captionOpacity = activeCaption ? Math.min(
     1,
@@ -97,8 +106,13 @@ const BrowserMotion: React.FC<{ video: string; sourceWidth: number; sourceHeight
   const rawTranslateY = (540 - focusY) * (zoom - 1);
   const scaledWidth = sourceWidth * sourceScale * zoom;
   const scaledHeight = sourceHeight * sourceScale * zoom;
-  const translateX = Math.min(1920 - videoLeft - scaledWidth, Math.max(-videoLeft, rawTranslateX));
-  const translateY = Math.min(1080 - videoTop - scaledHeight, Math.max(-videoTop, rawTranslateY));
+  // Translation is bounded inside the browser viewport, not against the
+  // presentation canvas.  The old canvas-relative bounds let a zoomed source
+  // escape its shell, exposing a cut frame/edge of the surrounding layout.
+  const frameWidth = sourceWidth * sourceScale;
+  const frameHeight = sourceHeight * sourceScale;
+  const translateX = Math.min(0, Math.max(frameWidth - scaledWidth, rawTranslateX));
+  const translateY = Math.min(0, Math.max(frameHeight - scaledHeight, rawTranslateY));
   // Apply the same transform as the source video: the letterbox offset is an
   // already-composited origin and must not itself be multiplied by zoom.
   // Multiplying ``videoLeft``/``videoTop`` again made the pointer drift away
@@ -113,7 +127,7 @@ const BrowserMotion: React.FC<{ video: string; sourceWidth: number; sourceHeight
   const activeRedactions = redactions.filter(item => frame >= item.start && frame < item.end);
   return <AbsoluteFill style={{ background: 'radial-gradient(circle at 50% -10%, #243250 0%, #101827 43%, #080b12 100%)', overflow: 'hidden', fontFamily: 'Inter,Arial,sans-serif' }}>
     <div aria-hidden style={{ position: 'absolute', left: videoLeft - 2, top: videoTop - 2, width: sourceWidth * sourceScale + 4, height: sourceHeight * sourceScale + 4, borderRadius: 16, background: '#0a0e17', border: '1px solid rgba(255,255,255,.22)', boxShadow: '0 26px 62px rgba(0,0,0,.42)', overflow: 'hidden' }} />
-    {video ? <OffthreadVideo src={staticFile(video)} playbackRate={playbackRate} style={{ position: 'absolute', zIndex: 1, left: videoLeft, top: videoTop, width: sourceWidth * sourceScale, height: sourceHeight * sourceScale, objectFit: 'fill', transform: `translate(${translateX}px, ${translateY}px) scale(${zoom})`, transformOrigin: '0 0' }} /> : null}
+    {video ? <div aria-label="browser-frame-viewport" style={{ position: 'absolute', zIndex: 1, left: videoLeft, top: videoTop, width: frameWidth, height: frameHeight, borderRadius: 16, overflow: 'hidden' }}><OffthreadVideo src={staticFile(video)} playbackRate={playbackRate} style={{ position: 'absolute', left: 0, top: 0, width: frameWidth, height: frameHeight, objectFit: 'fill', transform: `translate(${translateX}px, ${translateY}px) scale(${zoom})`, transformOrigin: '0 0' }} /></div> : null}
     {activeRedactions.map(item => item.mode === 'secure-full-frame'
       ? <AbsoluteFill key={item.eventId} aria-label={item.label} style={{ zIndex: 8, background: 'linear-gradient(135deg, #0c1526, #132947)', color: '#e8f4ff', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ textAlign: 'center' }}><div style={{ fontSize: 44, marginBottom: 12 }}>⌁</div><div style={{ fontSize: 28, fontWeight: 700 }}>{item.label}</div><div style={{ marginTop: 9, color: '#b9d8ee', fontSize: 18 }}>Credentials are never shown in the demo.</div></div></AbsoluteFill>
       : <div key={item.eventId} aria-label={item.label} style={{ position: 'absolute', zIndex: 8, left: videoLeft + (item.x ?? 0) * sourceScale * zoom + translateX, top: videoTop + (item.y ?? 0) * sourceScale * zoom + translateY, width: (item.width ?? 0) * sourceScale * zoom, height: (item.height ?? 0) * sourceScale * zoom, borderRadius: 5, background: 'rgba(255,255,255,.985)', color: '#4b5563', border: '1px solid rgba(71,85,105,.28)', display: 'flex', alignItems: 'center', paddingLeft: 14, boxSizing: 'border-box', fontSize: Math.max(13, 17 * sourceScale * zoom), fontWeight: 600, letterSpacing: .2, overflow: 'hidden', pointerEvents: 'none' }}><span>••••••••</span></div>)}

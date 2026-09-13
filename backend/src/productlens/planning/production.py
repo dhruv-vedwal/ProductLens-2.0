@@ -54,6 +54,18 @@ def _canonical_url(value: str) -> str:
     ))
 
 
+def _route_key(value: str) -> tuple[str, str, str]:
+    """Return the transport-independent route identity used for navigation.
+
+    Query parameters commonly encode filters, pagination, or SPA state.  They
+    must be preserved in evidence and postconditions, but they must not make a
+    route look unobserved when the same visible control exposed its canonical
+    path without those parameters.
+    """
+    parsed = urlsplit(_canonical_url(value))
+    return parsed.scheme, parsed.netloc, parsed.path
+
+
 class PlanningValidationError(ValueError):
     pass
 
@@ -992,6 +1004,13 @@ class ProductionPlanningService:
             _canonical_url(item.source_url) for item in context.elements
             if item.source_url and item.source_url != context.url
         )
+        observed_route_keys = {_route_key(route) for route in observed_routes}
+        allowed_routes = {
+            _canonical_url(value) for value in (context.url, *context.relevant_routes)
+        } | observed_routes
+        allowed_route_keys = {
+            _route_key(value) for value in (context.url, *context.relevant_routes)
+        } | observed_route_keys
         source_by_selector = {item.selector: item.source_url for item in context.elements}
         navigated_to: set[str] = {_canonical_url(context.url)}
         for operation in proposal.steps:
@@ -1002,9 +1021,7 @@ class ProductionPlanningService:
                     raise PlanningValidationError(str(error)) from error
             if operation.kind is OperationKind.NAVIGATE:
                 destination = _canonical_url(urljoin(context.url, str(operation.value)))
-                if destination not in {
-                    _canonical_url(value) for value in (context.url, *context.relevant_routes)
-                } | observed_routes:
+                if destination not in allowed_routes and _route_key(destination) not in allowed_route_keys:
                     raise PlanningValidationError(
                         "Navigation target is not observed and same-origin"
                     )
@@ -1047,15 +1064,45 @@ class ProductionPlanningService:
                     raise PlanningValidationError(
                         f"Target {operation.target.name} requires an observed navigation to {source}"
                     )
+                # Names and selectors are only unique within a page state.
+                # Prefer the operation's source/selector provenance before
+                # falling back to a name match; otherwise a repeated sidebar
+                # label from another discovered page can make a valid href
+                # appear to contradict the intended navigation.
+                target_source = operation.target.source_url
+                target_selector = operation.target.selector
                 item = next(
                     (
                         candidate
                         for candidate in context.elements
-                        if candidate.name.lower() == operation.target.name.lower()
+                        if target_source
+                        and candidate.source_url
+                        and _canonical_url(candidate.source_url) == _canonical_url(target_source)
+                        and target_selector
+                        and candidate.selector == target_selector
                     ),
                     next(
-                        (candidate for candidate in context.elements if candidate.selector == operation.target.selector),
-                        None,
+                        (
+                            candidate
+                            for candidate in context.elements
+                            if target_source
+                            and candidate.source_url
+                            and _canonical_url(candidate.source_url) == _canonical_url(target_source)
+                            and candidate.name.casefold() == operation.target.name.casefold()
+                        ),
+                        next(
+                            (
+                                candidate for candidate in context.elements
+                                if target_selector and candidate.selector == target_selector
+                            ),
+                            next(
+                                (
+                                    candidate for candidate in context.elements
+                                    if candidate.name.casefold() == operation.target.name.casefold()
+                                ),
+                                None,
+                            ),
+                        ),
                     ),
                 )
                 expected_url = next(
@@ -1068,10 +1115,14 @@ class ProductionPlanningService:
                 )
                 if item and item.href and expected_url:
                     observed_destination = urljoin(item.source_url or context.url, item.href)
+                    expected_destination = urljoin(context.url, expected_url)
                     matches_expected = (
                         observed_destination.endswith(expected_url.removeprefix("**"))
                         if expected_url.startswith("**/")
-                        else urljoin(context.url, expected_url) == observed_destination
+                        else (
+                            _canonical_url(expected_destination) == _canonical_url(observed_destination)
+                            or _route_key(expected_destination) == _route_key(observed_destination)
+                        )
                     )
                     if not matches_expected:
                         raise PlanningValidationError(

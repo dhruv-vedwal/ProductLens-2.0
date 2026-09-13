@@ -115,6 +115,23 @@ class ObjectiveParsingProvider:
         )
 
 
+class DefaultModeObjectiveProvider:
+    async def structured(self, prompt: str, schema):
+        return ObjectiveSpec(raw="ignored")
+
+
+@pytest.mark.asyncio
+async def test_model_default_cannot_downgrade_explicit_full_tour():
+    service = UrlGenerationService(
+        ProductionPlanningService(DefaultModeObjectiveProvider())
+    )
+    parsed, _ = await service._understand_objective(
+        "Create a complete, evidence-grounded walkthrough of every safe primary section"
+    )
+    assert parsed.demo_type == "full_walkthrough"
+    assert parsed.video_type == "full_tour"
+
+
 @pytest.mark.asyncio
 async def test_verified_rehearsal_is_reused_and_legacy_row_witness_is_migrated(tmp_path: Path):
     """A downstream retry must not submit a second record or retain row dumps."""

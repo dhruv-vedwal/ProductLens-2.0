@@ -224,6 +224,17 @@ def _relevance_graph(context: ProductContext) -> dict[str, object]:
             control_id = f"control:{page.fingerprint}:{control}"
             nodes.append({"id": control_id, "kind": "control", "label": control, "url": page.url})
             edges.append({"source": source, "target": control_id, "relation": "contains"})
+    # Relationship edges are compiled from page evidence during discovery.
+    # Keep them separate from navigation edges so downstream planning can use
+    # the graph for explanatory context without treating it as a route list.
+    for index, relationship in enumerate(getattr(context, "relationships", [])):
+        source_id = f"concept:source:{index}:{relationship.source}"
+        target_id = f"concept:target:{index}:{relationship.target}"
+        nodes.extend([
+            {"id": source_id, "kind": "concept", "label": relationship.source},
+            {"id": target_id, "kind": "concept", "label": relationship.target},
+        ])
+        edges.append({"source": source_id, "target": target_id, "relation": relationship.relation})
     # Keep the artifact deterministic and compact for review/caching.
     unique_edges = list({(item["source"], item["target"], item["relation"]): item for item in edges}.values())
     return {"schema_version": 1, "nodes": nodes, "edges": unique_edges}
@@ -250,6 +261,10 @@ def _product_knowledge_payload(context: ProductContext, *, project_id: str | Non
             for page in context.page_knowledge
             for section in page.visible_sections
         ),
+        "relationships": sorted(
+            (item.source, item.target, item.relation)
+            for item in getattr(context, "relationships", [])
+        ),
     }
     fingerprint = hashlib.sha256(
         json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -270,6 +285,7 @@ def _product_knowledge_payload(context: ProductContext, *, project_id: str | Non
         navigation=context.navigation,
         routes=context.relevant_routes,
         feature_map=context.feature_knowledge,
+        relationships=getattr(context, "relationships", []),
         page_knowledge=context.page_knowledge,
         workflow_knowledge=context.candidate_demo_flows,
         form_schemas=form_schemas,
@@ -669,6 +685,8 @@ class UrlGenerationService:
             model_generic_entities = {
                 "thorough", "complete", "full", "detailed", "walkthrough", "tour",
                 "demo", "workflow", "flow", "experience", "application", "product",
+                "focused", "feature", "observed", "public", "meaningful", "safe",
+                "most", "information", "browsing", "discovery", "detail", "resource",
             }
             candidate_entity_words = set(re.findall(r"[a-z0-9]{3,}", (candidate.primary_entity or "").casefold()))
             primary = (
@@ -700,7 +718,13 @@ class UrlGenerationService:
                     "target_duration_seconds": max(base.target_duration_seconds, 180),
                     "maximum_duration_seconds": max(base.maximum_duration_seconds, 240),
                 }
+            merged_video_type = (
+                "full_tour"
+                if base.demo_type == "full_walkthrough" and candidate.video_type == "feature_walkthrough"
+                else candidate.video_type or base.video_type
+            )
             merged = base.model_copy(update={
+                "video_type": merged_video_type,
                 "demo_type": demo_type,
                 "audience": candidate.audience.strip()[:160] or base.audience,
                 # AudienceProfile is editorial metadata, not permission to
@@ -708,6 +732,8 @@ class UrlGenerationService:
                 # enum/list contract from the objective-understanding pass so
                 # planning, narration, and QA share one viewer profile.
                 "audience_profile": candidate.audience_profile,
+                "purpose": candidate.purpose.strip()[:240] or base.purpose,
+                "tone": candidate.tone or base.tone,
                 "depth": depth,
                 "requested_features": list(dict.fromkeys([*base.requested_features, *candidate.requested_features]))[:24],
                 "primary_entity": primary,
@@ -944,7 +970,16 @@ class UrlGenerationService:
                             # is not cancelled into an opaque TimeoutError.
                             timeout=120,
                         )
-                        async with asyncio.timeout(self.cloud_capture_timeout_seconds if cloud_discovery else 900):
+                        # The exploration budget is a hard product-owned
+                        # deadline; the Browserbase lease is only an outer
+                        # provider limit.  Leave bounded teardown headroom,
+                        # but do not let a stalled route/bridge consume the
+                        # entire paid session lease.
+                        discovery_deadline = min(
+                            self.cloud_capture_timeout_seconds,
+                            max(240, int(budget.max_time_seconds) + 180),
+                        ) if cloud_discovery else 900
+                        async with asyncio.timeout(discovery_deadline):
                             product = await self.discovery.discover(
                                 page, objective, budget, known_routes=known_routes, known_actions=known_actions,
                                 explore_visible_routes=explore_visible_routes,
@@ -1088,6 +1123,7 @@ class UrlGenerationService:
             blockers=product.blockers,
             rejected_routes=product.rejected_routes,
             candidate_flow_names=[flow.name for flow in product.candidate_demo_flows],
+            relationships=getattr(product, "relationships", []),
             stop_reason="bounded evidence sufficient",
         ).model_dump(mode="json"))
         artifacts.write_json("feature-graph.json", [feature.model_dump(mode="json") for feature in product.feature_knowledge])
@@ -2667,23 +2703,34 @@ class UrlGenerationService:
                 "re_grounded_evidence": 0,
             }
         try:
-            observation = await self.stagehand_provider.observe(
-                url=page.url,
-                instruction=(
-                    "Observe only visible, safe, same-product navigation and primary controls "
-                    f"that may help explain this objective: {objective}. Do not act, submit, or navigate."
+            observation = await asyncio.wait_for(
+                self.stagehand_provider.observe(
+                    url=page.url,
+                    instruction=(
+                        "Observe only visible, safe, same-product navigation and primary controls "
+                        f"that may help explain this objective: {objective}. Do not act, submit, or navigate."
+                    ),
+                    analysis_instruction=(
+                        "Extract only labels or phrases visibly present on the current page. "
+                        "List meaningful page sections, controls worth inspecting, and safe next "
+                        "read-only actions. Do not infer hidden behavior, submit forms, or navigate."
+                    ),
+                    cache_dir=Path(".stagehand-cache"),
+                    environment=environment,
+                    browserbase_session_id=browserbase_session_id,
+                    browserbase_connect_url=browserbase_connect_url,
+                    browserbase_extension_id=browserbase_extension_id,
                 ),
-                analysis_instruction=(
-                    "Extract only labels or phrases visibly present on the current page. "
-                    "List meaningful page sections, controls worth inspecting, and safe next "
-                    "read-only actions. Do not infer hidden behavior, submit forms, or navigate."
-                ),
-                cache_dir=Path(".stagehand-cache"),
-                environment=environment,
-                browserbase_session_id=browserbase_session_id,
-                browserbase_connect_url=browserbase_connect_url,
-                browserbase_extension_id=browserbase_extension_id,
+                timeout=45,
             )
+        except TimeoutError:
+            return context, {
+                "status": "UNAVAILABLE",
+                "reason": "Stagehand observation exceeded the bounded discovery timeout",
+                "candidate_count": 0,
+                "candidates": [],
+                "re_grounded_evidence": 0,
+            }
         except ProviderError as error:
             return context, {
                 "status": "UNAVAILABLE",
@@ -2777,17 +2824,22 @@ class UrlGenerationService:
         before_url = page.url
         try:
             before_text = " ".join((await page.locator("body").inner_text()).split())[:8_000]
-            result = await self.stagehand_provider.act_observed(
-                url=before_url, candidate=candidate, environment=environment,
-                browserbase_session_id=browserbase_session_id,
-                browserbase_connect_url=browserbase_connect_url,
-                browserbase_extension_id=browserbase_extension_id,
-                cache_dir=Path(".stagehand-cache"),
+            result = await asyncio.wait_for(
+                self.stagehand_provider.act_observed(
+                    url=before_url, candidate=candidate, environment=environment,
+                    browserbase_session_id=browserbase_session_id,
+                    browserbase_connect_url=browserbase_connect_url,
+                    browserbase_extension_id=browserbase_extension_id,
+                    cache_dir=Path(".stagehand-cache"),
+                ),
+                timeout=30,
             )
             await page.wait_for_timeout(650)
             after_text = " ".join((await page.locator("body").inner_text()).split())[:8_000]
         except ProviderError as error:
             return context, {"status": "provider_unavailable", "error_type": type(error).__name__}
+        except TimeoutError:
+            return context, {"status": "provider_timeout", "error_type": "TimeoutError"}
         except PlaywrightError as error:
             return context, {"status": "post_action_unavailable", "error_type": type(error).__name__}
         if not result.success or (page.url == before_url and after_text == before_text):

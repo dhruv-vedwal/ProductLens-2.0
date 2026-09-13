@@ -166,6 +166,14 @@ class ExecutionEngine:
                         _, scroll_before = await self.adapter.view_state()
                     action_at = datetime.now(UTC)
                     action_result = await self.adapter.execute(operation)
+                    if (
+                        isinstance(action_result, dict)
+                        and action_result.get("navigation_fallback") == "direct_after_visible_noop"
+                    ):
+                        recovery.append({
+                            "strategy": "direct_same_origin_after_visible_noop",
+                            "fallback_url": str(action_result.get("fallback_url") or ""),
+                        })
                     if operation.kind is OperationKind.SCROLL_TO and isinstance(action_result, dict):
                         scroll_motion = {
                             key: (
