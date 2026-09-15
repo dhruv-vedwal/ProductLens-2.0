@@ -8,7 +8,9 @@ from productlens.evaluation.sample_video_benchmark import write_sample_benchmark
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create an evidence-backed benchmark from supplied demo videos")
+    parser = argparse.ArgumentParser(
+        description="Create an evidence-backed benchmark from supplied demo videos"
+    )
     parser.add_argument("--samples", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

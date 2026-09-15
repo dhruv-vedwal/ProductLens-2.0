@@ -37,6 +37,10 @@ class FixtureTargetedDiscovery:
                     selected_route=route,
                     excluded_routes=excluded,
                     visited_routes=["hub.html", route],
-                    evidence=[f"objective contains {keyword!r}", "relevant route selected", "stop condition met"],
+                    evidence=[
+                        f"objective contains {keyword!r}",
+                        "relevant route selected",
+                        "stop condition met",
+                    ],
                 )
         raise ValueError("No fixture route for objective; do not crawl by default")

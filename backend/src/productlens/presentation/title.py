@@ -15,11 +15,16 @@ def concise_demo_title(
     lower = cleaned.lower()
     for prefix in prefixes:
         if lower.startswith(prefix):
-            cleaned = cleaned[len(prefix):].strip()
+            cleaned = cleaned[len(prefix) :].strip()
             break
     # Requests often add safety constraints after the actual walkthrough goal.
     # They belong in the execution policy, not in the opening title card.
-    cleaned = re.split(r"\s*(?:[.!?]\s+|;\s+)(?:do not|don't|never|avoid)\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
+    cleaned = re.split(
+        r"\s*(?:[.!?]\s+|;\s+)(?:do not|don't|never|avoid)\b",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
     words = cleaned.split()
     if not words:
         return "Product walkthrough"

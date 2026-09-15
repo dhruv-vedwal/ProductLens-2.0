@@ -26,7 +26,9 @@ def test_runtime_contains_no_supplied_site_identifiers():
     offenders: dict[str, list[str]] = {}
     for source in RUNTIME_ROOT.rglob("*.py"):
         text = source.read_text(encoding="utf-8").lower()
-        matches = sorted(identifier for identifier in FORBIDDEN_RUNTIME_IDENTIFIERS if identifier in text)
+        matches = sorted(
+            identifier for identifier in FORBIDDEN_RUNTIME_IDENTIFIERS if identifier in text
+        )
         if matches:
             offenders[str(source.relative_to(RUNTIME_ROOT))] = matches
     assert offenders == {}

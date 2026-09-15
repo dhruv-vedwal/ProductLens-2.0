@@ -22,8 +22,14 @@ from productlens.services.runtime import build_job_service
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one ProductLens live URL acceptance job")
-    parser.add_argument("--request-file", type=Path, help="JSON file containing url, objective, and optional run settings")
-    parser.add_argument("--run-id", help="Resume an existing persisted run instead of creating a new one")
+    parser.add_argument(
+        "--request-file",
+        type=Path,
+        help="JSON file containing url, objective, and optional run settings",
+    )
+    parser.add_argument(
+        "--run-id", help="Resume an existing persisted run instead of creating a new one"
+    )
     parser.add_argument("--url")
     parser.add_argument("--objective")
     parser.add_argument("--audience", default="product prospect")
@@ -51,8 +57,13 @@ def parse_args() -> argparse.Namespace:
     if args.request_file:
         request = json.loads(args.request_file.read_text(encoding="utf-8"))
         for field in (
-            "url", "objective", "audience", "target_duration_seconds", "max_pages",
-            "credential_reference", "allow_isolated_record_creation",
+            "url",
+            "objective",
+            "audience",
+            "target_duration_seconds",
+            "max_pages",
+            "credential_reference",
+            "allow_isolated_record_creation",
         ):
             if field in request:
                 setattr(args, field, request[field])
@@ -68,7 +79,9 @@ async def run(args: argparse.Namespace) -> None:
         record = repository.get_run(args.run_id)
         created = False
         if record["status"] == "RUNNING":
-            trace_path = Path(record["artifact_root"]) / "runs" / record["id"] / "execution" / "trace.json"
+            trace_path = (
+                Path(record["artifact_root"]) / "runs" / record["id"] / "execution" / "trace.json"
+            )
             dispatched_mutation = False
             if trace_path.exists():
                 try:
@@ -95,7 +108,9 @@ async def run(args: argparse.Namespace) -> None:
     else:
         project = repository.ensure_local_project()
         request = repository.create_request(str(uuid4()), args.url, args.objective, project["id"])
-        record, created = repository.create_idempotent_run(request["id"], str(settings.artifact_root))
+        record, created = repository.create_idempotent_run(
+            request["id"], str(settings.artifact_root)
+        )
     print(f"RUN_ID={record['id']} CREATED={created}", flush=True)
     settings_payload = {
         "allow_external_side_effects": False,
@@ -169,7 +184,9 @@ async def run(args: argparse.Namespace) -> None:
             failed = [item for item in final_stages if item["status"] == "FAILED"]
             if failed:
                 repository.update_run(
-                    record["id"], stage=failed[0]["stage"], status="FAILED",
+                    record["id"],
+                    stage=failed[0]["stage"],
+                    status="FAILED",
                     error_code=failed[0].get("error_code"),
                 )
             raise RuntimeError("run did not reach terminal completion; inspect stage ledger")

@@ -32,3 +32,13 @@ def test_test_state_postcondition_marks_an_invitation_as_deterministic_fixture_w
         Postcondition(kind="test_state", expected="window.__testState.invited")
     ]
     assert side_effect_decision(operation) == "allowed_testable"
+
+
+def test_record_creation_is_mutating_even_when_named_generically():
+    operation = SemanticOperation(
+        kind=OperationKind.CREATE_RECORD,
+        intent="Add item",
+        target=Target(name="Add item"),
+    )
+    with pytest.raises(SideEffectPolicyError):
+        authorize_operation(operation, False)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urljoin, urlsplit
 
 from productlens.contracts.models import (
     DemoPlan,
@@ -14,14 +15,24 @@ from productlens.contracts.models import (
 from productlens.presentation.editorial import (
     _SENSITIVE_EDITORIAL_PATTERN,
     _fact_id,
+    _looks_like_screen_transcript,
     _scene_source,
     _viewer_ready,
     narrated_storyboard_scenes,
 )
+from productlens.urls import canonical_product_url
+
+
+def _canonical_navigation_url(base: str, value: str) -> str:
+    """Normalize a navigation URL for source-page-aware editorial checks."""
+    return canonical_product_url(urljoin(base, value))
 
 
 def inspect_editorial_preflight(
-    *, context: ProductContext, plan: DemoPlan, storyboard: EditorialStoryboard | None,
+    *,
+    context: ProductContext,
+    plan: DemoPlan,
+    storyboard: EditorialStoryboard | None,
 ) -> dict:
     """Reject a weak story before a production browser is ever opened.
 
@@ -32,7 +43,11 @@ def inspect_editorial_preflight(
     repaired by execution.
     """
     if storyboard is None or not storyboard.scenes:
-        return {"editorial_score": 0.0, "hard_failures": ["EDITORIAL_STORYBOARD_UNAVAILABLE"], "warnings": []}
+        return {
+            "editorial_score": 0.0,
+            "hard_failures": ["EDITORIAL_STORYBOARD_UNAVAILABLE"],
+            "warnings": [],
+        }
     failures: list[str] = []
     warnings: list[str] = []
     opening = storyboard.scenes[0]
@@ -46,17 +61,30 @@ def inspect_editorial_preflight(
         if not relation.required:
             continue
         source = set(re.findall(r"[a-z0-9]{3,}", relation.source.casefold()))
-        target = set(re.findall(r"[a-z0-9]{3,}", relation.target.casefold())) - {"management", "workflow", "flow", "experience"}
-        all_story_words = set(re.findall(
-            r"[a-z0-9]{3,}", " ".join(scene.narration for scene in storyboard.scenes).casefold(),
-        ))
+        target = set(re.findall(r"[a-z0-9]{3,}", relation.target.casefold())) - {
+            "management",
+            "workflow",
+            "flow",
+            "experience",
+        }
+        all_story_words = set(
+            re.findall(
+                r"[a-z0-9]{3,}",
+                " ".join(scene.narration for scene in storyboard.scenes).casefold(),
+            )
+        )
         if source and not (source & all_story_words) or target and not (target & all_story_words):
             failures.append("REQUIRED_CONTEXT_RELATIONSHIP_NOT_EXPLAINED")
     generic_phrases = (
-        "quick overview of key metrics", "giving you immediate insight",
-        "various filters and details", "ready for management and action",
-        "surrounding controls visible for context", "the next part of the walkthrough",
-        "hands-on practice", "next build", "architecture cards",
+        "quick overview of key metrics",
+        "giving you immediate insight",
+        "various filters and details",
+        "ready for management and action",
+        "surrounding controls visible for context",
+        "the next part of the walkthrough",
+        "hands-on practice",
+        "next build",
+        "architecture cards",
         "observed details are read before the walkthrough continues",
     )
     # These are the phrases that slipped through the original substring list
@@ -102,11 +130,28 @@ def inspect_editorial_preflight(
             # counted only the tails of capitalized words and rejected valid
             # page-local evidence during live planning.
             readable_source = source.casefold()
-            if not _viewer_ready(scene.narration, scene.title) or len(re.findall(r"[a-z0-9]{4,}", readable_source)) < 6:
+            # Some providers persist the page-local proof as section/fact
+            # references while omitting the corresponding prose from the
+            # compact element inventory.  Treat those explicit references as
+            # readable evidence too; otherwise a legitimate scroll scene is
+            # rejected merely because its evidence is represented by IDs.
+            evidence_tokens = [
+                str(ref)
+                for ref in scene.evidence
+                if str(ref).startswith(("section:", "fact:", "element:", "form-field:"))
+            ]
+            evidence_rich = len(evidence_tokens) >= 2
+            if not _viewer_ready(scene.narration, scene.title) or (
+                len(re.findall(r"[a-z0-9]{4,}", readable_source)) < 6 and not evidence_rich
+            ):
                 failures.append("SCROLL_SCENE_LACKS_READABLE_LOCAL_EVIDENCE")
         if scene.interaction in {"type", "submit"} and operation.kind not in {
-            OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE,
-            OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE, OperationKind.SELECT_DATE_RANGE,
+            OperationKind.FILL_TEXT,
+            OperationKind.FILL_EMAIL,
+            OperationKind.FILL_PHONE,
+            OperationKind.SELECT_OPTION,
+            OperationKind.SELECT_DATE,
+            OperationKind.SELECT_DATE_RANGE,
             OperationKind.SUBMIT,
         }:
             failures.append("EDITORIAL_INTERACTION_MISMATCH")
@@ -119,10 +164,20 @@ def inspect_editorial_preflight(
 
 
 def inspect_editorial(
-    *, context: ProductContext, plan: DemoPlan, trace: DemoTrace, storyboard: EditorialStoryboard | None, script: list[dict],
+    *,
+    context: ProductContext,
+    plan: DemoPlan,
+    trace: DemoTrace,
+    storyboard: EditorialStoryboard | None,
+    script: list[dict],
 ) -> dict:
     if storyboard is None:
-        return {"editorial_score": 1.0, "hard_failures": [], "warnings": ["EDITORIAL_STORYBOARD_UNAVAILABLE"], "scenes": []}
+        return {
+            "editorial_score": 1.0,
+            "hard_failures": [],
+            "warnings": ["EDITORIAL_STORYBOARD_UNAVAILABLE"],
+            "scenes": [],
+        }
     failures: list[str] = []
     warnings: list[str] = []
     narrated_texts: list[str] = []
@@ -152,15 +207,51 @@ def inspect_editorial(
         None,
     )
     initial_url = (initial_event_url or str(context.url)).rstrip("/")
+    active_page = _canonical_navigation_url(context.url, initial_url)
+    navigation_evidence = [
+        item for item in context.navigation if item.href and not urlsplit(item.href).fragment
+    ]
     for index, step in enumerate(plan.workflow_steps):
         op = step.operation
         if index and op.kind is OperationKind.NAVIGATE and str(op.value).rstrip("/") == initial_url:
             returned_home = True
-        if index and op.kind is OperationKind.NAVIGATE:
-            destination = str(op.value).rstrip("/")
-            if any((item.href or "").rstrip("/") and destination.endswith((item.href or "").rstrip("/")) for item in context.navigation):
+        if op.kind is OperationKind.NAVIGATE:
+            destination = _canonical_navigation_url(active_page, str(op.value or ""))
+            # The first production load establishes the requested URL; there
+            # cannot be a preceding in-product control that should replace
+            # that opening navigation.  Applying the visible-control rule to
+            # this bootstrap step falsely rejected valid runs when the home
+            # page itself exposed a link back to the root.
+            if index == 0:
+                active_page = destination
+                continue
+            # A direct route is only invalid when an equivalent visible
+            # control was observed on the page that is active immediately
+            # before this transition.  The previous global suffix check could
+            # mistake an identically named link on another page (or an
+            # unrelated footer) for proof that this route had a visible
+            # alternative.
+            has_visible_control = any(
+                _canonical_navigation_url(item.source_url or active_page, item.href or "")
+                == destination
+                and _canonical_navigation_url(item.source_url or active_page, "") == active_page
+                for item in navigation_evidence
+            )
+            if has_visible_control:
                 failures.append("DIRECT_ROUTE_USED_WHERE_VISIBLE_NAVIGATION_EXISTS")
                 break
+            active_page = destination
+        elif op.kind is OperationKind.OPEN_NAVIGATION_ITEM:
+            destination = next(
+                (
+                    str(condition.expected)
+                    for condition in op.postconditions
+                    if condition.kind == "url"
+                ),
+                None,
+            )
+            if destination:
+                active_page = _canonical_navigation_url(active_page, destination)
     # A supporting configuration page may be followed by a return to the
     # feature workspace when the validated flow still has an essential
     # mutation/inspection to perform.  That is a planned continuation, not a
@@ -173,12 +264,18 @@ def inspect_editorial(
             if op.kind is not OperationKind.NAVIGATE or str(op.value).rstrip("/") != initial_url:
                 continue
             return_has_essential_followup = any(
-                later.operation.kind in {
-                    OperationKind.OPEN_MODAL, OperationKind.CLICK,
-                    OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL,
-                    OperationKind.FILL_PHONE, OperationKind.SELECT_OPTION,
-                    OperationKind.SELECT_DATE, OperationKind.SELECT_DATE_RANGE,
-                    OperationKind.SUBMIT, OperationKind.APPLY_FILTER,
+                later.operation.kind
+                in {
+                    OperationKind.OPEN_MODAL,
+                    OperationKind.CLICK,
+                    OperationKind.FILL_TEXT,
+                    OperationKind.FILL_EMAIL,
+                    OperationKind.FILL_PHONE,
+                    OperationKind.SELECT_OPTION,
+                    OperationKind.SELECT_DATE,
+                    OperationKind.SELECT_DATE_RANGE,
+                    OperationKind.SUBMIT,
+                    OperationKind.APPLY_FILTER,
                 }
                 for later in plan.workflow_steps[index + 1 :]
             )
@@ -190,11 +287,11 @@ def inspect_editorial(
     # leaving its save button visible. Require a submitted operation with an
     # independent result assertion before a delivery can claim the outcome.
     authorized_creation = bool(
-        context.objective
-        and "create_isolated_record" in context.objective.permitted_mutations
+        context.objective and "create_isolated_record" in context.objective.permitted_mutations
     )
     submit_operations = [
-        step.operation for step in plan.workflow_steps
+        step.operation
+        for step in plan.workflow_steps
         if step.operation.kind is OperationKind.SUBMIT
     ]
     if authorized_creation and not submit_operations:
@@ -205,7 +302,10 @@ def inspect_editorial(
             or (
                 condition.kind == "visible"
                 and condition.target is not None
-                and (operation.target is None or condition.target.name.casefold() != operation.target.name.casefold())
+                and (
+                    operation.target is None
+                    or condition.target.name.casefold() != operation.target.name.casefold()
+                )
             )
             for condition in operation.postconditions
         )
@@ -222,9 +322,15 @@ def inspect_editorial(
 
     def is_page_exploration(operation) -> bool:
         explicit = {
-            OperationKind.SCROLL_TO, OperationKind.CLICK, OperationKind.OPEN_MODAL,
-            OperationKind.READ_VALUE, OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL,
-            OperationKind.FILL_PHONE, OperationKind.SELECT_OPTION, OperationKind.SUBMIT,
+            OperationKind.SCROLL_TO,
+            OperationKind.CLICK,
+            OperationKind.OPEN_MODAL,
+            OperationKind.READ_VALUE,
+            OperationKind.FILL_TEXT,
+            OperationKind.FILL_EMAIL,
+            OperationKind.FILL_PHONE,
+            OperationKind.SELECT_OPTION,
+            OperationKind.SUBMIT,
             OperationKind.APPLY_FILTER,
         }
         if operation.kind in explicit:
@@ -253,6 +359,7 @@ def inspect_editorial(
                 or target_is_form_control
             )
         )
+
     for index, operation in enumerate(operations):
         if operation.kind is not OperationKind.OPEN_NAVIGATION_ITEM:
             continue
@@ -278,7 +385,9 @@ def inspect_editorial(
             # must include it whenever a directed scroll was dispatched.
             continue
         start = float(motion.get("start_y", event.scroll_path[0]["y"] if event.scroll_path else 0))
-        end = float(motion.get("target_y", event.scroll_path[-1]["y"] if event.scroll_path else start))
+        end = float(
+            motion.get("target_y", event.scroll_path[-1]["y"] if event.scroll_path else start)
+        )
         path = motion.get("path", event.scroll_path)
         if abs(end - start) < 2:
             # A target already visible in the settled viewport is a valid
@@ -334,7 +443,16 @@ def inspect_editorial(
         # reader-sized editorial beats.  Requiring a caption for every low
         # level scroll caused 20-word captions to flash at crawler speed.
         if scene.operation_id not in narrated_operation_ids:
-            scenes.append({"id": scene.id, "title": scene.title, "duration_ms": event.duration_ms, "evidence": scene.evidence, "interaction": scene.interaction, "narrated": False})
+            scenes.append(
+                {
+                    "id": scene.id,
+                    "title": scene.title,
+                    "duration_ms": event.duration_ms,
+                    "evidence": scene.evidence,
+                    "interaction": scene.interaction,
+                    "narrated": False,
+                }
+            )
             continue
         text = script_by_event.get(event.id, "")
         if not text:
@@ -343,7 +461,17 @@ def inspect_editorial(
             narrated_texts.append(text)
             target_words = set(re.findall(r"[a-z0-9]{4,}", scene.title.lower()))
             caption_words = set(re.findall(r"[a-z0-9]{4,}", text.lower()))
-            generic_words = {"explored", "context", "gives", "viewer", "concrete", "evidence", "next", "part", "walkthrough"}
+            generic_words = {
+                "explored",
+                "context",
+                "gives",
+                "viewer",
+                "concrete",
+                "evidence",
+                "next",
+                "part",
+                "walkthrough",
+            }
             title_only = bool(target_words) and not (caption_words - target_words - generic_words)
             # The first proved page scene carries the approved presenter
             # introduction authored from opening evidence.  Its wording is
@@ -394,14 +522,22 @@ def inspect_editorial(
             ):
                 failures.append("GENERIC_ROUTE_LABEL_CAPTION")
             evidence_text = _scene_source(context, scene)
+            if _looks_like_screen_transcript(scene.narration, evidence_text):
+                failures.append("SCREEN_TRANSCRIPT_CAPTION")
             evidence_words = set(re.findall(r"[a-z0-9]{3,}", evidence_text.lower()))
             operation = next(
-                (step.operation for step in plan.workflow_steps if step.operation.id == scene.operation_id),
+                (
+                    step.operation
+                    for step in plan.workflow_steps
+                    if step.operation.id == scene.operation_id
+                ),
                 None,
             )
-            target_words = set(
-                re.findall(r"[a-z0-9]{4,}", operation.target.name.lower())
-            ) if operation and operation.target else set()
+            target_words = (
+                set(re.findall(r"[a-z0-9]{4,}", operation.target.name.lower()))
+                if operation and operation.target
+                else set()
+            )
             fact_words: set[str] = set()
             for page in context.page_knowledge:
                 if f"page:{page.url}" not in scene.evidence:
@@ -429,7 +565,8 @@ def inspect_editorial(
             if (
                 target_words
                 and operation is not None
-                and operation.kind not in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
+                and operation.kind
+                not in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
                 and not (target_words & target_source_words)
             ):
                 failures.append("SCENE_TARGET_EVIDENCE_MISMATCH")
@@ -453,13 +590,23 @@ def inspect_editorial(
             if (
                 not presenter_opening
                 and operation is not None
-                and operation.kind not in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
+                and operation.kind
+                not in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
                 and len(target_source_words) >= 3
                 and len(caption_words & target_source_words) < 2
                 and not target_is_explicit
             ):
                 failures.append("UNSUPPORTED_OR_WRONG_SCENE_CAPTION")
-        scenes.append({"id": scene.id, "title": scene.title, "duration_ms": event.duration_ms, "evidence": scene.evidence, "interaction": scene.interaction, "narrated": True})
+        scenes.append(
+            {
+                "id": scene.id,
+                "title": scene.title,
+                "duration_ms": event.duration_ms,
+                "evidence": scene.evidence,
+                "interaction": scene.interaction,
+                "narrated": True,
+            }
+        )
     if len(trace.events) < len([scene for scene in storyboard.scenes if scene.operation_id]):
         warnings.append("SOME_PLANNED_SCENES_DID_NOT_PRODUCE_EVIDENCE")
     for index, text in enumerate(narrated_texts):
@@ -470,11 +617,63 @@ def inspect_editorial(
         # is intentionally reusable; repetition is only a failure when the
         # meaningful nouns/verbs are also the same.
         stop = {
-            "this", "the", "view", "workspace", "keeps", "close", "hand", "so",
-            "visible", "records", "can", "be", "narrowed", "and", "reviewed",
-            "brings", "into", "current", "workflow", "with", "surrounding",
-            "controls", "for", "context", "adds", "distinct", "beat",
-            "walkthrough", "section", "opens", "its", "ready", "focused", "review",
+            "this",
+            "the",
+            "view",
+            "workspace",
+            "keeps",
+            "close",
+            "hand",
+            "so",
+            "visible",
+            "records",
+            "can",
+            "be",
+            "narrowed",
+            "and",
+            "reviewed",
+            "brings",
+            "into",
+            "current",
+            "workflow",
+            "with",
+            "surrounding",
+            "controls",
+            "for",
+            "context",
+            "adds",
+            "distinct",
+            "beat",
+            "walkthrough",
+            "section",
+            "opens",
+            "its",
+            "ready",
+            "focused",
+            "review",
+            "observed",
+            "information",
+            "together",
+            "exposes",
+            "state",
+            "grounding",
+            "next",
+            "step",
+            "held",
+            "long",
+            "enough",
+            "establish",
+            "established",
+            "before",
+            "continues",
+            "product",
+            "available",
+            "checkpoint",
+            "shown",
+            "within",
+            "keeping",
+            "details",
+            "move",
         }
         words = {w for w in re.findall(r"[a-z0-9]{4,}", text.lower()) if w not in stop}
         for other in narrated_texts[:index]:
@@ -493,4 +692,10 @@ def inspect_editorial(
                 break
         if "REPETITIVE_EDITORIAL_NARRATION" in failures:
             break
-    return {"editorial_score": 1.0 if not failures else 0.0, "hard_failures": list(dict.fromkeys(failures)), "warnings": warnings, "scenes": scenes, "minimum_duration_seconds": storyboard.minimum_duration_seconds}
+    return {
+        "editorial_score": 1.0 if not failures else 0.0,
+        "hard_failures": list(dict.fromkeys(failures)),
+        "warnings": warnings,
+        "scenes": scenes,
+        "minimum_duration_seconds": storyboard.minimum_duration_seconds,
+    }

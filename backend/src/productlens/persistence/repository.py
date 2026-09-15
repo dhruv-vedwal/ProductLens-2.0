@@ -7,21 +7,17 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
+from productlens.urls import canonical_product_url
+
 
 def _canonical_product_key(value: str) -> str:
     """Normalize equivalent product URLs before indexing reusable knowledge."""
-    parsed = urlsplit(str(value).strip())
-    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)), doseq=True)
-    return urlunsplit((
-        parsed.scheme.casefold(), parsed.netloc.casefold(),
-        unquote(parsed.path).rstrip("/") or "/", query, "",
-    ))
+    return canonical_product_url(value)
 
 
 class _DatabaseRow(Mapping[str, Any]):
@@ -122,9 +118,7 @@ class RunRepository:
     def __init__(self, database: Path | str):
         database_url = str(database)
         self.dialect = (
-            "postgresql"
-            if database_url.startswith(("postgresql", "postgres://"))
-            else "sqlite"
+            "postgresql" if database_url.startswith(("postgresql", "postgres://")) else "sqlite"
         )
         if self.dialect == "postgresql":
             self.connection = _PostgresConnection(database_url)
@@ -156,6 +150,11 @@ class RunRepository:
             CREATE TABLE IF NOT EXISTS product_knowledge (
               id TEXT PRIMARY KEY, product_key TEXT UNIQUE NOT NULL, version INTEGER NOT NULL,
               evidence_json TEXT NOT NULL, confidence REAL NOT NULL, last_verified_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS knowledge_versions (
+              id TEXT PRIMARY KEY, product_key TEXT NOT NULL, version INTEGER NOT NULL,
+              fingerprint TEXT NOT NULL, evidence_json TEXT NOT NULL, confidence REAL NOT NULL,
+              captured_at TEXT NOT NULL, UNIQUE(product_key, version)
             );
             CREATE TABLE IF NOT EXISTS demo_plans (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS workflow_steps (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), ordinal INTEGER NOT NULL, payload_json TEXT NOT NULL);
@@ -191,7 +190,7 @@ class RunRepository:
               id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id),
               stage TEXT NOT NULL, ordinal INTEGER NOT NULL, status TEXT NOT NULL,
               error_code TEXT, delivery_attempts INTEGER NOT NULL DEFAULT 0, claimed_at TEXT,
-              started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL,
+              started_at TEXT, completed_at TEXT, heartbeat_at TEXT, updated_at TEXT NOT NULL,
               UNIQUE(run_id, stage), UNIQUE(run_id, ordinal)
             );
             CREATE TABLE IF NOT EXISTS users (
@@ -245,6 +244,7 @@ class RunRepository:
             CREATE INDEX IF NOT EXISTS idx_run_artifact_documents_run_id ON run_artifact_documents(run_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_generation_jobs_status ON generation_jobs(status, queued_at);
             CREATE INDEX IF NOT EXISTS idx_provider_calls_run_id ON provider_calls(run_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_versions_key ON knowledge_versions(product_key, version DESC);
             CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON projects(owner_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id, expires_at);
             """
@@ -263,7 +263,8 @@ class RunRepository:
                 "CREATE INDEX IF NOT EXISTS idx_demo_requests_project_id ON demo_requests(project_id)"
             )
         stage_columns = {
-            row["name"] for row in self.connection.execute("PRAGMA table_info(generation_stage_jobs)")
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(generation_stage_jobs)")
         }
         # Keep direct SQLite bootstrapping compatible with databases created by
         # releases before the stage-delivery migration. Alembic performs the
@@ -274,14 +275,22 @@ class RunRepository:
             )
         if stage_columns and "claimed_at" not in stage_columns:
             self.connection.execute("ALTER TABLE generation_stage_jobs ADD COLUMN claimed_at TEXT")
+        if stage_columns and "heartbeat_at" not in stage_columns:
+            self.connection.execute(
+                "ALTER TABLE generation_stage_jobs ADD COLUMN heartbeat_at TEXT"
+            )
         user_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(users)")}
         if "password_hash" not in user_columns:
             self.connection.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
         if "theme_preference" not in user_columns:
-            self.connection.execute("ALTER TABLE users ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'")
+            self.connection.execute(
+                "ALTER TABLE users ADD COLUMN theme_preference TEXT NOT NULL DEFAULT 'system'"
+            )
         if "updated_at" not in user_columns:
             self.connection.execute("ALTER TABLE users ADD COLUMN updated_at TEXT")
-        provider_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(provider_calls)")}
+        provider_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(provider_calls)")
+        }
         if provider_columns and "model" not in provider_columns:
             self.connection.execute("ALTER TABLE provider_calls ADD COLUMN model TEXT")
         if provider_columns and "cost_class" not in provider_columns:
@@ -359,7 +368,10 @@ class RunRepository:
         self.connection.execute("DELETE FROM interaction_events WHERE run_id=?", (run_id,))
         self.connection.executemany(
             "INSERT INTO interaction_events VALUES (?, ?, ?, ?)",
-            [(str(uuid4()), run_id, ordinal, json.dumps(event)) for ordinal, event in enumerate(events)],
+            [
+                (str(uuid4()), run_id, ordinal, json.dumps(event))
+                for ordinal, event in enumerate(events)
+            ],
         )
         self.connection.commit()
 
@@ -426,8 +438,15 @@ class RunRepository:
                  sha256=excluded.sha256, byte_size=excluded.byte_size,
                  updated_at=excluded.updated_at""",
             (
-                str(uuid4()), run_id, kind, json.dumps(payload), source_path,
-                sha256, byte_size, now, now,
+                str(uuid4()),
+                run_id,
+                kind,
+                json.dumps(payload),
+                source_path,
+                sha256,
+                byte_size,
+                now,
+                now,
             ),
         )
         self.connection.commit()
@@ -443,6 +462,7 @@ class RunRepository:
             "objective_understanding": "discovery/objective-understanding.json",
             "exploration_report": "exploration-report.json",
             "product_knowledge": "discovery/product-knowledge.json",
+            "discovery_capability_resolutions": "discovery/capability-resolutions.json",
             "feature_graph": "feature-graph.json",
             "relevance_graph": "discovery/relevance-graph.json",
             "candidate_flows": "candidate-flows.json",
@@ -450,13 +470,25 @@ class RunRepository:
             "viewport_decision": "discovery/viewport-decision.json",
             "demo_brief": "planning/demo-brief.json",
             "validated_state_graph": "planning/validated-state-graph.json",
+            "capability_resolutions": "planning/capability-resolutions.json",
             "demo_plan": "plan.json",
+            # Runtime adaptation is an auditable plan version, not an
+            # in-memory worker detail.  Mirror it when present so resumable
+            # workers and API clients can distinguish the planned and
+            # actually executed suffix.
+            "effective_plan": "plan-effective.json",
+            "adapted_state_graph": "planning/adapted-state-graph.json",
+            "replan_decisions": "execution/replan-decisions.json",
             "editorial_brief": "presentation/editorial-brief.json",
             "storyboard": "presentation/storyboard.json",
             "validated_scene_plan": "presentation/validated-scene-plan.json",
             "actual_flow_storyboard": "presentation/actual-flow-storyboard.json",
             "editorial_script": "presentation/narration-script.json",
             "demo_trace": "execution/trace.json",
+            "state_snapshots": "execution/state-snapshots.json",
+            "action_attempts": "execution/action-attempts.json",
+            "verification_results": "execution/verification-results.json",
+            "execution_report": "qa/execution-report.json",
             "source_timing_alignment": "execution/source-timing-alignment.json",
             "source_edit_plan": "presentation/source-edit-plan.json",
             "repair_decision": "qa/repair-decision.json",
@@ -511,7 +543,14 @@ class RunRepository:
     ) -> None:
         self.connection.execute(
             "INSERT INTO audio_assets VALUES (?, ?, ?, ?, ?, ?)",
-            (str(uuid4()), run_id, location, duration_seconds, provider, datetime.now(UTC).isoformat()),
+            (
+                str(uuid4()),
+                run_id,
+                location,
+                duration_seconds,
+                provider,
+                datetime.now(UTC).isoformat(),
+            ),
         )
         self.connection.commit()
 
@@ -520,7 +559,14 @@ class RunRepository:
     ) -> None:
         self.connection.execute(
             "INSERT INTO video_renders VALUES (?, ?, ?, ?, ?, ?)",
-            (str(uuid4()), run_id, location, status, json.dumps(metadata), datetime.now(UTC).isoformat()),
+            (
+                str(uuid4()),
+                run_id,
+                location,
+                status,
+                json.dumps(metadata),
+                datetime.now(UTC).isoformat(),
+            ),
         )
         self.connection.commit()
 
@@ -542,8 +588,16 @@ class RunRepository:
             "(id, run_id, provider, operation, status, duration_ms, error_code, model, cost_class, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                str(uuid4()), run_id, provider, operation, status, duration_ms, error_code,
-                model, cost_class, datetime.now(UTC).isoformat(),
+                str(uuid4()),
+                run_id,
+                provider,
+                operation,
+                status,
+                duration_ms,
+                error_code,
+                model,
+                cost_class,
+                datetime.now(UTC).isoformat(),
             ),
         )
         self.connection.commit()
@@ -626,9 +680,7 @@ class RunRepository:
             ).fetchone()
         )
 
-    def create_project(
-        self, name: str, *, owner_id: str | None = None
-    ) -> dict[str, Any]:
+    def create_project(self, name: str, *, owner_id: str | None = None) -> dict[str, Any]:
         normalized = name.strip()
         if not normalized:
             raise ValueError("project name is required")
@@ -641,7 +693,9 @@ class RunRepository:
         self.connection.commit()
         return self.get_project(identifier)
 
-    def create_user(self, *, email: str, password_hash: str, display_name: str | None) -> dict[str, Any]:
+    def create_user(
+        self, *, email: str, password_hash: str, display_name: str | None
+    ) -> dict[str, Any]:
         normalized = email.strip().lower()
         if not normalized:
             raise ValueError("email is required")
@@ -650,7 +704,14 @@ class RunRepository:
         try:
             self.connection.execute(
                 "INSERT INTO users (id, email, display_name, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (identifier, normalized, (display_name or "").strip()[:120] or None, password_hash, now, now),
+                (
+                    identifier,
+                    normalized,
+                    (display_name or "").strip()[:120] or None,
+                    password_hash,
+                    now,
+                    now,
+                ),
             )
         except (sqlite3.IntegrityError, IntegrityError) as error:
             raise ValueError("an account with that email already exists") from error
@@ -664,7 +725,9 @@ class RunRepository:
         return dict(row)
 
     def get_user_by_email(self, email: str) -> dict[str, Any] | None:
-        row = self.connection.execute("SELECT * FROM users WHERE email=?", (email.strip().lower(),)).fetchone()
+        row = self.connection.execute(
+            "SELECT * FROM users WHERE email=?", (email.strip().lower(),)
+        ).fetchone()
         return dict(row) if row else None
 
     def update_user_preferences(self, user_id: str, *, theme_preference: str) -> dict[str, Any]:
@@ -749,11 +812,14 @@ class RunRepository:
 
     def ensure_user_project(self, user_id: str) -> dict[str, Any]:
         row = self.connection.execute(
-            "SELECT * FROM projects WHERE owner_id=? AND name='My Product Demos' LIMIT 1", (user_id,)
+            "SELECT * FROM projects WHERE owner_id=? AND name='My Product Demos' LIMIT 1",
+            (user_id,),
         ).fetchone()
         return dict(row) if row else self.create_project("My Product Demos", owner_id=user_id)
 
-    def list_runs_for_user(self, user_id: str, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    def list_runs_for_user(
+        self, user_id: str, *, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             """SELECT demo_runs.*, demo_requests.url, demo_requests.objective, demo_requests.project_id
             FROM demo_runs JOIN demo_requests ON demo_requests.id=demo_runs.request_id
@@ -767,7 +833,8 @@ class RunRepository:
         row = self.connection.execute(
             """SELECT demo_runs.* FROM demo_runs JOIN demo_requests ON demo_requests.id=demo_runs.request_id
             JOIN projects ON projects.id=demo_requests.project_id
-            WHERE demo_runs.id=? AND projects.owner_id=?""", (run_id, user_id)
+            WHERE demo_runs.id=? AND projects.owner_id=?""",
+            (run_id, user_id),
         ).fetchone()
         if not row:
             raise KeyError(run_id)
@@ -898,18 +965,33 @@ class RunRepository:
         if run["status"] not in {"FAILED", "CANCELLED"}:
             raise ValueError("only failed or cancelled runs can be removed")
         evidence_tables = (
-            "artifacts", "demo_attempts", "demo_plans", "workflow_steps", "browser_sessions",
-            "interaction_events", "presentation_plans", "narration_scripts", "quality_reports",
-            "form_schemas", "synthetic_datasets", "audio_assets", "video_renders", "provider_calls",
+            "artifacts",
+            "demo_attempts",
+            "demo_plans",
+            "workflow_steps",
+            "browser_sessions",
+            "interaction_events",
+            "presentation_plans",
+            "narration_scripts",
+            "quality_reports",
+            "form_schemas",
+            "synthetic_datasets",
+            "audio_assets",
+            "video_renders",
+            "provider_calls",
             "run_artifact_documents",
         )
         if any(
-            self.connection.execute(f"SELECT 1 FROM {table} WHERE run_id=? LIMIT 1", (run_id,)).fetchone()
+            self.connection.execute(
+                f"SELECT 1 FROM {table} WHERE run_id=? LIMIT 1", (run_id,)
+            ).fetchone()
             for table in evidence_tables
         ):
             raise ValueError("run has retained evidence and cannot be removed as empty")
         # Lineage is an audit record. Do not remove a run that has children.
-        if self.connection.execute("SELECT 1 FROM run_lineage WHERE parent_run_id=? LIMIT 1", (run_id,)).fetchone():
+        if self.connection.execute(
+            "SELECT 1 FROM run_lineage WHERE parent_run_id=? LIMIT 1", (run_id,)
+        ).fetchone():
             raise ValueError("run has retry descendants and cannot be removed")
         # Database rows are not the complete retention boundary: a worker can
         # crash before registering files in the ledger. Refuse to remove the
@@ -932,7 +1014,9 @@ class RunRepository:
 
     def purge_empty_terminal_runs(self, *, older_than_seconds: int = 0) -> list[str]:
         """Retention sweep for truly empty terminal runs, returning deleted IDs."""
-        cutoff = datetime.fromtimestamp(datetime.now(UTC).timestamp() - older_than_seconds, UTC).isoformat()
+        cutoff = datetime.fromtimestamp(
+            datetime.now(UTC).timestamp() - older_than_seconds, UTC
+        ).isoformat()
         candidates = self.connection.execute(
             "SELECT id FROM demo_runs WHERE status IN ('FAILED', 'CANCELLED') AND updated_at <= ? ORDER BY updated_at",
             (cutoff,),
@@ -970,7 +1054,9 @@ class RunRepository:
         )
         self.connection.commit()
 
-    def copy_run_evidence(self, parent_run_id: str, retry_run_id: str, *, through_stage: str) -> None:
+    def copy_run_evidence(
+        self, parent_run_id: str, retry_run_id: str, *, through_stage: str
+    ) -> None:
         """Copy immutable database evidence needed by a targeted child retry."""
         target = self.stage_job(retry_run_id, through_stage)["ordinal"]
         tables_by_stage = {
@@ -993,7 +1079,8 @@ class RunRepository:
                     columns = ", ".join(values)
                     placeholders = ", ".join("?" for _ in values)
                     self.connection.execute(
-                        f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", tuple(values.values())
+                        f"INSERT INTO {table} ({columns}) VALUES ({placeholders})",
+                        tuple(values.values()),
                     )
         self.connection.commit()
 
@@ -1006,9 +1093,16 @@ class RunRepository:
             return dict(existing)
         now = datetime.now(UTC).isoformat()
         job = {
-            "id": str(uuid4()), "run_id": run_id, "kind": kind, "payload_json": json.dumps(payload),
-            "status": "QUEUED", "delivery_attempts": 0, "error_code": None, "queued_at": now,
-            "claimed_at": None, "completed_at": None,
+            "id": str(uuid4()),
+            "run_id": run_id,
+            "kind": kind,
+            "payload_json": json.dumps(payload),
+            "status": "QUEUED",
+            "delivery_attempts": 0,
+            "error_code": None,
+            "queued_at": now,
+            "claimed_at": None,
+            "completed_at": None,
         }
         self.connection.execute(
             "INSERT INTO generation_jobs VALUES (:id,:run_id,:kind,:payload_json,:status,:delivery_attempts,:error_code,:queued_at,:claimed_at,:completed_at)",
@@ -1055,9 +1149,18 @@ class RunRepository:
         completed = now if status in {"COMPLETE", "FAILED", "SKIPPED"} else None
         self.connection.execute(
             """UPDATE generation_stage_jobs SET status=?, error_code=?,
-            started_at=COALESCE(started_at, ?), completed_at=?, updated_at=?
-            WHERE run_id=? AND stage=? AND status != 'CANCELLED'""",
-            (status, error_code, started, completed, now, run_id, stage),
+                started_at=COALESCE(started_at, ?), completed_at=?, heartbeat_at=?, updated_at=?
+                WHERE run_id=? AND stage=? AND status != 'CANCELLED'""",
+            (
+                status,
+                error_code,
+                started,
+                completed,
+                now if status == "RUNNING" else None,
+                now,
+                run_id,
+                stage,
+            ),
         )
         self.connection.commit()
 
@@ -1072,7 +1175,7 @@ class RunRepository:
         cursor = self.connection.execute(
             """UPDATE generation_stage_jobs AS candidate
             SET status='RUNNING', error_code=NULL, delivery_attempts=delivery_attempts+1, claimed_at=?,
-                started_at=COALESCE(started_at, ?), completed_at=NULL, updated_at=?
+                started_at=COALESCE(started_at, ?), completed_at=NULL, heartbeat_at=?, updated_at=?
             WHERE candidate.run_id=? AND candidate.stage=?
               AND candidate.status IN ('QUEUED', 'RETRYING')
               AND EXISTS (
@@ -1085,7 +1188,7 @@ class RunRepository:
                   AND earlier.ordinal<candidate.ordinal
                   AND earlier.status NOT IN ('COMPLETE', 'SKIPPED')
               )""",
-            (now, now, now, run_id, stage),
+            (now, now, now, now, run_id, stage),
         )
         self.connection.commit()
         if cursor.rowcount != 1:
@@ -1094,12 +1197,24 @@ class RunRepository:
 
     def stage_job(self, run_id: str, stage: str) -> dict[str, Any]:
         row = self.connection.execute(
-            "SELECT stage, ordinal, status, error_code, delivery_attempts, claimed_at, started_at, completed_at, updated_at "
-            "FROM generation_stage_jobs WHERE run_id=? AND stage=?", (run_id, stage)
+            "SELECT stage, ordinal, status, error_code, delivery_attempts, claimed_at, started_at, completed_at, heartbeat_at, updated_at "
+            "FROM generation_stage_jobs WHERE run_id=? AND stage=?",
+            (run_id, stage),
         ).fetchone()
         if not row:
             raise KeyError(f"{run_id}:{stage}")
         return dict(row)
+
+    def heartbeat_stage_job(self, run_id: str, stage: str) -> None:
+        """Refresh the liveness lease without changing lifecycle status."""
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """UPDATE generation_stage_jobs
+            SET heartbeat_at=?, updated_at=?
+            WHERE run_id=? AND stage=? AND status='RUNNING'""",
+            (now, now, run_id, stage),
+        )
+        self.connection.commit()
 
     def claim_next_stage_job(self) -> dict[str, Any] | None:
         """Claim the oldest stage whose predecessor is complete for the local worker."""
@@ -1134,7 +1249,8 @@ class RunRepository:
             dict(row)
             for row in self.connection.execute(
                 "SELECT stage, ordinal, status, error_code, delivery_attempts, claimed_at, started_at, completed_at, updated_at "
-                "FROM generation_stage_jobs WHERE run_id=? ORDER BY ordinal", (run_id,)
+                "FROM generation_stage_jobs WHERE run_id=? ORDER BY ordinal",
+                (run_id,),
             ).fetchall()
         ]
 
@@ -1225,12 +1341,19 @@ class RunRepository:
             raise ValueError("invalid durable job status")
         self.connection.execute(
             "UPDATE generation_jobs SET status=?, error_code=?, completed_at=? WHERE id=? AND status != 'CANCELLED'",
-            (status, error_code, datetime.now(UTC).isoformat() if status != "RETRYING" else None, job_id),
+            (
+                status,
+                error_code,
+                datetime.now(UTC).isoformat() if status != "RETRYING" else None,
+                job_id,
+            ),
         )
         self.connection.commit()
 
     def get_job(self, job_id: str) -> dict[str, Any]:
-        row = self.connection.execute("SELECT * FROM generation_jobs WHERE id=?", (job_id,)).fetchone()
+        row = self.connection.execute(
+            "SELECT * FROM generation_jobs WHERE id=?", (job_id,)
+        ).fetchone()
         if not row:
             raise KeyError(job_id)
         job = dict(row)
@@ -1270,7 +1393,11 @@ class RunRepository:
         request = self.get_request(run["request_id"])
 
         def payloads(table: str) -> list[dict[str, Any]]:
-            order = "ordinal, id" if table in {"workflow_steps", "interaction_events"} else "created_at, id"
+            order = (
+                "ordinal, id"
+                if table in {"workflow_steps", "interaction_events"}
+                else "created_at, id"
+            )
             rows = self.connection.execute(
                 f"SELECT payload_json FROM {table} WHERE run_id=? ORDER BY {order}", (run_id,)
             ).fetchall()
@@ -1313,7 +1440,8 @@ class RunRepository:
             "retry_of": (
                 self.connection.execute(
                     "SELECT parent_run_id FROM run_lineage WHERE retry_run_id=?", (run_id,)
-                ).fetchone() or {"parent_run_id": None}
+                ).fetchone()
+                or {"parent_run_id": None}
             )["parent_run_id"],
             "retries": [
                 row["retry_run_id"]
@@ -1386,10 +1514,26 @@ class RunRepository:
             # evidence is accumulated after production execution. Do not discard
             # that cache merely because a discovery payload does not contain it.
             if "successful_actions" in existing_evidence and "successful_actions" not in evidence:
-                evidence = {**evidence, "successful_actions": existing_evidence["successful_actions"]}
+                evidence = {
+                    **evidence,
+                    "successful_actions": existing_evidence["successful_actions"],
+                }
+        evidence_payload = json.dumps(evidence)
         self.connection.execute(
             "INSERT INTO product_knowledge(id, product_key, version, evidence_json, confidence, last_verified_at) VALUES(?,?,?,?,?,?) ON CONFLICT(product_key) DO UPDATE SET version=excluded.version,evidence_json=excluded.evidence_json,confidence=excluded.confidence,last_verified_at=excluded.last_verified_at",
-            (str(uuid4()), product_key, version, json.dumps(evidence), confidence, now),
+            (str(uuid4()), product_key, version, evidence_payload, confidence, now),
+        )
+        # Keep an immutable version ledger alongside the current snapshot. This
+        # makes freshness/re-grounding auditable without overwriting the only
+        # copy of older product knowledge.
+        fingerprint = str(
+            evidence.get("product_fingerprint")
+            or evidence.get("fingerprint")
+            or hashlib.sha256(evidence_payload.encode("utf-8")).hexdigest()[:32]
+        )
+        self.connection.execute(
+            "INSERT INTO knowledge_versions(id, product_key, version, fingerprint, evidence_json, confidence, captured_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(product_key, version) DO UPDATE SET fingerprint=excluded.fingerprint,evidence_json=excluded.evidence_json,confidence=excluded.confidence,captured_at=excluded.captured_at",
+            (str(uuid4()), product_key, version, fingerprint, evidence_payload, confidence, now),
         )
         self.connection.commit()
 
@@ -1427,14 +1571,19 @@ class RunRepository:
         """Cache compact, non-secret action evidence for later DOM re-grounding."""
         product_key = _canonical_product_key(product_key)
         row = self.connection.execute(
-            "SELECT evidence_json, confidence FROM product_knowledge WHERE product_key=?", (product_key,)
+            "SELECT evidence_json, confidence FROM product_knowledge WHERE product_key=?",
+            (product_key,),
         ).fetchone()
         if not row:
             return
         evidence = json.loads(row["evidence_json"])
         cached = list(evidence.get("successful_actions", []))
         by_signature = {
-            (item.get("kind"), item.get("target", {}).get("selector"), item.get("target", {}).get("name")): item
+            (
+                item.get("kind"),
+                item.get("target", {}).get("selector"),
+                item.get("target", {}).get("name"),
+            ): item
             for item in cached
         }
         for event in events:
@@ -1474,9 +1623,23 @@ class RunRepository:
             "evidence": json.loads(row["evidence_json"]),
             "confidence": row["confidence"],
             "last_verified_at": row["last_verified_at"],
+            "version": self.connection.execute(
+                "SELECT version FROM product_knowledge WHERE product_key=?", (product_key,)
+            ).fetchone()["version"],
         }
 
-    def save_understanding_preview(self, product_key: str, prompt: str, payload: dict[str, Any]) -> None:
+    def knowledge_versions(self, product_key: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """List immutable knowledge snapshots newest-first for audit/reuse decisions."""
+        product_key = _canonical_product_key(product_key)
+        rows = self.connection.execute(
+            "SELECT id, product_key, version, fingerprint, confidence, captured_at FROM knowledge_versions WHERE product_key=? ORDER BY version DESC LIMIT ?",
+            (product_key, max(1, min(100, int(limit)))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_understanding_preview(
+        self, product_key: str, prompt: str, payload: dict[str, Any]
+    ) -> None:
         """Persist a non-secret preflight result for prompt assistance reuse."""
         product_key = _canonical_product_key(product_key)
         prompt_hash = hashlib.sha256(prompt.strip().encode("utf-8")).hexdigest()
@@ -1522,7 +1685,9 @@ class RunRepository:
         ).fetchone()
         if not row:
             return False
-        self.connection.execute("DELETE FROM page_knowledge WHERE product_knowledge_id=?", (row["id"],))
+        self.connection.execute(
+            "DELETE FROM page_knowledge WHERE product_knowledge_id=?", (row["id"],)
+        )
         self.connection.execute("DELETE FROM product_knowledge WHERE id=?", (row["id"],))
         self.connection.commit()
         return True

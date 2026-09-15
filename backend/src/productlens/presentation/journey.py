@@ -1,4 +1,5 @@
 """Deterministic trace-to-video journey direction."""
+
 from __future__ import annotations
 
 import re
@@ -6,7 +7,18 @@ from urllib.parse import urlsplit, urlunsplit
 
 from productlens.contracts.models import DemoTrace, OperationKind
 
-CLICK_KINDS = {OperationKind.CLICK, OperationKind.OPEN_NAVIGATION_ITEM, OperationKind.OPEN_MODAL, OperationKind.CLOSE_MODAL, OperationKind.SUBMIT, OperationKind.APPLY_FILTER}
+CLICK_KINDS = {
+    OperationKind.CLICK,
+    OperationKind.OPEN_NAVIGATION_ITEM,
+    OperationKind.OPEN_MODAL,
+    OperationKind.CLOSE_MODAL,
+    OperationKind.SUBMIT,
+    OperationKind.APPLY_FILTER,
+}
+# A visible pointer is part of the explanation for any deliberate gesture,
+# not only a click.  Drag and pointer-sequence scenes otherwise rendered the
+# browser action without the cursor that proves where the gesture occurred.
+CURSOR_KINDS = CLICK_KINDS | {OperationKind.DRAG, OperationKind.POINTER_SEQUENCE}
 
 
 def _has_directed_scroll_motion(path: list[dict]) -> bool:
@@ -23,9 +35,10 @@ def _has_directed_scroll_motion(path: list[dict]) -> bool:
         return False
     start, end = path[0], path[-1]
     try:
-        return abs(float(end.get("x", 0)) - float(start.get("x", 0))) > 8 or abs(
-            float(end.get("y", 0)) - float(start.get("y", 0))
-        ) > 8
+        return (
+            abs(float(end.get("x", 0)) - float(start.get("x", 0))) > 8
+            or abs(float(end.get("y", 0)) - float(start.get("y", 0))) > 8
+        )
     except (AttributeError, TypeError, ValueError):
         return False
 
@@ -34,7 +47,15 @@ def _page_key(value: str | None) -> str | None:
     if not value:
         return None
     parsed = urlsplit(value)
-    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/") or "/", parsed.query, ""))
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path.rstrip("/") or "/",
+            parsed.query,
+            "",
+        )
+    )
 
 
 def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
@@ -57,7 +78,7 @@ def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
             phase, action_class = "enter", "TRANSITIONAL"
         elif event.kind is OperationKind.SCROLL_TO:
             phase, action_class = "explore", "ESSENTIAL"
-        elif event.kind in CLICK_KINDS:
+        elif event.kind in CURSOR_KINDS:
             phase, action_class = "demonstrate", "ESSENTIAL"
         else:
             phase, action_class = "verify", "ESSENTIAL"
@@ -68,36 +89,52 @@ def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
         existing_scroll = scene.get("scroll") if isinstance(scene.get("scroll"), dict) else {}
         scroll_evidence = list(event.scroll_path)
         has_scroll_motion = _has_directed_scroll_motion(scroll_evidence)
-        directed.append({
-            **scene,
-            "objective": trace.objective,
-            # Keep the semantic operation available to journey QA.  A page
-            # revisit is normally a coverage smell, but a validated return
-            # followed by a meaningful form/modal/filter interaction is a
-            # legitimate continuation of the story (for example, opening a
-            # record composer after first introducing the list).  QA can
-            # distinguish that from a bare route sweep without inspecting
-            # provider-specific selectors.
-            "event_kind": event.kind.value,
-            "story_phase": phase,
-            "action_class": action_class,
-            "camera": {"zoom": 1.0, "duration_seconds": 0.45, "easing": "out-cubic", "safety": "full-frame", **existing_camera},
-            "cursor": {"visible": event.kind in CLICK_KINDS, "hover_seconds": 0.25, "click_ripple": event.kind in CLICK_KINDS, **existing_cursor},
-            "scroll": {
-                "mode": "gradual" if event.kind is OperationKind.SCROLL_TO and has_scroll_motion else "none",
-                "settle_seconds": 0.45,
-                "already_visible": event.kind is OperationKind.SCROLL_TO and not has_scroll_motion,
-                **existing_scroll,
-            },
-            "target": rect.model_dump() if rect else None,
-            "page_key": page_key,
-            "scroll_evidence": scroll_evidence,
-            "scroll_continuity_required": (
-                event.kind is OperationKind.SCROLL_TO
-                and event.action_at is not None
-                and has_scroll_motion
-            ),
-        })
+        directed.append(
+            {
+                **scene,
+                "objective": trace.objective,
+                # Keep the semantic operation available to journey QA.  A page
+                # revisit is normally a coverage smell, but a validated return
+                # followed by a meaningful form/modal/filter interaction is a
+                # legitimate continuation of the story (for example, opening a
+                # record composer after first introducing the list).  QA can
+                # distinguish that from a bare route sweep without inspecting
+                # provider-specific selectors.
+                "event_kind": event.kind.value,
+                "story_phase": phase,
+                "action_class": action_class,
+                "camera": {
+                    "zoom": 1.0,
+                    "duration_seconds": 0.45,
+                    "easing": "out-cubic",
+                    "safety": "full-frame",
+                    **existing_camera,
+                },
+                "cursor": {
+                    "visible": event.kind in CURSOR_KINDS,
+                    "hover_seconds": 0.25,
+                    "click_ripple": event.kind in CLICK_KINDS,
+                    **existing_cursor,
+                },
+                "scroll": {
+                    "mode": "gradual"
+                    if event.kind is OperationKind.SCROLL_TO and has_scroll_motion
+                    else "none",
+                    "settle_seconds": 0.45,
+                    "already_visible": event.kind is OperationKind.SCROLL_TO
+                    and not has_scroll_motion,
+                    **existing_scroll,
+                },
+                "target": rect.model_dump() if rect else None,
+                "page_key": page_key,
+                "scroll_evidence": scroll_evidence,
+                "scroll_continuity_required": (
+                    event.kind is OperationKind.SCROLL_TO
+                    and event.action_at is not None
+                    and has_scroll_motion
+                ),
+            }
+        )
     # Attach the complete, auditable page contract to each chapter's final
     # visible scene. A scroll with a readable dwell counts as inspecting the
     # visible evidence; a navigation event never does.
@@ -118,7 +155,8 @@ def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
             str(stage)
             for item in chapter
             for stage in (
-                item.get("page_stage"), item.get("story_phase"),
+                item.get("page_stage"),
+                item.get("story_phase"),
                 *(item.get("page_contract_phases") or []),
             )
             if stage
@@ -126,35 +164,59 @@ def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
         has_visible_exploration = any(
             item.get("story_phase") in {"explore", "demonstrate", "verify"}
             or item.get("page_stage") in {"explore", "inspect", "explain", "demonstrate", "verify"}
-            or bool(set(item.get("page_contract_phases") or []) & {"explore", "demonstrate", "verify"})
+            or bool(
+                set(item.get("page_contract_phases") or []) & {"explore", "demonstrate", "verify"}
+            )
             for item in chapter
         )
-        readable_dwell = sum(float(item.get("dwell_seconds", 0)) for item in chapter if item.get("story_phase") != "enter")
-        required_groups = list(dict.fromkeys(
-            group
+        readable_dwell = sum(
+            float(item.get("dwell_seconds", 0))
             for item in chapter
-            for group in item.get("required_content_groups", [])
-            if str(group).strip()
-        ))
-        covered_groups = list(dict.fromkeys(
-            group
-            for item in chapter
-            for group in item.get("covered_content_groups", [])
-            if str(group).strip()
-        ))
+            if item.get("story_phase") != "enter"
+        )
+        required_groups = list(
+            dict.fromkeys(
+                group
+                for item in chapter
+                for group in item.get("required_content_groups", [])
+                if str(group).strip()
+            )
+        )
+        covered_groups = list(
+            dict.fromkeys(
+                group
+                for item in chapter
+                for group in item.get("covered_content_groups", [])
+                if str(group).strip()
+            )
+        )
         scene["page_completion"] = {
             # Entering a page has an explicit readiness/reveal dwell in the
             # scene contract, so it establishes that page before its first
             # local exploration. The opening page uses the context beat.
-            "established": "context" in {item.get("story_phase") for item in chapter} or "establish" in stages or "enter" in stages,
+            "established": "context" in {item.get("story_phase") for item in chapter}
+            or "establish" in stages
+            or "enter" in stages,
             "explored": has_visible_exploration,
-            "explained": "explain" in stages or any(item.get("page_stage") in {"inspect", "explain", "demonstrate", "verify"} for item in chapter) or readable_dwell >= 1.5,
+            "explained": "explain" in stages
+            or any(
+                item.get("page_stage") in {"inspect", "explain", "demonstrate", "verify"}
+                for item in chapter
+            )
+            or readable_dwell >= 1.5,
             "demonstrated_or_inspected": has_visible_exploration,
-            "verified_takeaway": "verify" in stages or any(item.get("story_phase") == "verify" or item.get("page_stage") == "verify" for item in chapter) or readable_dwell >= 1.5,
+            "verified_takeaway": "verify" in stages
+            or any(
+                item.get("story_phase") == "verify" or item.get("page_stage") == "verify"
+                for item in chapter
+            )
+            or readable_dwell >= 1.5,
             "readable_dwell_seconds": round(readable_dwell, 2),
             "required_content_groups": required_groups,
             "covered_content_groups": covered_groups,
-            "missing_content_groups": [group for group in required_groups if group not in covered_groups],
+            "missing_content_groups": [
+                group for group in required_groups if group not in covered_groups
+            ],
             "transition": "end" if index == len(directed) - 1 else "next-page",
         }
     return directed
@@ -169,9 +231,9 @@ def inspect_journey(scenes: list[dict]) -> dict:
     # The opening page is already a completed chapter once the first context
     # beat has been established. A later navigation back to it is a coverage
     # repair, not a new story chapter.
-    completed_pages: set[str] = {
-        str(scenes[0]["page_key"])
-    } if scenes and scenes[0].get("page_key") else set()
+    completed_pages: set[str] = (
+        {str(scenes[0]["page_key"])} if scenes and scenes[0].get("page_key") else set()
+    )
     # A thorough/full walkthrough promises more than an opening screenshot.
     # Before the first primary transition it must establish and inspect the
     # opening page's meaningful local content.  Feature demos may legitimately
@@ -179,10 +241,22 @@ def inspect_journey(scenes: list[dict]) -> dict:
     # narrower behaviour instead of forcing unrelated home-page coverage.
     objective = " ".join(str(scenes[0].get(key, "")) for key in ("objective", "intent")).casefold()
     thorough_opening = bool(re.search(r"\b(?:full|complete|entire|every|all)\b", objective))
-    opening_completion = next((item.get("page_completion") for item in scenes if item.get("page_completion")), None)
-    if thorough_opening and opening_completion and not all(
-        bool(opening_completion.get(key))
-        for key in ("established", "explored", "explained", "demonstrated_or_inspected", "verified_takeaway")
+    opening_completion = next(
+        (item.get("page_completion") for item in scenes if item.get("page_completion")), None
+    )
+    if (
+        thorough_opening
+        and opening_completion
+        and not all(
+            bool(opening_completion.get(key))
+            for key in (
+                "established",
+                "explored",
+                "explained",
+                "demonstrated_or_inspected",
+                "verified_takeaway",
+            )
+        )
     ):
         failures.append("JOURNEY_OPENING_PAGE_INCOMPLETE")
     for index, scene in enumerate(scenes):
@@ -203,12 +277,23 @@ def inspect_journey(scenes: list[dict]) -> dict:
             ):
                 break
             chapter.append(following)
-        if not any(item.get("story_phase") in {"explore", "demonstrate", "verify"} for item in chapter):
+        if not any(
+            item.get("story_phase") in {"explore", "demonstrate", "verify"} for item in chapter
+        ):
             failures.append("JOURNEY_HAS_NAVIGATION_WITHOUT_EXPLORATION")
             continue
         terminal = next((item for item in reversed(chapter) if item.get("page_completion")), None)
         completion = terminal.get("page_completion", {}) if terminal else {}
-        if completion and not all(bool(completion.get(key)) for key in ("established", "explored", "explained", "demonstrated_or_inspected", "verified_takeaway")):
+        if completion and not all(
+            bool(completion.get(key))
+            for key in (
+                "established",
+                "explored",
+                "explained",
+                "demonstrated_or_inspected",
+                "verified_takeaway",
+            )
+        ):
             failures.append("JOURNEY_INCOMPLETE_PAGE_CONTRACT")
         if completion.get("missing_content_groups"):
             failures.append("JOURNEY_REQUIRED_CONTENT_GROUP_NOT_SHOWN")
@@ -228,8 +313,7 @@ def inspect_journey(scenes: list[dict]) -> dict:
             # interaction/inspection beyond another scroll. A route opened
             # solely to repair missed coverage still fails as before.
             meaningful_revisit = any(
-                item.get("event_kind") in meaningful_revisit_kinds
-                for item in chapter
+                item.get("event_kind") in meaningful_revisit_kinds for item in chapter
             )
             if not meaningful_revisit:
                 failures.append("JOURNEY_REVISITS_COMPLETED_PAGE")
@@ -243,4 +327,8 @@ def inspect_journey(scenes: list[dict]) -> dict:
             path = scene.get("scroll_evidence") or []
             if len(path) < 2 or path[0] == path[-1]:
                 failures.append("JOURNEY_SCROLL_WITHOUT_CONTINUITY_EVIDENCE")
-    return {"journey_score": 1.0 if not failures else 0.0, "hard_failures": failures, "scene_count": len(scenes)}
+    return {
+        "journey_score": 1.0 if not failures else 0.0,
+        "hard_failures": failures,
+        "scene_count": len(scenes),
+    }

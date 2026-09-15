@@ -30,7 +30,9 @@ def test_aggregate_reports_preserves_denominator_and_requires_scale():
 
 
 @pytest.mark.asyncio
-async def test_small_fixture_suite_cannot_claim_the_production_reliability_target(monkeypatch, tmp_path):
+async def test_small_fixture_suite_cannot_claim_the_production_reliability_target(
+    monkeypatch, tmp_path
+):
     async def fake_repeat(gate, attempts, root):
         return GateMeasurement(gate, attempts, attempts)
 
@@ -45,8 +47,15 @@ async def test_small_fixture_suite_cannot_claim_the_production_reliability_targe
 async def test_benchmark_report_exposes_execution_metrics(monkeypatch, tmp_path):
     async def fake_repeat(gate, attempts, root):
         return GateMeasurement(
-            gate, attempts, attempts, browser_actions=10, successful_actions=9,
-            verified_actions=8, grounded_actions=7, repair_count=2, execution_duration_ms=400,
+            gate,
+            attempts,
+            attempts,
+            browser_actions=10,
+            successful_actions=9,
+            verified_actions=8,
+            grounded_actions=7,
+            repair_count=2,
+            execution_duration_ms=400,
         )
 
     monkeypatch.setattr("productlens.evaluation.benchmark.repeat_gate", fake_repeat)

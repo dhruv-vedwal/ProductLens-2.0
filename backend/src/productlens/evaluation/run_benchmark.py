@@ -21,7 +21,9 @@ def main() -> None:
     print(
         json.dumps(
             asyncio.run(
-                run_and_write_suite(args.attempts, args.artifact_root, gates, resume=not args.restart)
+                run_and_write_suite(
+                    args.attempts, args.artifact_root, gates, resume=not args.restart
+                )
             ),
             indent=2,
         )

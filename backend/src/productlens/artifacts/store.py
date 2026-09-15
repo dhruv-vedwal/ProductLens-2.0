@@ -7,7 +7,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from productlens.contracts.models import DemoTrace
+from productlens.contracts.models import (
+    ActionAttempt,
+    ActionIntent,
+    DemoTrace,
+    OperationKind,
+    StateSnapshot,
+    VerificationResult,
+)
 
 
 def _sha256_file(path: Path) -> str:
@@ -17,6 +24,119 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def materialize_trace_lifecycle(trace: DemoTrace) -> DemoTrace:
+    """Derive explicit lifecycle records from the canonical interaction trace.
+
+    Older executors only emitted ``InteractionEvent`` records.  Materialising
+    these typed views keeps retries/backward compatibility while giving QA and
+    operators durable state, attempt, and verification boundaries.
+    """
+    if trace.state_snapshots or trace.action_attempts or trace.verification_results:
+        return trace
+    snapshots: list[StateSnapshot] = []
+    attempts: list[ActionAttempt] = []
+    verifications: list[VerificationResult] = []
+    gesture_for = {
+        OperationKind.NAVIGATE: "click",
+        OperationKind.OPEN_NAVIGATION_ITEM: "click",
+        OperationKind.CLICK: "click",
+        OperationKind.FILL_TEXT: "type",
+        OperationKind.FILL_EMAIL: "type",
+        OperationKind.FILL_PHONE: "type",
+        OperationKind.SELECT_OPTION: "click",
+        OperationKind.SELECT_DATE: "click",
+        OperationKind.SCROLL_TO: "scroll",
+        OperationKind.HOVER: "hover",
+        OperationKind.KEY_PRESS: "key",
+        OperationKind.WAIT_FOR_STATE: "wait",
+        OperationKind.READ_VALUE: "observe",
+        OperationKind.VERIFY_STATE: "verify",
+        OperationKind.POINTER_SEQUENCE: "pointer_sequence",
+        OperationKind.DRAG: "drag",
+        OperationKind.UPLOAD: "upload",
+        OperationKind.SUBMIT: "submit",
+        OperationKind.CREATE_RECORD: "submit",
+    }
+    for event in trace.events:
+        before_payload = event.before or {}
+        after_payload = event.after or {}
+        before_id = f"state-before:{event.id}"
+        after_id = f"state-after:{event.id}"
+        for state_id, payload in ((before_id, before_payload), (after_id, after_payload)):
+            encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+            snapshots.append(
+                StateSnapshot(
+                    id=state_id,
+                    url=event.page_url or "",
+                    title=str(payload.get("title") or ""),
+                    visible_text_hash=hashlib.sha256(encoded).hexdigest(),
+                    screenshot_ref=event.screenshot_path,
+                    viewport=event.viewport,
+                    scroll=dict(event.scroll),
+                    evidence_refs=[f"trace:event:{event.id}"],
+                )
+            )
+        gesture = gesture_for.get(event.kind)
+        target = event.target
+        if gesture and (gesture in {"observe", "wait", "verify"} or target is not None):
+            parameters: dict[str, Any] = {}
+            if gesture == "pointer_sequence":
+                parameters["points"] = event.scroll_path or [{"x": 0, "y": 0}]
+            if gesture == "drag":
+                # A legacy event may not carry a destination; skip it rather
+                # than inventing one in the lifecycle projection.
+                continue
+            intent_kwargs: dict[str, Any] = {
+                "id": event.operation_id,
+                "goal": event.intent[:240] or "Observed browser action",
+                "gesture": gesture,
+                "target": target,
+                "parameters": parameters,
+            }
+            if gesture == "submit":
+                # Submit lifecycle records retain the exact expected witness
+                # from the operation; no lifecycle projection may invent a
+                # success target after the fact.
+                if not event.postconditions:
+                    continue
+                intent_kwargs.update(
+                    {
+                        "expected_state": list(event.postconditions),
+                        "side_effect_policy": "authorized_mutation",
+                    }
+                )
+            intent = ActionIntent(**intent_kwargs)
+            verification = VerificationResult(
+                intent_id=intent.id,
+                status="passed" if event.success else "failed",
+                observed_state_id=after_id,
+                evidence_refs=[f"trace:event:{event.id}"],
+                confidence=1.0 if event.success else 0.0,
+                reason="interaction event completed"
+                if event.success
+                else "interaction event failed",
+            )
+            attempts.append(
+                ActionAttempt(
+                    id=f"attempt:{event.id}",
+                    intent=intent,
+                    dispatched=event.action_at is not None or event.success,
+                    before_state_id=before_id,
+                    after_state_id=after_id,
+                    verification=verification,
+                    error=None if event.success else "interaction event failed",
+                )
+            )
+            verifications.append(verification)
+    return trace.model_copy(
+        update={
+            "state_snapshots": snapshots,
+            "action_attempts": attempts,
+            "verification_results": verifications,
+        }
+    )
 
 
 class RunArtifacts:
@@ -78,6 +198,19 @@ class RunArtifacts:
         return path
 
     def save_trace(self, trace: DemoTrace) -> Path:
+        trace = materialize_trace_lifecycle(trace)
+        self.write_json(
+            "execution/state-snapshots.json",
+            [item.model_dump(mode="json") for item in trace.state_snapshots],
+        )
+        self.write_json(
+            "execution/action-attempts.json",
+            [item.model_dump(mode="json") for item in trace.action_attempts],
+        )
+        self.write_json(
+            "execution/verification-results.json",
+            [item.model_dump(mode="json") for item in trace.verification_results],
+        )
         return self.write_json("execution/trace.json", trace.model_dump(mode="json"))
 
     def preserve_browser_video(self, source: Path | None) -> Path | None:
@@ -120,12 +253,16 @@ class RunArtifacts:
             for path in self.root.rglob("*")
             if path.is_file() and path.name not in {"artifact-manifest.json", "run-status.json"}
         ):
-            entries.append({
-                "path": source.relative_to(self.root).as_posix(),
-                "bytes": source.stat().st_size,
-                "sha256": _sha256_file(source),
-            })
-        return self.write_json("artifact-manifest.json", {"run_id": self.root.name, "artifacts": entries})
+            entries.append(
+                {
+                    "path": source.relative_to(self.root).as_posix(),
+                    "bytes": source.stat().st_size,
+                    "sha256": _sha256_file(source),
+                }
+            )
+        return self.write_json(
+            "artifact-manifest.json", {"run_id": self.root.name, "artifacts": entries}
+        )
 
     def verify_manifest(self) -> dict[str, Any]:
         """Verify every manifest entry and report missing or mutated artifacts."""
@@ -136,7 +273,13 @@ class RunArtifacts:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             entries = payload.get("artifacts", [])
         except (OSError, ValueError, TypeError):
-            return {"valid": False, "missing_manifest": False, "invalid_manifest": True, "missing": [], "mutated": []}
+            return {
+                "valid": False,
+                "missing_manifest": False,
+                "invalid_manifest": True,
+                "missing": [],
+                "mutated": [],
+            }
         missing: list[str] = []
         mutated: list[str] = []
         for entry in entries:
@@ -148,7 +291,12 @@ class RunArtifacts:
             digest = _sha256_file(path)
             if digest != entry.get("sha256") or path.stat().st_size != entry.get("bytes"):
                 mutated.append(relative)
-        return {"valid": not missing and not mutated, "missing_manifest": False, "missing": missing, "mutated": mutated}
+        return {
+            "valid": not missing and not mutated,
+            "missing_manifest": False,
+            "missing": missing,
+            "mutated": mutated,
+        }
 
     def required_url_delivery_artifacts(self) -> dict[str, bool]:
         """Require the complete evidence chain for a live product delivery.
@@ -167,6 +315,7 @@ class RunArtifacts:
             "candidate_flows": self.root / "candidate-flows.json",
             "relevance_graph": self.root / "discovery" / "relevance-graph.json",
             "demo_brief": self.root / "planning" / "demo-brief.json",
+            "capability_resolutions": self.root / "planning" / "capability-resolutions.json",
             "validated_state_graph": self.root / "planning" / "validated-state-graph.json",
             "plan": self.root / "plan.json",
             "plan_consistency": self.qa / "plan-consistency-report.json",
@@ -176,20 +325,24 @@ class RunArtifacts:
             "validated_scene_plan": self.presentation / "validated-scene-plan.json",
             "actual_flow_storyboard": self.presentation / "actual-flow-storyboard.json",
             "narration_script": self.presentation / "narration-script.json",
+            "fact_extraction": self.root / "narration" / "fact-extraction.json",
             "captions": self.presentation / "rendered-captions.json",
             "coverage_qa": self.qa / "coverage-report.json",
             "journey_qa": self.root / "quality" / "journey-report.json",
             "artifact_manifest": self.root / "artifact-manifest.json",
+            "state_snapshots": self.execution / "state-snapshots.json",
+            "action_attempts": self.execution / "action-attempts.json",
+            "verification_results": self.execution / "verification-results.json",
         }
         required = {
             **self.required_delivery_artifacts(),
             **{
-            name: (
-                any(path.glob("*.json"))
-                if name == "page_knowledge"
-                else path.exists() and path.stat().st_size > 0
-            )
-            for name, path in paths.items()
+                name: (
+                    any(path.glob("*.json"))
+                    if name == "page_knowledge"
+                    else path.exists() and path.stat().st_size > 0
+                )
+                for name, path in paths.items()
             },
         }
         # An explicitly authorised creation demo must prove the separate
@@ -198,7 +351,11 @@ class RunArtifacts:
         # made the production workflow safe to replay.
         objective_path = self.root / "objective.json"
         try:
-            objective = json.loads(objective_path.read_text(encoding="utf-8")) if objective_path.is_file() else {}
+            objective = (
+                json.loads(objective_path.read_text(encoding="utf-8"))
+                if objective_path.is_file()
+                else {}
+            )
         except (OSError, ValueError, TypeError):
             objective = {}
         if "create_isolated_record" in objective.get("permitted_mutations", []):
@@ -242,19 +399,42 @@ class RunArtifacts:
             "DISCOVERY": ("discovery",),
             "PLANNING": ("discovery",),
             "EXECUTION": ("discovery", "plan.json"),
-            "NARRATION": ("discovery", "plan.json", "execution", "presentation", "qa/story-report.json", "qa/execution-report.json"),
+            "NARRATION": (
+                "discovery",
+                "plan.json",
+                "execution",
+                "presentation",
+                "qa/story-report.json",
+                "qa/execution-report.json",
+            ),
             # Preserve every predecessor artifact required to evaluate the
             # child delivery.  A render retry must not fail merely because it
             # intentionally skipped discovery/execution and therefore lost
             # the inherited coverage or journey evidence.
             "RENDER": (
-                "discovery", "plan.json", "execution", "presentation", "audio", "quality",
-                "qa/story-report.json", "qa/execution-report.json", "qa/coverage-report.json",
+                "discovery",
+                "plan.json",
+                "execution",
+                "presentation",
+                "audio",
+                "quality",
+                "qa/story-report.json",
+                "qa/execution-report.json",
+                "qa/coverage-report.json",
                 "qa/editorial-report.json",
             ),
             "VIDEO_QA": (
-                "discovery", "plan.json", "execution", "presentation", "audio", "quality", "render", "final",
-                "qa/story-report.json", "qa/execution-report.json", "qa/coverage-report.json",
+                "discovery",
+                "plan.json",
+                "execution",
+                "presentation",
+                "audio",
+                "quality",
+                "render",
+                "final",
+                "qa/story-report.json",
+                "qa/execution-report.json",
+                "qa/coverage-report.json",
                 "qa/editorial-report.json",
             ),
         }

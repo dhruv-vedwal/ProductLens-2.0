@@ -1,7 +1,9 @@
 from productlens.config.settings import Settings
 
 
-def test_settings_can_import_only_provider_values_from_new_project_environment(monkeypatch, tmp_path):
+def test_settings_can_import_only_provider_values_from_new_project_environment(
+    monkeypatch, tmp_path
+):
     source = tmp_path / ".env"
     source.write_text(
         "OPENROUTER_API_KEY=provider-key\nELEVENLABS_API_KEY=tts-key\n"
@@ -19,7 +21,9 @@ def test_settings_preserves_a_postgres_database_url(monkeypatch, tmp_path):
     source = tmp_path / ".env"
     source.write_text("PRODUCTLENS_AUTH_SECRET=0123456789abcdef0123456789abcdef\n")
     monkeypatch.setenv("PRODUCTLENS_ENV_FILE", str(source))
-    monkeypatch.setenv("PRODUCTLENS_DATABASE_URL", "postgresql+psycopg://user:pass@db:5432/productlens")
+    monkeypatch.setenv(
+        "PRODUCTLENS_DATABASE_URL", "postgresql+psycopg://user:pass@db:5432/productlens"
+    )
 
     settings = Settings.from_environment()
 

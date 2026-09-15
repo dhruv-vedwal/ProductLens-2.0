@@ -47,11 +47,18 @@ def probe_video(video: Path) -> dict[str, Any]:
     """Return stable, non-semantic encoded-media evidence for one video."""
     completed = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-show_entries",
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
             "format=duration,bit_rate:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,nb_frames",
-            "-of", "json", str(video),
+            "-of",
+            "json",
+            str(video),
         ],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if completed.returncode != 0:
         raise RuntimeError(f"could not probe {video.name}: {completed.stderr.strip()}")
@@ -59,7 +66,9 @@ def probe_video(video: Path) -> dict[str, Any]:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"invalid ffprobe response for {video.name}") from error
-    stream = next((item for item in payload.get("streams", []) if item.get("codec_type") == "video"), None)
+    stream = next(
+        (item for item in payload.get("streams", []) if item.get("codec_type") == "video"), None
+    )
     if not isinstance(stream, dict):
         raise TypeError(f"no video stream in {video.name}")
     return {
@@ -68,7 +77,9 @@ def probe_video(video: Path) -> dict[str, Any]:
         "width": int(stream.get("width") or 0),
         "height": int(stream.get("height") or 0),
         "duration_seconds": round(float(payload.get("format", {}).get("duration") or 0), 3),
-        "frame_rate": round(_fraction(stream.get("avg_frame_rate") or stream.get("r_frame_rate")), 3),
+        "frame_rate": round(
+            _fraction(stream.get("avg_frame_rate") or stream.get("r_frame_rate")), 3
+        ),
         "nominal_frame_rate": round(_fraction(stream.get("r_frame_rate")), 3),
         "frame_count": int(stream.get("nb_frames") or 0),
         "bit_rate": int(payload.get("format", {}).get("bit_rate") or 0),
@@ -78,7 +89,8 @@ def probe_video(video: Path) -> dict[str, Any]:
 def build_sample_benchmark(samples_directory: Path) -> dict[str, Any]:
     """Probe supplied samples and derive an honest measurable envelope."""
     videos = sorted(
-        path for path in samples_directory.iterdir()
+        path
+        for path in samples_directory.iterdir()
         if path.is_file() and path.suffix.lower() in MEDIA_SUFFIXES
     )
     if not videos:
@@ -127,14 +139,28 @@ def build_sample_benchmark(samples_directory: Path) -> dict[str, Any]:
 def compare_to_sample_benchmark(video: Path, benchmark: dict[str, Any]) -> dict[str, Any]:
     """Compare an output with the measurable sample envelope without faking equivalence."""
     profile = probe_video(video)
-    envelope = benchmark.get("measured_envelope") if isinstance(benchmark.get("measured_envelope"), dict) else {}
+    envelope = (
+        benchmark.get("measured_envelope")
+        if isinstance(benchmark.get("measured_envelope"), dict)
+        else {}
+    )
     failures: list[str] = []
-    target = benchmark.get("quality_target") if isinstance(benchmark.get("quality_target"), dict) else envelope
-    if profile["width"] < int(target.get("width") or target.get("minimum_width") or 0) or profile["height"] < int(target.get("height") or target.get("minimum_height") or 0):
+    target = (
+        benchmark.get("quality_target")
+        if isinstance(benchmark.get("quality_target"), dict)
+        else envelope
+    )
+    if profile["width"] < int(target.get("width") or target.get("minimum_width") or 0) or profile[
+        "height"
+    ] < int(target.get("height") or target.get("minimum_height") or 0):
         failures.append("BELOW_SAMPLE_RESOLUTION_ENVELOPE")
-    if profile["frame_rate"] + 0.01 < float(target.get("frame_rate") or target.get("minimum_frame_rate") or 0):
+    if profile["frame_rate"] + 0.01 < float(
+        target.get("frame_rate") or target.get("minimum_frame_rate") or 0
+    ):
         failures.append("BELOW_SAMPLE_FRAME_RATE_ENVELOPE")
-    if profile["duration_seconds"] + 0.25 < float(target.get("minimum_duration_seconds") or envelope.get("shortest_duration_seconds") or 0):
+    if profile["duration_seconds"] + 0.25 < float(
+        target.get("minimum_duration_seconds") or envelope.get("shortest_duration_seconds") or 0
+    ):
         failures.append("BELOW_SAMPLE_DURATION_ENVELOPE")
     return {
         "benchmark_id": benchmark.get("benchmark_id"),

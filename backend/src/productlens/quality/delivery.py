@@ -61,8 +61,10 @@ def delivery_report(
         },
         owner_by_failure=owner_by_failure,
         warnings=[
-            *story.get("warnings", []), *video.get("warnings", []),
-            *synchronization.get("warnings", []), *visual_review.get("warnings", []),
+            *story.get("warnings", []),
+            *video.get("warnings", []),
+            *synchronization.get("warnings", []),
+            *visual_review.get("warnings", []),
         ],
     )
     return {

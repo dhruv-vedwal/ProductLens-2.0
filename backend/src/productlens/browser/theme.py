@@ -12,7 +12,6 @@ from typing import Any
 
 from playwright.async_api import Error as PlaywrightError
 
-
 _THEME_HINT = re.compile(r"\b(?:theme|dark|light|appearance|contrast)\b", re.IGNORECASE)
 
 

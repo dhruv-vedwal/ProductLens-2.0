@@ -3,11 +3,20 @@ from pathlib import Path
 
 import pytest
 
-from productlens.providers.stagehand import StagehandCandidate, StagehandProvider, _origin_label, _same_origin
+from productlens.providers.stagehand import (
+    StagehandCandidate,
+    StagehandProvider,
+    _origin_label,
+    _same_origin,
+)
 
 
 def test_stagehand_bridge_declares_v4_dependency():
-    package = __import__("json").loads((__import__("pathlib").Path(__file__).resolve().parents[1] / "stagehand" / "package.json").read_text())
+    package = __import__("json").loads(
+        (
+            __import__("pathlib").Path(__file__).resolve().parents[1] / "stagehand" / "package.json"
+        ).read_text()
+    )
     assert package["dependencies"]["@browserbasehq/stagehand"].startswith("^4.")
     assert package["dependencies"]["zod"].startswith("^4.")
 
@@ -76,17 +85,21 @@ async def test_stagehand_observation_is_normalized_without_execution(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_stagehand_keeps_observed_actions_when_advisory_extraction_fails(monkeypatch, tmp_path: Path):
+async def test_stagehand_keeps_observed_actions_when_advisory_extraction_fails(
+    monkeypatch, tmp_path: Path
+):
     bridge = tmp_path / "observe.mjs"
     bridge.write_text("// bridge")
 
     class PartialProcess(Process):
         async def communicate(self, payload):
             return (
-                b'{"version":2,"environment":"LOCAL","observedUrl":"https://example.test",'
-                b'"candidates":[{"selector":"#details","description":"Open details",'
-                b'"method":"click","arguments":[]}],"analysis":null,'
-                b'"analysisError":"No object generated: response did not match schema","metrics":{}}',
+                (
+                    b'{"version":2,"environment":"LOCAL","observedUrl":"https://example.test",'
+                    b'"candidates":[{"selector":"#details","description":"Open details",'
+                    b'"method":"click","arguments":[]}],"analysis":null,'
+                    b'"analysisError":"No object generated: response did not match schema","metrics":{}}'
+                ),
                 b"",
             )
 
@@ -114,7 +127,10 @@ async def test_cloud_observation_forwards_existing_cdp_endpoint(monkeypatch, tmp
             assert body["browserbaseSessionID"] == "session-1"
             assert body["browserbaseConnectUrl"] == "wss://connect.browserbase.com/session-1"
             assert body["stagehandExtensionId"] == "extension-1"
-            return (b'{"version":2,"environment":"BROWSERBASE","observedUrl":"https://example.test","candidates":[],"metrics":{}}', b"")
+            return (
+                b'{"version":2,"environment":"BROWSERBASE","observedUrl":"https://example.test","candidates":[],"metrics":{}}',
+                b"",
+            )
 
     async def create(*args, **kwargs):
         return CloudProcess()
@@ -134,13 +150,18 @@ async def test_cloud_observation_forwards_existing_cdp_endpoint(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_stagehand_rejects_observation_that_leaves_requested_origin(monkeypatch, tmp_path: Path):
+async def test_stagehand_rejects_observation_that_leaves_requested_origin(
+    monkeypatch, tmp_path: Path
+):
     bridge = tmp_path / "observe.mjs"
     bridge.write_text("// bridge")
 
     class WrongOriginProcess(Process):
         async def communicate(self, payload):
-            return (b'{"version":1,"environment":"BROWSERBASE","observedUrl":"https://attacker.test","candidates":[],"metrics":{}}', b"")
+            return (
+                b'{"version":1,"environment":"BROWSERBASE","observedUrl":"https://attacker.test","candidates":[],"metrics":{}}',
+                b"",
+            )
 
     async def create(*args, **kwargs):
         return WrongOriginProcess()
@@ -163,7 +184,9 @@ async def test_stagehand_cloud_observation_requires_browserbase_key(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_stagehand_observed_action_reuses_a_candidate_without_a_free_form_instruction(monkeypatch, tmp_path: Path):
+async def test_stagehand_observed_action_reuses_a_candidate_without_a_free_form_instruction(
+    monkeypatch, tmp_path: Path
+):
     bridge = tmp_path / "observe.mjs"
     bridge.write_text("// bridge")
 
@@ -184,7 +207,9 @@ async def test_stagehand_observed_action_reuses_a_candidate_without_a_free_form_
     monkeypatch.setattr("productlens.providers.stagehand.asyncio.create_subprocess_exec", create)
     result = await StagehandProvider(bridge=bridge).act_observed(
         url="https://example.test",
-        candidate=StagehandCandidate(selector="#details", description="Open details", method="click", arguments=[]),
+        candidate=StagehandCandidate(
+            selector="#details", description="Open details", method="click", arguments=[]
+        ),
     )
 
     assert result.success

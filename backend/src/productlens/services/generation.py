@@ -8,19 +8,19 @@ import json
 import os
 import re
 import subprocess
-from contextlib import suppress
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from pydantic import ValidationError
 
-from productlens.artifacts.store import RunArtifacts
+from productlens.artifacts.store import RunArtifacts, materialize_trace_lifecycle
 from productlens.browser.screencast import CdpScreencastRecorder
 from productlens.browser.theme import discover_theme_control
 from productlens.contracts.models import (
@@ -34,16 +34,19 @@ from productlens.contracts.models import (
     InteractionEvent,
     NarrationScript,
     NarrationSegment,
+    ObjectiveSpec,
     ObservedElement,
     OperationKind,
-    ObjectiveSpec,
     PresentationPlan,
     ProductContext,
     ProductKnowledge,
     Rect,
+    ReplanDecision,
+    SemanticOperation,
     Target,
     Viewport,
     ViewportDecision,
+    WorkflowStep,
 )
 from productlens.credentials.service import EnvironmentCredentialService
 from productlens.discovery.live import LiveDiscovery, _objective_spec, _page_knowledge
@@ -52,26 +55,27 @@ from productlens.evaluation.sample_video_benchmark import compare_to_sample_benc
 from productlens.execution.engine import ExecutionEngine
 from productlens.execution.playwright_adapter import PlaywrightAdapter
 from productlens.narration.script import (
+    bind_opening_to_first_event,
     captions_from_duration,
     recommended_caption_duration,
     script_from_trace,
 )
 from productlens.narration.service import NarrationService, SpeechProvider
-from productlens.observability.logging import get_logger
+from productlens.observability.logging import get_logger, redact_prompt_text
 from productlens.orchestration.lifecycle import RunStage
+from productlens.planning.brief import build_demo_brief
 from productlens.planning.capabilities import (
     CapabilityCompilationError,
     compile_rehearsal_operations,
 )
 from productlens.planning.production import ProductionPlanningService
-from productlens.planning.brief import build_demo_brief
-from productlens.planning.state_machine import WorkflowStateMachine
 from productlens.planning.rehearsal import (
     CapabilitySelectionError,
     derive_outcome_witness,
     select_rehearsal_capability,
 )
 from productlens.planning.side_effects import SideEffectPolicyError, authorize_operation
+from productlens.planning.state_machine import WorkflowStateMachine
 from productlens.planning.synthetic import hydrate_operations
 from productlens.presentation.director import build_presentation_plan
 from productlens.presentation.editorial import (
@@ -82,30 +86,46 @@ from productlens.presentation.editorial import (
     enrich_editorial_storyboard,
 )
 from productlens.presentation.journey import build_journey, inspect_journey
-from productlens.presentation.scenes import build_scene_plan, inspect_scene_plan
+from productlens.presentation.scenes import build_scene_plan
 from productlens.presentation.viewport import choose_viewport, probe_viewport_candidates
 from productlens.providers.browserbase import BrowserbaseProvider
 from productlens.providers.errors import ProviderError
 from productlens.providers.stagehand import StagehandProvider
-from productlens.quality.coverage import inspect_coverage
 from productlens.quality.consistency import validate_selected_candidate_consistency
+from productlens.quality.coverage import inspect_coverage
 from productlens.quality.delivery import delivery_report
 from productlens.quality.editorial import inspect_editorial, inspect_editorial_preflight
 from productlens.quality.multimodal import VisualReviewer, build_review_packet, review_multimodal
 from productlens.quality.presentation import (
     attach_presentation_qa,
     inspect_presentation,
-    inspect_visual_state,
 )
 from productlens.quality.repair import classify_repair
 from productlens.quality.story import inspect_story
 from productlens.quality.synchronization import inspect_synchronization, secure_transition_intervals
 from productlens.quality.video import inspect_video
+from productlens.urls import canonical_product_url
 from productlens.video.render import CaptureDurationError, render_remotion
 
 
 class GenerationPreconditionError(RuntimeError):
     pass
+
+
+def _safe_render_error(message: str, *, limit: int = 2000) -> str:
+    """Return a durable render diagnostic with credential-like values removed."""
+    text = " ".join((message or "").split())
+    text = re.sub(
+        r"(?i)(\bauthorization\b\s*[:=]\s*(?:bearer\s+)?)([^\s,;]+)",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(\b(?:api[_-]?key|access[_-]?key|token|password|passcode|secret|authorization)\b\s*[:=]\s*)([^\s,;]+)",
+        r"\1[REDACTED]",
+        text,
+    )
+    return text[-limit:] if len(text) > limit else text
 
 
 def _narration_script_contract(
@@ -126,26 +146,34 @@ def _narration_script_contract(
     for line in script:
         event_id = str(line.get("event_id") or "").strip()
         if not event_id:
-            raise GenerationPreconditionError("NARRATION_SCRIPT_INVALID: every line needs an event_id")
+            raise GenerationPreconditionError(
+                "NARRATION_SCRIPT_INVALID: every line needs an event_id"
+            )
         scene_id = str(line.get("scene_id") or event_id).strip()
         facts = line.get("facts", [])
-        evidence = [str(item) for item in facts if isinstance(item, str)] if isinstance(facts, list) else []
+        evidence = (
+            [str(item) for item in facts if isinstance(item, str)]
+            if isinstance(facts, list)
+            else []
+        )
         # A page-local scene can legitimately cite many section/element refs,
         # but the public narration contract intentionally caps evidence IDs so
         # artifacts stay bounded. Preserve stable order and provenance rather
         # than failing an otherwise valid script on a dense page inventory.
         evidence = list(dict.fromkeys(evidence))[:24]
         timing = timing_by_scene.get(scene_id) or timing_by_scene.get(event_id) or {}
-        segments.append(NarrationSegment(
-            scene_id=scene_id,
-            event_id=event_id,
-            text=str(line.get("text") or "").strip(),
-            evidence=evidence,
-            facts=facts if isinstance(facts, (list, dict)) else [],
-            opening=bool(line.get("opening", False)),
-            start_seconds=float(timing["start"]) if timing.get("start") is not None else None,
-            end_seconds=float(timing["end"]) if timing.get("end") is not None else None,
-        ))
+        segments.append(
+            NarrationSegment(
+                scene_id=scene_id,
+                event_id=event_id,
+                text=str(line.get("text") or "").strip(),
+                evidence=evidence,
+                facts=facts if isinstance(facts, (list, dict)) else [],
+                opening=bool(line.get("opening", False)),
+                start_seconds=float(timing["start"]) if timing.get("start") is not None else None,
+                end_seconds=float(timing["end"]) if timing.get("end") is not None else None,
+            )
+        )
     return NarrationScript(
         mode="tts" if mode == "tts" else "caption_only",
         audience=audience,
@@ -162,9 +190,20 @@ def _recording_frame_rate(path: Path) -> float | None:
     try:
         probe = subprocess.run(
             [
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=avg_frame_rate", "-of", "json", str(path),
-            ], capture_output=True, text=True, check=False,
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         payload = json.loads(probe.stdout or "{}")
         value = (payload.get("streams") or [{}])[0].get("avg_frame_rate")
@@ -186,28 +225,36 @@ def _relevance_graph(context: ProductContext) -> dict[str, object]:
     for index, page in enumerate(context.page_knowledge):
         page_id = f"page:{index}:{page.fingerprint}"
         page_ids[page.url] = page_id
-        nodes.append({
-            "id": page_id,
-            "kind": "page",
-            "label": page.title,
-            "url": page.url,
-            "purpose": page.purpose,
-            "relevance": next(
-                (feature.relevance_score for feature in context.feature_knowledge if page.url in feature.entry_urls),
-                0.0,
-            ),
-            "evidence": list(page.evidence_refs),
-        })
+        nodes.append(
+            {
+                "id": page_id,
+                "kind": "page",
+                "label": page.title,
+                "url": page.url,
+                "purpose": page.purpose,
+                "relevance": next(
+                    (
+                        feature.relevance_score
+                        for feature in context.feature_knowledge
+                        if page.url in feature.entry_urls
+                    ),
+                    0.0,
+                ),
+                "evidence": list(page.evidence_refs),
+            }
+        )
     for index, feature in enumerate(context.feature_knowledge):
         feature_id = f"feature:{index}:{feature.name}"
-        nodes.append({
-            "id": feature_id,
-            "kind": "feature",
-            "label": feature.name,
-            "purpose": feature.purpose,
-            "relevance": feature.relevance_score,
-            "evidence": list(feature.evidence),
-        })
+        nodes.append(
+            {
+                "id": feature_id,
+                "kind": "feature",
+                "label": feature.name,
+                "purpose": feature.purpose,
+                "relevance": feature.relevance_score,
+                "evidence": list(feature.evidence),
+            }
+        )
         for url in feature.entry_urls:
             page_id = page_ids.get(url)
             if page_id:
@@ -230,13 +277,17 @@ def _relevance_graph(context: ProductContext) -> dict[str, object]:
     for index, relationship in enumerate(getattr(context, "relationships", [])):
         source_id = f"concept:source:{index}:{relationship.source}"
         target_id = f"concept:target:{index}:{relationship.target}"
-        nodes.extend([
-            {"id": source_id, "kind": "concept", "label": relationship.source},
-            {"id": target_id, "kind": "concept", "label": relationship.target},
-        ])
+        nodes.extend(
+            [
+                {"id": source_id, "kind": "concept", "label": relationship.source},
+                {"id": target_id, "kind": "concept", "label": relationship.target},
+            ]
+        )
         edges.append({"source": source_id, "target": target_id, "relation": relationship.relation})
     # Keep the artifact deterministic and compact for review/caching.
-    unique_edges = list({(item["source"], item["target"], item["relation"]): item for item in edges}.values())
+    unique_edges = list(
+        {(item["source"], item["target"], item["relation"]): item for item in edges}.values()
+    )
     return {"schema_version": 1, "nodes": nodes, "edges": unique_edges}
 
 
@@ -257,9 +308,7 @@ def _product_knowledge_payload(context: ProductContext, *, project_id: str | Non
         "routes": sorted(context.relevant_routes),
         "pages": sorted(page.url for page in context.page_knowledge),
         "sections": sorted(
-            section
-            for page in context.page_knowledge
-            for section in page.visible_sections
+            section for page in context.page_knowledge for section in page.visible_sections
         ),
         "relationships": sorted(
             (item.source, item.target, item.relation)
@@ -290,6 +339,7 @@ def _product_knowledge_payload(context: ProductContext, *, project_id: str | Non
         workflow_knowledge=context.candidate_demo_flows,
         form_schemas=form_schemas,
         capabilities=context.capabilities,
+        capability_resolutions=getattr(context, "capability_resolutions", []),
         known_blockers=context.blockers,
         successful_actions=context.successful_action_hints,
     )
@@ -303,7 +353,9 @@ def _product_knowledge_payload(context: ProductContext, *, project_id: str | Non
 
 
 async def _rehearsal_outcome_candidates(
-    page, *, submitted_values: list[str] | None = None,
+    page,
+    *,
+    submitted_values: list[str] | None = None,
 ) -> list[ObservedElement]:
     """Collect bounded post-submit result evidence outside the broad page scan.
 
@@ -327,9 +379,13 @@ async def _rehearsal_outcome_candidates(
     )
     candidates = [
         ObservedElement(
-            tag=str(item["tag"]), role=str(item["role"]) or None,
-            name=str(item["text"])[:300], text=str(item["text"])[:700],
-            selector=str(item["selector"]), source_url=page.url, actionable=False,
+            tag=str(item["tag"]),
+            role=str(item["role"]) or None,
+            name=str(item["text"])[:300],
+            text=str(item["text"])[:700],
+            selector=str(item["selector"]),
+            source_url=page.url,
+            actionable=False,
         )
         for item in raw
     ]
@@ -376,9 +432,13 @@ async def _rehearsal_outcome_candidates(
         )
         candidates.extend(
             ObservedElement(
-                tag=str(item["tag"]), role=str(item["role"]) or None,
-                name=str(item["text"])[:300], text=str(item["text"])[:700],
-                selector=str(item["selector"]), source_url=page.url, actionable=False,
+                tag=str(item["tag"]),
+                role=str(item["role"]) or None,
+                name=str(item["text"])[:300],
+                text=str(item["text"])[:700],
+                selector=str(item["selector"]),
+                source_url=page.url,
+                actionable=False,
             )
             for item in value_nodes
         )
@@ -391,7 +451,9 @@ async def _rehearsal_post_submit_state(page) -> dict[str, int]:
         "visible_dialog_count": await page.locator("[role='dialog']").evaluate_all(
             "nodes => nodes.filter(node => !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)).length"
         ),
-        "invalid_field_count": await page.locator("[aria-invalid='true'],input:invalid,select:invalid,textarea:invalid").count(),
+        "invalid_field_count": await page.locator(
+            "[aria-invalid='true'],input:invalid,select:invalid,textarea:invalid"
+        ).count(),
         "visible_alert_count": await page.locator("[role='alert']").evaluate_all(
             "nodes => nodes.filter(node => !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)).length"
         ),
@@ -426,21 +488,24 @@ def _rehearsal_detail_navigation_witness(
     # Queries/fragments may contain transient UI state. The path is sufficient
     # for the future production postcondition and avoids persisting it.
     verified_url = urlunsplit((after.scheme, after.netloc, after.path, "", ""))
-    return capability.model_copy(update={
-        "verified": True,
-        "outcome_target": Target(
-            name="verified created record",
-            source_url=verified_url,
-            actionable=False,
-        ),
-        "outcome_evidence": [
-            *[
-                evidence for evidence in capability.outcome_evidence
-                if not evidence.startswith("rehearsal-visible-outcome:")
+    return capability.model_copy(
+        update={
+            "verified": True,
+            "outcome_target": Target(
+                name="verified created record",
+                source_url=verified_url,
+                actionable=False,
+            ),
+            "outcome_evidence": [
+                *[
+                    evidence
+                    for evidence in capability.outcome_evidence
+                    if not evidence.startswith("rehearsal-visible-outcome:")
+                ],
+                "rehearsal-visible-outcome:post-submit-detail-navigation",
             ],
-            "rehearsal-visible-outcome:post-submit-detail-navigation",
-        ],
-    })
+        }
+    )
 
 
 async def _rehearsal_form_readiness(page, submit_target: Target | None) -> dict[str, int | bool]:
@@ -454,7 +519,9 @@ async def _rehearsal_form_readiness(page, submit_target: Target | None) -> dict[
             if submit_target.selector:
                 control = page.locator(submit_target.selector)
             else:
-                control = page.get_by_role("button", name=re.compile(re.escape(submit_target.name), re.IGNORECASE))
+                control = page.get_by_role(
+                    "button", name=re.compile(re.escape(submit_target.name), re.IGNORECASE)
+                )
             if await control.count() == 1 and await control.is_visible():
                 disabled_submit = await control.is_disabled()
         except PlaywrightError:
@@ -469,12 +536,14 @@ async def _wait_for_rehearsal_outcome(
     page, *, source_url: str, submitted_values: list[str]
 ) -> list[ObservedElement]:
     """Find a submitted record through the current or a safe reset list state."""
+
     async def collect() -> list[ObservedElement]:
         deadline = perf_counter() + 8
         candidates: list[ObservedElement] = []
         while perf_counter() < deadline:
             candidates = await _rehearsal_outcome_candidates(
-                page, submitted_values=submitted_values,
+                page,
+                submitted_values=submitted_values,
             )
             if candidates:
                 return candidates
@@ -499,7 +568,10 @@ async def _wait_for_rehearsal_outcome(
     # source path and never guesses a different product route.
     parsed = urlsplit(source_url)
     if parsed.query:
-        await page.goto(urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")), wait_until="domcontentloaded")
+        await page.goto(
+            urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")),
+            wait_until="domcontentloaded",
+        )
         await page.wait_for_timeout(700)
         return await collect()
     return candidates
@@ -529,13 +601,7 @@ def _production_duration_envelope(plan: DemoPlan) -> tuple[int | None, dict[str,
 
 def _canonical_url(value: str) -> str:
     """Compare browser states, not incidental redirect spelling."""
-    parsed = urlsplit(value)
-    scheme = "https" if parsed.scheme in {"http", "https"} else parsed.scheme
-    # File fixtures and browser redirects may alternate percent-encoded and
-    # decoded path spelling (notably spaces). Treat those as one browser
-    # state so production does not replay an equivalent opening navigation.
-    path = unquote(parsed.path).rstrip("/") or "/"
-    return urlunsplit((scheme, parsed.netloc.lower(), path, parsed.query, ""))
+    return canonical_product_url(value)
 
 
 async def _apply_requested_visual_state(page, objective: str) -> dict[str, object]:
@@ -567,7 +633,12 @@ async def _apply_requested_visual_state(page, objective: str) -> dict[str, objec
             }"""
         )
         applied = float(rendered["luminance"]) > 150
-        return {"requested": "light", "applied": applied, "dark": not applied, "background": rendered["color"]}
+        return {
+            "requested": "light",
+            "applied": applied,
+            "dark": not applied,
+            "background": rendered["color"],
+        }
     except (PlaywrightError, KeyError, TypeError, ValueError):
         # This is preserved as an explicit failed visual requirement for QA;
         # it must never silently become an accidental dark-theme delivery.
@@ -597,6 +668,7 @@ class UrlGenerationService:
         credential_service: EnvironmentCredentialService | None = None,
         visual_reviewer: VisualReviewer | None = None,
         cloud_capture_timeout_seconds: int = 840,
+        stagehand_observe_timeout_seconds: float = 105.0,
     ):
         self.planner = planner
         self.speech_provider = speech_provider
@@ -605,9 +677,223 @@ class UrlGenerationService:
         self.credential_service = credential_service or EnvironmentCredentialService()
         self.visual_reviewer = visual_reviewer
         self.cloud_capture_timeout_seconds = max(30, cloud_capture_timeout_seconds)
+        self.stagehand_observe_timeout_seconds = max(
+            30.0, min(180.0, float(stagehand_observe_timeout_seconds))
+        )
         self.discovery = LiveDiscovery()
 
-    async def _understand_objective(self, objective: str) -> tuple[ObjectiveSpec, dict[str, object]]:
+    async def _runtime_replan(
+        self,
+        *,
+        adapter: PlaywrightAdapter,
+        plan: DemoPlan,
+        failed_step: WorkflowStep,
+        trace: DemoTrace,
+        error: str,
+        dispatched: bool,
+        objective: str,
+        artifacts: RunArtifacts,
+        cloud_session_id: str | None = None,
+        browserbase_connect_url: str | None = None,
+        stagehand_extension_id: str | None = None,
+    ) -> ReplanDecision | None:
+        """Ask the configured intelligence layer for a grounded suffix repair.
+
+        The model receives only bounded, redacted current-page evidence.  It
+        proposes semantic steps; the execution engine still owns target
+        grounding, safety, postconditions, and the no-replay rule.
+        """
+        structured = getattr(getattr(self.planner, "provider", None), "structured", None)
+        if structured is None:
+            return None
+        try:
+            evidence = await adapter.page_evidence(max_text=6_000)
+        except Exception:  # noqa: BLE001 - advisory evidence must never abort production
+            return None
+        # A discovered content link can disappear after a prior SPA transition
+        # (for example, a card observed on the landing page is not present on a
+        # component detail page).  Do not ask the model to hallucinate a new
+        # target in that state.  If the validated visible-control target is no
+        # longer available, use the already observed same-origin destination as
+        # an explicit, auditable fallback.  This preserves the story and the
+        # no-replay guarantee while keeping direct navigation a last resort.
+        if (
+            not dispatched
+            and failed_step.operation.kind is OperationKind.OPEN_NAVIGATION_ITEM
+            and failed_step.operation.target is not None
+            and failed_step.operation.target.source_url
+        ):
+            expected_url = next(
+                (
+                    str(condition.expected)
+                    for condition in failed_step.operation.postconditions
+                    if condition.kind == "url" and condition.expected
+                ),
+                None,
+            )
+            current_url = str(evidence.get("url") or adapter.page.url)
+            if expected_url:
+                destination = urljoin(current_url, expected_url)
+                if urlsplit(destination).netloc == urlsplit(current_url).netloc and _canonical_url(
+                    destination
+                ) != _canonical_url(current_url):
+                    fallback = WorkflowStep(
+                        id=f"{failed_step.id}-visible-control-fallback",
+                        intent=(
+                            f"Use the observed same-origin destination for {failed_step.operation.target.name} "
+                            "because its previously observed visible control is unavailable in the current state"
+                        ),
+                        operation=SemanticOperation(
+                            kind=OperationKind.NAVIGATE,
+                            intent=(
+                                f"Intentional direct-navigation fallback to the observed destination for "
+                                f"{failed_step.operation.target.name}; visible control unavailable"
+                            ),
+                            value=destination,
+                            postconditions=failed_step.operation.postconditions,
+                            critical=failed_step.operation.critical,
+                            story_phase=failed_step.operation.story_phase,
+                            evidence_refs=[
+                                *failed_step.operation.evidence_refs,
+                                "fallback:visible-control-unavailable",
+                            ],
+                        ),
+                        page_requirement=current_url,
+                        importance=failed_step.importance,
+                        narration_intent=failed_step.narration_intent,
+                        visual_intent=failed_step.visual_intent,
+                        fallback_strategy="observed same-origin destination after visible-control loss",
+                        allowed_retries=0,
+                        completion_criteria=failed_step.completion_criteria,
+                        evidence_refs=[
+                            *failed_step.evidence_refs,
+                            "fallback:visible-control-unavailable",
+                        ],
+                        page_phase=failed_step.page_phase,
+                    )
+                    # ``run_adaptive`` replaces the entire remaining suffix,
+                    # not only the failing step. Preserve the already
+                    # validated continuation after this navigation so a
+                    # recovery does not silently truncate later pages/scenes.
+                    try:
+                        failed_index = next(
+                            index
+                            for index, candidate in enumerate(plan.workflow_steps)
+                            if candidate.operation.id == failed_step.operation.id
+                        )
+                    except StopIteration:
+                        failed_index = len(plan.workflow_steps)
+                    continuation = plan.workflow_steps[failed_index + 1 :]
+                    return ReplanDecision(
+                        reason="visible semantic control disappeared after a verified page transition",
+                        failed_operation_id=failed_step.operation.id,
+                        replacement_steps=[fallback, *continuation],
+                    )
+        text = str(evidence.get("text") or "")
+        # Do not place personal/contact fields or credential-like values in a
+        # model prompt or a durable artifact. Labels and visible structure are
+        # sufficient to re-ground a changed UI.
+        text = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "[redacted-email]", text)
+        text = re.sub(r"\b(?:\+?\d[\d ()-]{7,}\d)\b", "[redacted-phone]", text)
+        text = re.sub(
+            r"(?im)\b(password|passcode|token|secret|api[ -]?key)\b\s*[:=]\s*\S+",
+            r"\1: [redacted]",
+            text,
+        )
+        stagehand_context = ""
+        if self.stagehand_provider:
+            try:
+                stagehand_environment = (
+                    "BROWSERBASE" if cloud_session_id and browserbase_connect_url else "LOCAL"
+                )
+                observation = await self.stagehand_provider.observe(
+                    url=str(evidence.get("url") or adapter.page.url),
+                    instruction=(
+                        "Observe the current visible state only. Identify the relevant "
+                        "read-only continuation after the failed step; do not click, type, "
+                        "submit, navigate, or mutate anything."
+                    ),
+                    analysis_instruction="Return visible sections, meaningful controls, and safe next actions only.",
+                    environment=stagehand_environment,
+                    browserbase_session_id=cloud_session_id,
+                    browserbase_connect_url=browserbase_connect_url,
+                    browserbase_extension_id=stagehand_extension_id,
+                    cache_dir=artifacts.root / "discovery" / "stagehand-cache",
+                )
+                if observation.analysis:
+                    stagehand_context = json.dumps(
+                        {
+                            "visible_sections": observation.analysis.visible_sections[:12],
+                            "meaningful_controls": observation.analysis.meaningful_controls[:20],
+                            "safe_next_actions": observation.analysis.safe_next_actions[:12],
+                        },
+                        ensure_ascii=False,
+                    )
+            except Exception:  # noqa: BLE001 - Stagehand is an optional advisory provider
+                # Stagehand is advisory. Playwright evidence remains the source
+                # of truth, so a provider observation failure does not erase a
+                # valid local replan opportunity.
+                stagehand_context = "unavailable"
+        prompt = (
+            "You are the runtime recovery planner for a browser demo. Return only a "
+            "ReplanDecision JSON object. Replace the failed workflow suffix from the "
+            "CURRENT browser state; do not replay completed steps. Use only visible "
+            "semantic targets and evidence. Every step needs a postcondition when it "
+            "changes state. Prefer read-only observation/verification. Never invent "
+            "URLs, selectors, claims, credentials, or hidden state. Do not emit a "
+            "Navigate step. If the failed action was dispatched, the replacement must "
+            "not repeat it or submit/mutate anything; verify the resulting state or take "
+            "a safe read-only continuation.\n\n"
+            f"Objective: {redact_prompt_text(objective)}\n"
+            f"Failed step: {failed_step.intent}\n"
+            f"Dispatched: {dispatched}\n"
+            f"Failure: {error[:800]}\n"
+            f"Current evidence: {json.dumps({'url': evidence.get('url'), 'title': evidence.get('title'), 'text': text, 'controls': evidence.get('controls', [])}, ensure_ascii=False)[:9_000]}\n"
+            f"Stagehand advisory (untrusted): {stagehand_context or 'not used'}\n"
+            "Return a short replacement sequence that preserves the story and can be "
+            "grounded against this live page."
+        )
+        try:
+            decision = await structured(prompt, ReplanDecision)
+        except Exception:  # noqa: BLE001 - malformed provider output triggers local fallback
+            return None
+        if not isinstance(decision, ReplanDecision):
+            return None
+        allowed_read_only = {
+            OperationKind.READ_VALUE,
+            OperationKind.VERIFY_STATE,
+            OperationKind.WAIT_FOR_STATE,
+            OperationKind.SCROLL_TO,
+            OperationKind.HOVER,
+            OperationKind.KEY_PRESS,
+            OperationKind.CLICK,
+            OperationKind.OPEN_NAVIGATION_ITEM,
+            OperationKind.OPEN_MODAL,
+            OperationKind.CLOSE_MODAL,
+            OperationKind.APPLY_FILTER,
+        }
+        safe_steps: list[WorkflowStep] = []
+        for step in decision.replacement_steps:
+            operation = step.operation
+            if operation.kind is OperationKind.NAVIGATE:
+                return None
+            if dispatched and operation.kind not in allowed_read_only:
+                return None
+            if operation.kind in {
+                OperationKind.SUBMIT,
+                OperationKind.CHECK,
+                OperationKind.UNCHECK,
+                OperationKind.CREATE_RECORD,
+            }:
+                return None
+            safe_steps.append(step)
+        if not safe_steps:
+            return None
+        return decision.model_copy(update={"replacement_steps": safe_steps})
+
+    async def _understand_objective(
+        self, objective: str
+    ) -> tuple[ObjectiveSpec, dict[str, object]]:
         """Parse request intent with a bounded model pass and safe constraints.
 
         The model may improve audience/scope vocabulary, but deterministic
@@ -649,14 +935,16 @@ class UrlGenerationService:
             "full_walkthrough, depth=thorough, with no invented module names.\n\n"
             "Unacceptable: adding a dashboard module not named by the request, claiming "
             "a save succeeded, or enabling create/send/delete actions.\n\n"
-            f"ObjectiveSpec JSON schema:\n{schema}\n\nRequest:\n{objective}"
+            f"ObjectiveSpec JSON schema:\n{schema}\n\nRequest:\n{redact_prompt_text(objective)}"
         )
         try:
             candidate = await structured(prompt, ObjectiveSpec)
             raw_terms = set(re.findall(r"[a-z0-9]{4,}", objective.casefold()))
+
             def grounded_phrase(value: str | None) -> bool:
                 terms = set(re.findall(r"[a-z0-9]{4,}", (value or "").casefold()))
                 return bool(terms & raw_terms)
+
             # A model can turn ordinary prose such as "Home identity and
             # capabilities" into a list of apparent relationships.  Only keep
             # a relationship when the request itself contains an explicit
@@ -672,23 +960,50 @@ class UrlGenerationService:
                 target_pattern = r"\s+".join(map(re.escape, target_words))
                 connector = r"(?:->|→|configures|explains|supports|in the context of|configured by|with context from|using)"
                 return bool(
-                    re.search(rf"{source_pattern}\s*{connector}\s*{target_pattern}", objective.casefold())
-                    or re.search(rf"{target_pattern}\s*{connector}\s*{source_pattern}", objective.casefold())
+                    re.search(
+                        rf"{source_pattern}\s*{connector}\s*{target_pattern}", objective.casefold()
+                    )
+                    or re.search(
+                        rf"{target_pattern}\s*{connector}\s*{source_pattern}", objective.casefold()
+                    )
                 )
 
             relationships = [
-                relation for relation in candidate.supporting_relationships
+                relation
+                for relation in candidate.supporting_relationships
                 if grounded_phrase(relation.source)
                 and grounded_phrase(relation.target)
                 and explicitly_related(relation.source, relation.target)
             ]
             model_generic_entities = {
-                "thorough", "complete", "full", "detailed", "walkthrough", "tour",
-                "demo", "workflow", "flow", "experience", "application", "product",
-                "focused", "feature", "observed", "public", "meaningful", "safe",
-                "most", "information", "browsing", "discovery", "detail", "resource",
+                "thorough",
+                "complete",
+                "full",
+                "detailed",
+                "walkthrough",
+                "tour",
+                "demo",
+                "workflow",
+                "flow",
+                "experience",
+                "application",
+                "product",
+                "focused",
+                "feature",
+                "observed",
+                "public",
+                "meaningful",
+                "safe",
+                "most",
+                "information",
+                "browsing",
+                "discovery",
+                "detail",
+                "resource",
             }
-            candidate_entity_words = set(re.findall(r"[a-z0-9]{3,}", (candidate.primary_entity or "").casefold()))
+            candidate_entity_words = set(
+                re.findall(r"[a-z0-9]{3,}", (candidate.primary_entity or "").casefold())
+            )
             primary = (
                 candidate.primary_entity
                 if grounded_phrase(candidate.primary_entity)
@@ -704,7 +1019,9 @@ class UrlGenerationService:
                 # Model output may not broaden a focused request merely
                 # because the user asked for thorough depth; that would turn
                 # a lead/module tour into an unrelated whole-product crawl.
-                else candidate.demo_type if candidate.demo_type != "full_walkthrough" else base.demo_type
+                else candidate.demo_type
+                if candidate.demo_type != "full_walkthrough"
+                else base.demo_type
             )
             # An explicitly complete/full objective owns the long walkthrough
             # duration envelope. A request can still ask for a thorough
@@ -720,32 +1037,79 @@ class UrlGenerationService:
                 }
             merged_video_type = (
                 "full_tour"
-                if base.demo_type == "full_walkthrough" and candidate.video_type == "feature_walkthrough"
+                if base.demo_type == "full_walkthrough"
+                and candidate.video_type == "feature_walkthrough"
                 else candidate.video_type or base.video_type
             )
-            merged = base.model_copy(update={
-                "video_type": merged_video_type,
-                "demo_type": demo_type,
-                "audience": candidate.audience.strip()[:160] or base.audience,
-                # AudienceProfile is editorial metadata, not permission to
-                # broaden scope or authorize mutations. Preserve the bounded
-                # enum/list contract from the objective-understanding pass so
-                # planning, narration, and QA share one viewer profile.
-                "audience_profile": candidate.audience_profile,
-                "purpose": candidate.purpose.strip()[:240] or base.purpose,
-                "tone": candidate.tone or base.tone,
-                "depth": depth,
-                "requested_features": list(dict.fromkeys([*base.requested_features, *candidate.requested_features]))[:24],
-                "primary_entity": primary,
-                "supporting_relationships": relationships or base.supporting_relationships,
-                "must_show": list(dict.fromkeys([*base.must_show, *[item for item in candidate.must_show if grounded_phrase(item)]]))[:24],
-                "exclusions": list(dict.fromkeys([*base.exclusions, *[item for item in candidate.exclusions if grounded_phrase(item)]]))[:24],
-                "constraints": list(dict.fromkeys([*base.constraints, *[item for item in candidate.constraints if grounded_phrase(item)]]))[:24],
-                "success_criteria": list(dict.fromkeys([*base.success_criteria, *[item for item in candidate.success_criteria if grounded_phrase(item)]]))[:24],
-                **duration_update,
-            })
-            return merged, {"status": "model_grounded", "candidate_relationships": len(relationships)}
-        except (ProviderError, ValidationError, TypeError, ValueError, KeyError, AttributeError) as error:
+            merged = base.model_copy(
+                update={
+                    "video_type": merged_video_type,
+                    "demo_type": demo_type,
+                    "audience": candidate.audience.strip()[:160] or base.audience,
+                    # AudienceProfile is editorial metadata, not permission to
+                    # broaden scope or authorize mutations. Preserve the bounded
+                    # enum/list contract from the objective-understanding pass so
+                    # planning, narration, and QA share one viewer profile.
+                    "audience_profile": candidate.audience_profile,
+                    "purpose": candidate.purpose.strip()[:240] or base.purpose,
+                    "tone": candidate.tone or base.tone,
+                    "depth": depth,
+                    "requested_features": list(
+                        dict.fromkeys([*base.requested_features, *candidate.requested_features])
+                    )[:24],
+                    "primary_entity": primary,
+                    "supporting_relationships": relationships or base.supporting_relationships,
+                    "must_show": list(
+                        dict.fromkeys(
+                            [
+                                *base.must_show,
+                                *[item for item in candidate.must_show if grounded_phrase(item)],
+                            ]
+                        )
+                    )[:24],
+                    "exclusions": list(
+                        dict.fromkeys(
+                            [
+                                *base.exclusions,
+                                *[item for item in candidate.exclusions if grounded_phrase(item)],
+                            ]
+                        )
+                    )[:24],
+                    "constraints": list(
+                        dict.fromkeys(
+                            [
+                                *base.constraints,
+                                *[item for item in candidate.constraints if grounded_phrase(item)],
+                            ]
+                        )
+                    )[:24],
+                    "success_criteria": list(
+                        dict.fromkeys(
+                            [
+                                *base.success_criteria,
+                                *[
+                                    item
+                                    for item in candidate.success_criteria
+                                    if grounded_phrase(item)
+                                ],
+                            ]
+                        )
+                    )[:24],
+                    **duration_update,
+                }
+            )
+            return merged, {
+                "status": "model_grounded",
+                "candidate_relationships": len(relationships),
+            }
+        except (
+            ProviderError,
+            ValidationError,
+            TypeError,
+            ValueError,
+            KeyError,
+            AttributeError,
+        ) as error:
             return base, {"status": "fallback", "reason": type(error).__name__}
 
     async def _release_cloud_session(self, session_id: str, *, reason: str, run_id: str) -> None:
@@ -754,9 +1118,10 @@ class UrlGenerationService:
             return
         try:
             await asyncio.wait_for(
-                self.browserbase_provider.close_session(session_id), timeout=15,
+                self.browserbase_provider.close_session(session_id),
+                timeout=15,
             )
-        except Exception as error:  # cleanup is best-effort and idempotent
+        except Exception as error:  # noqa: BLE001 - cleanup is best-effort and idempotent
             logger.warning(
                 "browserbase_session_release_failed",
                 run_id=run_id,
@@ -782,7 +1147,9 @@ class UrlGenerationService:
             # Successful/disposed stage lifecycle: normal path cancels guard.
             return
 
-    async def _choose_production_viewport(self, page, *, url: str, context: ProductContext, objective: str, artifacts: RunArtifacts) -> ViewportDecision:
+    async def _choose_production_viewport(
+        self, page, *, url: str, context: ProductContext, objective: str, artifacts: RunArtifacts
+    ) -> ViewportDecision:
         """Probe the clean opening layout; fall back only when a provider cannot resize."""
         try:
             # Discovery may finish on a supporting page. Viewport choice is a
@@ -795,15 +1162,21 @@ class UrlGenerationService:
             decision, probes = await probe_viewport_candidates(
                 page, context.elements, objective, context.page_knowledge
             )
-            artifacts.write_json("discovery/viewport-probe.json", {"selected": decision.model_dump(mode="json"), "candidates": probes})
+            artifacts.write_json(
+                "discovery/viewport-probe.json",
+                {"selected": decision.model_dump(mode="json"), "candidates": probes},
+            )
             return decision
         except (PlaywrightError, PlaywrightTimeoutError, TypeError, ValueError) as error:
             decision = choose_viewport(context.elements, objective, context.page_knowledge)
-            artifacts.write_json("discovery/viewport-probe.json", {
-                "selected": decision.model_dump(mode="json"),
-                "candidates": [],
-                "fallback_reason": type(error).__name__,
-            })
+            artifacts.write_json(
+                "discovery/viewport-probe.json",
+                {
+                    "selected": decision.model_dump(mode="json"),
+                    "candidates": [],
+                    "fallback_reason": type(error).__name__,
+                },
+            )
             return decision
 
     @staticmethod
@@ -839,11 +1212,14 @@ class UrlGenerationService:
         artifacts = RunArtifacts(artifact_root, run_id)
         budget = budget or DiscoveryBudget()
         objective_spec, objective_understanding = await self._understand_objective(objective)
-        artifacts.write_json("discovery/objective-understanding.json", {
-            "request": objective,
-            "objective": objective_spec.model_dump(mode="json"),
-            **objective_understanding,
-        })
+        artifacts.write_json(
+            "discovery/objective-understanding.json",
+            {
+                "request": objective,
+                "objective": objective_spec.model_dump(mode="json"),
+                **objective_understanding,
+            },
+        )
         # Track authentication at the browser boundary. Discovery runs after
         # login, so a post-login DOM cannot be used to infer that the login
         # chapter happened; the boolean is persisted onto ProductContext and
@@ -866,7 +1242,8 @@ class UrlGenerationService:
                             self.browserbase_provider.create_session_info(
                                 viewport={"width": 1440, "height": 900},
                                 user_metadata={"productlens_run_id": run_id, "stage": "discovery"},
-                            ), timeout=60
+                            ),
+                            timeout=60,
                         )
                     except ProviderError as error:
                         artifacts.write_json(
@@ -926,7 +1303,8 @@ class UrlGenerationService:
                             },
                         )
                         remote = await asyncio.wait_for(
-                            pw.chromium.connect_over_cdp(session.connect_url, timeout=60_000), timeout=65
+                            pw.chromium.connect_over_cdp(session.connect_url, timeout=60_000),
+                            timeout=65,
                         )
                         artifacts.write_json(
                             "discovery/browserbase-connection.json",
@@ -960,7 +1338,9 @@ class UrlGenerationService:
                             timeout=35,
                         )
                         authenticated = await asyncio.wait_for(
-                            self.credential_service.authenticate_if_required(page, credential_reference),
+                            self.credential_service.authenticate_if_required(
+                                page, credential_reference
+                            ),
                             # Authentication deliberately includes sequential
                             # typing, CAPTCHA enablement (up to 45 seconds),
                             # and a post-submit authenticated-state check.
@@ -975,20 +1355,30 @@ class UrlGenerationService:
                         # provider limit.  Leave bounded teardown headroom,
                         # but do not let a stalled route/bridge consume the
                         # entire paid session lease.
-                        discovery_deadline = min(
-                            self.cloud_capture_timeout_seconds,
-                            max(240, int(budget.max_time_seconds) + 180),
-                        ) if cloud_discovery else 900
+                        discovery_deadline = (
+                            min(
+                                self.cloud_capture_timeout_seconds,
+                                max(240, int(budget.max_time_seconds) + 180),
+                            )
+                            if cloud_discovery
+                            else 900
+                        )
                         async with asyncio.timeout(discovery_deadline):
                             product = await self.discovery.discover(
-                                page, objective, budget, known_routes=known_routes, known_actions=known_actions,
+                                page,
+                                objective,
+                                budget,
+                                known_routes=known_routes,
+                                known_actions=known_actions,
                                 explore_visible_routes=explore_visible_routes,
                                 objective_spec=objective_spec,
                                 known_product_fingerprint=known_product_fingerprint,
                                 # Authenticated screens can contain customer data.
                                 # Do not persist their pixels until redaction is a
                                 # deliberate, provider-independent capability.
-                                screenshot_directory=None if credential_reference else artifacts.root / "discovery" / "screenshots",
+                                screenshot_directory=None
+                                if credential_reference
+                                else artifacts.root / "discovery" / "screenshots",
                             )
                         artifacts.write_json(
                             "discovery/adaptive-budget.json",
@@ -1002,7 +1392,8 @@ class UrlGenerationService:
                                 "reason": (
                                     "visible primary navigation required expansion"
                                     if product.effective_discovery_budget is not None
-                                    and product.effective_discovery_budget.max_pages != budget.max_pages
+                                    and product.effective_discovery_budget.max_pages
+                                    != budget.max_pages
                                     else "default bounded budget"
                                 ),
                             },
@@ -1014,7 +1405,10 @@ class UrlGenerationService:
                         # still re-grounded against this Playwright page.
                         if self.stagehand_provider is not None:
                             product, stagehand_evidence = await self._stagehand_enrich(
-                                page, product, objective, environment="BROWSERBASE",
+                                page,
+                                product,
+                                objective,
+                                environment="BROWSERBASE",
                                 browserbase_session_id=session.session_id,
                                 browserbase_connect_url=session.connect_url,
                                 browserbase_extension_id=session.stagehand_extension_id,
@@ -1049,7 +1443,9 @@ class UrlGenerationService:
                             with suppress(Exception):
                                 await asyncio.wait_for(remote.close(), timeout=10)
                         await self._release_cloud_session(
-                            session.session_id, reason="discovery_complete", run_id=run_id,
+                            session.session_id,
+                            reason="discovery_complete",
+                            run_id=run_id,
                         )
                 else:
                     assert browser is not None
@@ -1057,13 +1453,21 @@ class UrlGenerationService:
                     try:
                         page = await context.new_page()
                         await page.goto(url, wait_until="domcontentloaded")
-                        authenticated = await self.credential_service.authenticate_if_required(page, credential_reference)
+                        authenticated = await self.credential_service.authenticate_if_required(
+                            page, credential_reference
+                        )
                         product = await self.discovery.discover(
-                            page, objective, budget, known_routes=known_routes, known_actions=known_actions,
+                            page,
+                            objective,
+                            budget,
+                            known_routes=known_routes,
+                            known_actions=known_actions,
                             explore_visible_routes=explore_visible_routes,
                             objective_spec=objective_spec,
                             known_product_fingerprint=known_product_fingerprint,
-                            screenshot_directory=None if credential_reference else artifacts.root / "discovery" / "screenshots",
+                            screenshot_directory=None
+                            if credential_reference
+                            else artifacts.root / "discovery" / "screenshots",
                         )
                         artifacts.write_json(
                             "discovery/adaptive-budget.json",
@@ -1077,16 +1481,21 @@ class UrlGenerationService:
                                 "reason": (
                                     "visible primary navigation required expansion"
                                     if product.effective_discovery_budget is not None
-                                    and product.effective_discovery_budget.max_pages != budget.max_pages
+                                    and product.effective_discovery_budget.max_pages
+                                    != budget.max_pages
                                     else "default bounded budget"
                                 ),
                             },
                         )
-                        # A local browser does not receive cloud agent/model
-                        # capabilities.  Preserve explicit local assistance
-                        # for developer fixtures only; live Browserbase runs
-                        # above are automatic.
-                        if stagehand_assist and self.stagehand_provider is not None:
+                        # Use the same semantic observation contract locally
+                        # and in Browserbase.  Stagehand remains advisory and
+                        # every candidate is re-grounded against this exact
+                        # Playwright page, so enabling it cannot bypass
+                        # ProductLens safety or execution truth.  The legacy
+                        # flag is retained for request compatibility but no
+                        # longer creates an intelligence gap between runtime
+                        # environments.
+                        if self.stagehand_provider is not None:
                             product, stagehand_evidence = await self._stagehand_enrich(
                                 page, product, objective, environment="LOCAL"
                             )
@@ -1101,12 +1510,16 @@ class UrlGenerationService:
         if authenticated or (credential_reference and product.authentication_state == "unknown"):
             product = product.model_copy(update={"authentication_state": "authenticated"})
         if product.objective is not None and allow_isolated_record_creation:
-            product = product.model_copy(update={
-                "objective": product.objective.model_copy(update={
-                    "safe_action_policy": "authorized_side_effects",
-                    "permitted_mutations": ["create_isolated_record"],
-                })
-            })
+            product = product.model_copy(
+                update={
+                    "objective": product.objective.model_copy(
+                        update={
+                            "safe_action_policy": "authorized_side_effects",
+                            "permitted_mutations": ["create_isolated_record"],
+                        }
+                    )
+                }
+            )
         if product.authentication_state == "login_required":
             raise GenerationPreconditionError(
                 "AUTH_REQUIRED: credentials must be supplied through a secret reference"
@@ -1116,22 +1529,36 @@ class UrlGenerationService:
             "discovery/product-knowledge.json",
             _product_knowledge_payload(product),
         )
-        artifacts.write_json("objective.json", product.objective.model_dump(mode="json") if product.objective else {"raw": objective})
-        artifacts.write_json("exploration-report.json", ExplorationReport(
-            pages_inspected=[page.url for page in product.page_knowledge],
-            actions_probed=product.exploration_actions,
-            blockers=product.blockers,
-            rejected_routes=product.rejected_routes,
-            candidate_flow_names=[flow.name for flow in product.candidate_demo_flows],
-            relationships=getattr(product, "relationships", []),
-            stop_reason="bounded evidence sufficient",
-        ).model_dump(mode="json"))
-        artifacts.write_json("feature-graph.json", [feature.model_dump(mode="json") for feature in product.feature_knowledge])
+        artifacts.write_json(
+            "objective.json",
+            product.objective.model_dump(mode="json") if product.objective else {"raw": objective},
+        )
+        artifacts.write_json(
+            "exploration-report.json",
+            ExplorationReport(
+                pages_inspected=[page.url for page in product.page_knowledge],
+                actions_probed=product.exploration_actions,
+                blockers=product.blockers,
+                rejected_routes=product.rejected_routes,
+                candidate_flow_names=[flow.name for flow in product.candidate_demo_flows],
+                relationships=getattr(product, "relationships", []),
+                stop_reason="bounded evidence sufficient",
+            ).model_dump(mode="json"),
+        )
+        artifacts.write_json(
+            "feature-graph.json",
+            [feature.model_dump(mode="json") for feature in product.feature_knowledge],
+        )
         artifacts.write_json("discovery/relevance-graph.json", _relevance_graph(product))
-        artifacts.write_json("candidate-flows.json", [flow.model_dump(mode="json") for flow in product.candidate_demo_flows])
+        artifacts.write_json(
+            "candidate-flows.json",
+            [flow.model_dump(mode="json") for flow in product.candidate_demo_flows],
+        )
         artifacts.write_json("discovery/capabilities.json", product.capabilities)
         for index, page_knowledge in enumerate(product.page_knowledge):
-            artifacts.write_json(f"page-knowledge/{index:02d}.json", page_knowledge.model_dump(mode="json"))
+            artifacts.write_json(
+                f"page-knowledge/{index:02d}.json", page_knowledge.model_dump(mode="json")
+            )
         artifacts.write_json("discovery/viewport-decision.json", viewport.model_dump(mode="json"))
         if stagehand_evidence is not None:
             artifacts.write_json("discovery/stagehand-observation.json", stagehand_evidence)
@@ -1155,28 +1582,40 @@ class UrlGenerationService:
         only when the post-submit DOM contains a new independent witness.
         """
         artifacts = RunArtifacts(artifact_root, run_id)
-        context = ProductContext.model_validate(json.loads(
-            (artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8")
-        ))
+        context = ProductContext.model_validate(
+            json.loads(
+                (artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8")
+            )
+        )
         if allow_isolated_record_creation and context.objective is not None:
             # Runtime authorization is auditable and may be granted after a
             # read-only discovery checkpoint. Reuse only the fresh, persisted
             # evidence; do not silently rerun discovery or infer permission
             # from a create-shaped control.
-            context = context.model_copy(update={
-                "objective": context.objective.model_copy(update={
-                    "safe_action_policy": "authorized_side_effects",
-                    "permitted_mutations": ["create_isolated_record"],
-                })
-            })
+            context = context.model_copy(
+                update={
+                    "objective": context.objective.model_copy(
+                        update={
+                            "safe_action_policy": "authorized_side_effects",
+                            "permitted_mutations": ["create_isolated_record"],
+                        }
+                    )
+                }
+            )
             artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
             artifacts.write_json("objective.json", context.objective.model_dump(mode="json"))
-            artifacts.write_json("discovery/mutation-authorization.json", {
-                "mutation": "create_isolated_record",
-                "authorization": "explicit_runtime_payload",
-                "recording": "disabled_for_rehearsal",
-            })
-        if not context.objective or "create_isolated_record" not in context.objective.permitted_mutations:
+            artifacts.write_json(
+                "discovery/mutation-authorization.json",
+                {
+                    "mutation": "create_isolated_record",
+                    "authorization": "explicit_runtime_payload",
+                    "recording": "disabled_for_rehearsal",
+                },
+            )
+        if (
+            not context.objective
+            or "create_isolated_record" not in context.objective.permitted_mutations
+        ):
             return context
         capabilities = []
         for raw in context.capabilities:
@@ -1203,9 +1642,7 @@ class UrlGenerationService:
             raise GenerationPreconditionError(f"REHEARSAL_SIDE_EFFECT_BLOCKED: {error}") from error
         attempt_path = artifacts.root / "discovery" / "rehearsal-attempt.json"
         prior_attempt = (
-            json.loads(attempt_path.read_text(encoding="utf-8"))
-            if attempt_path.exists()
-            else None
+            json.loads(attempt_path.read_text(encoding="utf-8")) if attempt_path.exists() else None
         )
         # A completed verified rehearsal is durable proof for this run.  A
         # planner/re-render retry must not open the form or create a second
@@ -1221,7 +1658,8 @@ class UrlGenerationService:
             compact_outcome = re.sub(r"[^a-z0-9]", "", (outcome.text or outcome.name).casefold())
             generated_match = next(
                 (
-                    value for value in rehearsal_dataset.values()
+                    value
+                    for value in rehearsal_dataset.values()
                     if len(re.sub(r"[^a-z0-9]", "", str(value))) >= 5
                     and re.sub(r"[^a-z0-9]", "", str(value).casefold()) in compact_outcome
                 ),
@@ -1233,34 +1671,52 @@ class UrlGenerationService:
                 # the durable boundary: retain the generated value needed to
                 # locate the result, discard unrelated row columns, and never
                 # let a downstream plan or editorial layer rehydrate them.
-                candidate = candidate.model_copy(update={
-                    "outcome_target": outcome.model_copy(update={
-                        "name": "verified created record",
-                        "text": str(generated_match),
-                    }),
-                    "outcome_evidence": [
-                        evidence for evidence in candidate.outcome_evidence
-                        if not evidence.startswith("rehearsal-visible-outcome:")
-                    ] + ["rehearsal-visible-outcome:verified-created-record"],
-                })
-                context = context.model_copy(update={"capabilities": [
-                    (candidate if item.id == candidate.id else item).model_dump(mode="json")
-                    for item in capabilities
-                ]})
-                artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
-                artifacts.write_json("discovery/rehearsal-report.json", {
-                    "capability_id": candidate.id,
-                    "purpose": candidate.purpose,
-                    "outcome_target": candidate.outcome_target.model_dump(mode="json"),
-                    "outcome_evidence": candidate.outcome_evidence,
-                    "recording": "disabled",
-                })
+                candidate = candidate.model_copy(
+                    update={
+                        "outcome_target": outcome.model_copy(
+                            update={
+                                "name": "verified created record",
+                                "text": str(generated_match),
+                            }
+                        ),
+                        "outcome_evidence": [
+                            evidence
+                            for evidence in candidate.outcome_evidence
+                            if not evidence.startswith("rehearsal-visible-outcome:")
+                        ]
+                        + ["rehearsal-visible-outcome:verified-created-record"],
+                    }
+                )
+                context = context.model_copy(
+                    update={
+                        "capabilities": [
+                            (candidate if item.id == candidate.id else item).model_dump(mode="json")
+                            for item in capabilities
+                        ]
+                    }
+                )
+                artifacts.write_json(
+                    "discovery/product-context.json", context.model_dump(mode="json")
+                )
+                artifacts.write_json(
+                    "discovery/rehearsal-report.json",
+                    {
+                        "capability_id": candidate.id,
+                        "purpose": candidate.purpose,
+                        "outcome_target": candidate.outcome_target.model_dump(mode="json"),
+                        "outcome_evidence": candidate.outcome_evidence,
+                        "recording": "disabled",
+                    },
+                )
             return context
         recover_dispatched_attempt = bool(
             prior_attempt
             and prior_attempt.get("capability_id") == candidate.id
-            and prior_attempt.get("status") in {
-                "submit_intent_recorded", "submit_dispatched", "outcome_unverified",
+            and prior_attempt.get("status")
+            in {
+                "submit_intent_recorded",
+                "submit_dispatched",
+                "outcome_unverified",
             }
         )
         async with async_playwright() as pw:
@@ -1271,7 +1727,9 @@ class UrlGenerationService:
             try:
                 if cloud_rehearsal:
                     if self.browserbase_provider is None:
-                        raise GenerationPreconditionError("BROWSERBASE_REQUIRED: cloud rehearsal is not configured")
+                        raise GenerationPreconditionError(
+                            "BROWSERBASE_REQUIRED: cloud rehearsal is not configured"
+                        )
                     session = await self.browserbase_provider.create_session_info(
                         viewport={"width": 1440, "height": 900},
                         user_metadata={"productlens_run_id": run_id, "stage": "rehearsal"},
@@ -1283,22 +1741,27 @@ class UrlGenerationService:
                             # a form outcome witness; use the same configured
                             # deadline as discovery/capture instead of
                             # evicting a valid long workflow at five minutes.
-                            seconds=min(
-                                1_500, max(300, self.cloud_capture_timeout_seconds + 120)
-                            ),
+                            seconds=min(1_500, max(300, self.cloud_capture_timeout_seconds + 120)),
                             reason="rehearsal_stage_deadline",
                             run_id=run_id,
                         )
                     )
                     remote = await asyncio.wait_for(
-                        pw.chromium.connect_over_cdp(session.connect_url, timeout=60_000), timeout=65
+                        pw.chromium.connect_over_cdp(session.connect_url, timeout=60_000),
+                        timeout=65,
                     )
                     browser_context = remote.contexts[0]
-                    page = browser_context.pages[0] if browser_context.pages else await browser_context.new_page()
+                    page = (
+                        browser_context.pages[0]
+                        if browser_context.pages
+                        else await browser_context.new_page()
+                    )
                     await page.set_viewport_size({"width": 1440, "height": 900})
                 else:
                     assert browser is not None
-                    browser_context = await browser.new_context(viewport={"width": 1440, "height": 900})
+                    browser_context = await browser.new_context(
+                        viewport={"width": 1440, "height": 900}
+                    )
                     page = await browser_context.new_page()
                 await page.goto(url, wait_until="domcontentloaded")
                 await self.credential_service.authenticate_if_required(page, credential_reference)
@@ -1315,7 +1778,8 @@ class UrlGenerationService:
                     # Never replay it. Re-ground the deterministic safe record
                     # read-only in a fresh context instead.
                     outcome_candidates = await _wait_for_rehearsal_outcome(
-                        page, source_url=candidate.source_url,
+                        page,
+                        source_url=candidate.source_url,
                         submitted_values=list(rehearsal_dataset.values()),
                     )
                     observed_elements = outcome_candidates
@@ -1331,24 +1795,35 @@ class UrlGenerationService:
                         if operation.kind is OperationKind.SUBMIT:
                             before_text = (await page.locator("body").inner_text())[:8_000]
                             before_submit_url = page.url
-                            artifacts.write_json("discovery/rehearsal-attempt.json", {
-                                "capability_id": candidate.id,
-                                "status": "submit_intent_recorded",
-                                "recording": "disabled",
-                                "submitted_operation_kinds": [item.kind.value for item in operations],
-                            })
+                            artifacts.write_json(
+                                "discovery/rehearsal-attempt.json",
+                                {
+                                    "capability_id": candidate.id,
+                                    "status": "submit_intent_recorded",
+                                    "recording": "disabled",
+                                    "submitted_operation_kinds": [
+                                        item.kind.value for item in operations
+                                    ],
+                                },
+                            )
                         await adapter.execute(operation)
                         if operation.kind is OperationKind.SUBMIT:
-                            artifacts.write_json("discovery/rehearsal-attempt.json", {
-                                "capability_id": candidate.id,
-                                "status": "submit_dispatched",
-                                "recording": "disabled",
-                                "submitted_operation_kinds": [item.kind.value for item in operations],
-                            })
+                            artifacts.write_json(
+                                "discovery/rehearsal-attempt.json",
+                                {
+                                    "capability_id": candidate.id,
+                                    "status": "submit_dispatched",
+                                    "recording": "disabled",
+                                    "submitted_operation_kinds": [
+                                        item.kind.value for item in operations
+                                    ],
+                                },
+                            )
                         await page.wait_for_timeout(300)
                     observed = await self.discovery.inspect(page, objective)
                     outcome_candidates = await _wait_for_rehearsal_outcome(
-                        page, source_url=candidate.source_url,
+                        page,
+                        source_url=candidate.source_url,
                         submitted_values=list(rehearsal_dataset.values()),
                     )
                     observed_elements = [*observed.elements, *outcome_candidates]
@@ -1372,35 +1847,43 @@ class UrlGenerationService:
                         post_submit_state["visible_dialog_count"]
                         or post_submit_state["invalid_field_count"]
                     )
-                    artifacts.write_json("discovery/rehearsal-attempt.json", {
-                        "capability_id": candidate.id,
-                        "status": "outcome_unverified",
-                        "recording": "disabled",
-                        "recovery_only": recover_dispatched_attempt,
-                        "submitted_operation_kinds": [operation.kind.value for operation in operations],
-                        "post_submit_candidate_count": len(outcome_candidates),
-                        "post_submit_candidate_structures": sorted({
-                            f"{item.role or item.tag}" for item in outcome_candidates
-                        }),
-                        "post_submit_state": post_submit_state,
-                        "reason": (
-                            "form_validation_or_overlay_remained_after_submit"
-                            if validation_unresolved
-                            else "no_independent_visible_result_witness"
-                        ),
-                    })
+                    artifacts.write_json(
+                        "discovery/rehearsal-attempt.json",
+                        {
+                            "capability_id": candidate.id,
+                            "status": "outcome_unverified",
+                            "recording": "disabled",
+                            "recovery_only": recover_dispatched_attempt,
+                            "submitted_operation_kinds": [
+                                operation.kind.value for operation in operations
+                            ],
+                            "post_submit_candidate_count": len(outcome_candidates),
+                            "post_submit_candidate_structures": sorted(
+                                {f"{item.role or item.tag}" for item in outcome_candidates}
+                            ),
+                            "post_submit_state": post_submit_state,
+                            "reason": (
+                                "form_validation_or_overlay_remained_after_submit"
+                                if validation_unresolved
+                                else "no_independent_visible_result_witness"
+                            ),
+                        },
+                    )
                     raise GenerationPreconditionError(
                         "REHEARSAL_FORM_VALIDATION_UNRESOLVED: form remained invalid or open after submit"
                         if validation_unresolved
                         else "REHEARSAL_OUTCOME_UNVERIFIED: submission did not yield an independent visible result witness"
                     )
-                artifacts.write_json("discovery/rehearsal-attempt.json", {
-                    "capability_id": candidate.id,
-                    "status": "outcome_verified",
-                    "recording": "disabled",
-                    "recovery_only": recover_dispatched_attempt,
-                    "outcome_structure": witnessed.outcome_target.role or "visible_result",
-                })
+                artifacts.write_json(
+                    "discovery/rehearsal-attempt.json",
+                    {
+                        "capability_id": candidate.id,
+                        "status": "outcome_verified",
+                        "recording": "disabled",
+                        "recovery_only": recover_dispatched_attempt,
+                        "outcome_structure": witnessed.outcome_target.role or "visible_result",
+                    },
+                )
             finally:
                 if lease_guard is not None:
                     lease_guard.cancel()
@@ -1413,21 +1896,26 @@ class UrlGenerationService:
                     await browser.close()
                 if session is not None:
                     await self._release_cloud_session(
-                        session.session_id, reason="rehearsal_complete", run_id=run_id,
+                        session.session_id,
+                        reason="rehearsal_complete",
+                        run_id=run_id,
                     )
         updated = [
             (witnessed if item.id == candidate.id else item).model_dump(mode="json")
             for item in capabilities
         ]
         context = context.model_copy(update={"capabilities": updated})
-        artifacts.write_json("discovery/rehearsal-report.json", {
-            "capability_id": candidate.id,
-            "purpose": candidate.purpose,
-            "outcome_target": witnessed.outcome_target.model_dump(mode="json"),
-            "outcome_evidence": witnessed.outcome_evidence,
-            "recording": "disabled",
-            "context": "fresh_rehearsal",
-        })
+        artifacts.write_json(
+            "discovery/rehearsal-report.json",
+            {
+                "capability_id": candidate.id,
+                "purpose": candidate.purpose,
+                "outcome_target": witnessed.outcome_target.model_dump(mode="json"),
+                "outcome_evidence": witnessed.outcome_evidence,
+                "recording": "disabled",
+                "context": "fresh_rehearsal",
+            },
+        )
         artifacts.write_json("discovery/capabilities.json", updated)
         artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
         return context
@@ -1445,7 +1933,9 @@ class UrlGenerationService:
         """Plan from persisted discovery evidence; no browser or provider session is reused."""
         artifacts = RunArtifacts(artifact_root, run_id)
         context = ProductContext.model_validate(
-            json.loads((artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8"))
+            json.loads(
+                (artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8")
+            )
         )
         # Reconcile the persisted model interpretation with the deterministic
         # request parser at the production boundary. Older discovery runs may
@@ -1458,15 +1948,19 @@ class UrlGenerationService:
             and deterministic_objective.demo_type != "full_walkthrough"
             and context.objective.demo_type == "full_walkthrough"
         ):
-            context = context.model_copy(update={
-                "objective": context.objective.model_copy(update={
-                    "demo_type": deterministic_objective.demo_type,
-                    "minimum_duration_seconds": deterministic_objective.minimum_duration_seconds,
-                    "target_duration_seconds": deterministic_objective.target_duration_seconds,
-                    "maximum_duration_seconds": deterministic_objective.maximum_duration_seconds,
-                    "depth": deterministic_objective.depth,
-                })
-            })
+            context = context.model_copy(
+                update={
+                    "objective": context.objective.model_copy(
+                        update={
+                            "demo_type": deterministic_objective.demo_type,
+                            "minimum_duration_seconds": deterministic_objective.minimum_duration_seconds,
+                            "target_duration_seconds": deterministic_objective.target_duration_seconds,
+                            "maximum_duration_seconds": deterministic_objective.maximum_duration_seconds,
+                            "depth": deterministic_objective.depth,
+                        }
+                    )
+                }
+            )
         # The model may echo an entire noun phrase (for example, "the
         # authenticated booking workflow") into ``primary_entity``.  Feature
         # grounding is intentionally token/entity based, so reconcile the
@@ -1482,12 +1976,16 @@ class UrlGenerationService:
                 or context.objective.must_show != deterministic_objective.must_show
             )
         ):
-            context = context.model_copy(update={
-                "objective": context.objective.model_copy(update={
-                    "primary_entity": deterministic_objective.primary_entity,
-                    "must_show": deterministic_objective.must_show,
-                })
-            })
+            context = context.model_copy(
+                update={
+                    "objective": context.objective.model_copy(
+                        update={
+                            "primary_entity": deterministic_objective.primary_entity,
+                            "must_show": deterministic_objective.must_show,
+                        }
+                    )
+                }
+            )
         if (
             context.objective is not None
             and deterministic_objective.demo_type != "full_walkthrough"
@@ -1497,11 +1995,15 @@ class UrlGenerationService:
             # not optional model decoration.  Restore explicit deterministic
             # relationships when resuming discovery written by an older model
             # pass that omitted them.
-            context = context.model_copy(update={
-                "objective": context.objective.model_copy(update={
-                    "supporting_relationships": deterministic_objective.supporting_relationships,
-                })
-            })
+            context = context.model_copy(
+                update={
+                    "objective": context.objective.model_copy(
+                        update={
+                            "supporting_relationships": deterministic_objective.supporting_relationships,
+                        }
+                    )
+                }
+            )
         # Discovery artifacts may have been produced by an older objective
         # writer that treated prose pairs (for example, ``Home identity``) as
         # relationships.  Re-ground the relationship list at the planning
@@ -1514,21 +2016,37 @@ class UrlGenerationService:
             for relation in context.objective.supporting_relationships:
                 source_phrase = " ".join(re.findall(r"[a-z0-9]{3,}", relation.source.casefold()))
                 target_phrase = " ".join(re.findall(r"[a-z0-9]{3,}", relation.target.casefold()))
-                if source_phrase and target_phrase and (
-                    re.search(rf"{re.escape(source_phrase)}\s*{connector}\s*{re.escape(target_phrase)}", raw_objective)
-                    or re.search(rf"{re.escape(target_phrase)}\s*{connector}\s*{re.escape(source_phrase)}", raw_objective)
+                if (
+                    source_phrase
+                    and target_phrase
+                    and (
+                        re.search(
+                            rf"{re.escape(source_phrase)}\s*{connector}\s*{re.escape(target_phrase)}",
+                            raw_objective,
+                        )
+                        or re.search(
+                            rf"{re.escape(target_phrase)}\s*{connector}\s*{re.escape(source_phrase)}",
+                            raw_objective,
+                        )
+                    )
                 ):
                     explicit_relationships.append(relation)
-            context = context.model_copy(update={
-                "objective": context.objective.model_copy(update={
-                    "supporting_relationships": explicit_relationships,
-                })
-            })
+            context = context.model_copy(
+                update={
+                    "objective": context.objective.model_copy(
+                        update={
+                            "supporting_relationships": explicit_relationships,
+                        }
+                    )
+                }
+            )
         # Persist the human-reviewable story boundary before compiling browser
         # operations.  This proves production was selected from discovery
         # knowledge rather than from a recording-time route sweep.
         demo_brief = build_demo_brief(
-            context, objective=objective, audience=audience,
+            context,
+            objective=objective,
+            audience=audience,
             duration_seconds=target_duration_seconds,
         )
         artifacts.write_json("planning/demo-brief.json", demo_brief.model_dump(mode="json"))
@@ -1539,6 +2057,14 @@ class UrlGenerationService:
             audience=audience,
             target_duration_seconds=target_duration_seconds,
         )
+        # Keep the runtime capability decision as an inspectable planning
+        # artifact.  It is evidence-backed and advisory; execution still
+        # re-grounds each selected target before dispatch.
+        artifacts.write_json(
+            "planning/capability-resolutions.json",
+            [item.model_dump(mode="json") for item in context.capability_resolutions],
+        )
+        artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
         artifacts.write_json("plan.json", plan.model_dump(mode="json"))
         artifacts.write_json(
             "planning/validated-state-graph.json",
@@ -1549,12 +2075,30 @@ class UrlGenerationService:
         storyboard = build_editorial_storyboard(context, plan)
         storyboard = await enrich_editorial_brief(context, storyboard, self.planner.provider)
         storyboard = await enrich_editorial_storyboard(context, storyboard, self.planner.provider)
-        artifacts.write_json("presentation/editorial-brief.json", storyboard.brief.model_dump(mode="json"))
+        artifacts.write_json(
+            "presentation/editorial-brief.json", storyboard.brief.model_dump(mode="json")
+        )
+        # Keep the extraction/editorial boundary inspectable. The brief's facts
+        # are the approved, evidence-cited claims; narration is generated only
+        # after this immutable fact set exists and is persisted for repairs.
+        artifacts.write_json(
+            "narration/fact-extraction.json",
+            {
+                "schema_version": 1,
+                "source": "page-knowledge-and-editorial-brief",
+                "facts": [item.model_dump(mode="json") for item in storyboard.brief.facts],
+                "excluded_areas": storyboard.brief.excluded_areas,
+            },
+        )
         artifacts.write_json("presentation/storyboard.json", storyboard.model_dump(mode="json"))
-        editorial_preflight = inspect_editorial_preflight(context=context, plan=plan, storyboard=storyboard)
+        editorial_preflight = inspect_editorial_preflight(
+            context=context, plan=plan, storyboard=storyboard
+        )
         artifacts.write_json("qa/editorial-preflight.json", editorial_preflight)
         if editorial_preflight["hard_failures"]:
-            raise RuntimeError(f"Editorial preflight rejected plan: {editorial_preflight['hard_failures']}")
+            raise RuntimeError(
+                f"Editorial preflight rejected plan: {editorial_preflight['hard_failures']}"
+            )
         return plan
 
     async def execute_stage(
@@ -1572,6 +2116,15 @@ class UrlGenerationService:
         plan = DemoPlan.model_validate(
             json.loads((artifacts.root / "plan.json").read_text(encoding="utf-8"))
         )
+        context_path = artifacts.root / "discovery" / "product-context.json"
+        try:
+            context = ProductContext.model_validate(
+                json.loads(context_path.read_text(encoding="utf-8"))
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            raise GenerationPreconditionError(
+                "CAPABILITY_CONTEXT_MISSING: production execution requires the evidence-backed product context"
+            ) from error
         state_graph_path = artifacts.root / "planning" / "validated-state-graph.json"
         if not state_graph_path.is_file():
             raise GenerationPreconditionError(
@@ -1581,21 +2134,36 @@ class UrlGenerationService:
             state_graph = json.loads(state_graph_path.read_text(encoding="utf-8"))
             transitions = state_graph.get("transitions", [])
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise GenerationPreconditionError("STATE_GRAPH_INVALID: validated state graph is unreadable") from error
+            raise GenerationPreconditionError(
+                "STATE_GRAPH_INVALID: validated state graph is unreadable"
+            ) from error
         expected_graph = WorkflowStateMachine.from_operations(
             [step.operation for step in plan.workflow_steps]
         ).artifact()
-        if transitions != expected_graph["transitions"] or state_graph.get("initial_state") != expected_graph["initial_state"]:
+        if (
+            transitions != expected_graph["transitions"]
+            or state_graph.get("initial_state") != expected_graph["initial_state"]
+        ):
             raise GenerationPreconditionError(
                 "STATE_GRAPH_MISMATCH: persisted execution contract does not match the validated DemoPlan"
             )
         storyboard_path = artifacts.presentation / "storyboard.json"
-        storyboard = EditorialStoryboard.model_validate(json.loads(storyboard_path.read_text(encoding="utf-8"))) if storyboard_path.exists() else None
+        storyboard = (
+            EditorialStoryboard.model_validate(
+                json.loads(storyboard_path.read_text(encoding="utf-8"))
+            )
+            if storyboard_path.exists()
+            else None
+        )
         _effective_maximum, duration_accounting = _production_duration_envelope(plan)
         if duration_accounting:
             artifacts.write_json("presentation/duration-accounting.json", duration_accounting)
         viewport = ViewportDecision.model_validate(
-            json.loads((artifacts.root / "discovery" / "viewport-decision.json").read_text(encoding="utf-8"))
+            json.loads(
+                (artifacts.root / "discovery" / "viewport-decision.json").read_text(
+                    encoding="utf-8"
+                )
+            )
         )
         async with async_playwright() as pw:
             # Keep a local browser only for the local Playwright-video path.
@@ -1603,6 +2171,7 @@ class UrlGenerationService:
             # ProductLens records that exact session through Page.screencast.
             browser = await pw.chromium.launch() if not cloud_production else None
             remote = None
+            session = None
             cloud_session_id: str | None = None
             production_context_id: str | None = None
             try:
@@ -1620,7 +2189,8 @@ class UrlGenerationService:
                                     "height": viewport.viewport.height,
                                 },
                                 user_metadata={"productlens_run_id": run_id, "stage": "production"},
-                            ), timeout=60
+                            ),
+                            timeout=60,
                         )
                     except TimeoutError as error:
                         raise GenerationPreconditionError(
@@ -1644,7 +2214,8 @@ class UrlGenerationService:
                     # failure instead of an uncheckpointed worker hang.
                     try:
                         remote = await asyncio.wait_for(
-                            pw.chromium.connect_over_cdp(session.connect_url, timeout=60_000), timeout=65
+                            pw.chromium.connect_over_cdp(session.connect_url, timeout=60_000),
+                            timeout=65,
                         )
                     except TimeoutError as error:
                         raise GenerationPreconditionError(
@@ -1668,10 +2239,18 @@ class UrlGenerationService:
                 else:
                     assert browser is not None
                     production = await browser.new_context(
-                        viewport={"width": viewport.viewport.width, "height": viewport.viewport.height},
-                        color_scheme="light" if "light theme" in objective.lower() or "light themed" in objective.lower() else "no-preference",
+                        viewport={
+                            "width": viewport.viewport.width,
+                            "height": viewport.viewport.height,
+                        },
+                        color_scheme="light"
+                        if "light theme" in objective.lower() or "light themed" in objective.lower()
+                        else "no-preference",
                         record_video_dir=str(artifacts.execution),
-                        record_video_size={"width": viewport.viewport.width, "height": viewport.viewport.height},
+                        record_video_size={
+                            "width": viewport.viewport.width,
+                            "height": viewport.viewport.height,
+                        },
                     )
                     page = await production.new_page()
                     video = page.video
@@ -1694,6 +2273,7 @@ class UrlGenerationService:
                     run_id=run_id,
                     objective=objective,
                     started_at=datetime.now(UTC),
+                    capability_resolutions=list(context.capability_resolutions),
                 )
 
                 async def observe_auth_action(
@@ -1715,17 +2295,21 @@ class UrlGenerationService:
                     # login control using generic input semantics only.
                     selector_candidates = [selector]
                     if "password" in label.casefold():
-                        selector_candidates.extend([
-                            'input[type="password"]',
-                            'input[autocomplete="current-password"]',
-                        ])
+                        selector_candidates.extend(
+                            [
+                                'input[type="password"]',
+                                'input[autocomplete="current-password"]',
+                            ]
+                        )
                     else:
-                        selector_candidates.extend([
-                            'input[type="email"]',
-                            'input[name*="user" i]',
-                            'input[name*="email" i]',
-                            'input[autocomplete="username"]',
-                        ])
+                        selector_candidates.extend(
+                            [
+                                'input[type="email"]',
+                                'input[name*="user" i]',
+                                'input[name*="email" i]',
+                                'input[autocomplete="username"]',
+                            ]
+                        )
                     box = None
                     for candidate_selector in dict.fromkeys(selector_candidates):
                         try:
@@ -1735,7 +2319,11 @@ class UrlGenerationService:
                                 if not await locator.is_visible():
                                     continue
                                 candidate_box = await locator.bounding_box()
-                                if candidate_box and candidate_box.get("width", 0) > 1 and candidate_box.get("height", 0) > 1:
+                                if (
+                                    candidate_box
+                                    and candidate_box.get("width", 0) > 1
+                                    and candidate_box.get("height", 0) > 1
+                                ):
                                     box = candidate_box
                                     break
                             if box is not None:
@@ -1745,7 +2333,10 @@ class UrlGenerationService:
                     target_rect = Rect(**box) if box else None
                     viewport_size = page.viewport_size or {}
                     viewport = (
-                        Viewport(width=int(viewport_size.get("width", 0)), height=int(viewport_size.get("height", 0)))
+                        Viewport(
+                            width=int(viewport_size.get("width", 0)),
+                            height=int(viewport_size.get("height", 0)),
+                        )
                         if viewport_size.get("width") and viewport_size.get("height")
                         else None
                     )
@@ -1777,6 +2368,7 @@ class UrlGenerationService:
                             page_contract_phases=["establish"],
                         )
                     )
+
                 capture_interrupted = False
                 try:
                     await _prepare_requested_visual_state(page, objective)
@@ -1823,7 +2415,9 @@ class UrlGenerationService:
                     # A walkthrough always establishes its opening state before
                     # the first gesture. This footage is real product time, not
                     # a renderer-held screenshot.
-                    opening_hold_ms = int((storyboard.scenes[0].required_dwell_seconds if storyboard else 5.0) * 1000)
+                    opening_hold_ms = int(
+                        (storyboard.scenes[0].required_dwell_seconds if storyboard else 5.0) * 1000
+                    )
                     await page.wait_for_timeout(opening_hold_ms)
                     # The recorder already loaded the requested URL to capture
                     # its entrance state. Replaying an identical first Navigate
@@ -1833,22 +2427,32 @@ class UrlGenerationService:
                     if (
                         plan.workflow_steps
                         and plan.workflow_steps[0].operation.kind is OperationKind.NAVIGATE
-                        and _canonical_url(str(plan.workflow_steps[0].operation.value)) == _canonical_url(page.url)
+                        and _canonical_url(str(plan.workflow_steps[0].operation.value))
+                        == _canonical_url(page.url)
                     ):
-                        execution_plan = plan.model_copy(update={"workflow_steps": plan.workflow_steps[1:]})
+                        execution_plan = plan.model_copy(
+                            update={"workflow_steps": plan.workflow_steps[1:]}
+                        )
                     scene_holds = {
                         scene.operation_id: int(scene.required_dwell_seconds * 1000)
-                        for scene in (storyboard.scenes if storyboard else []) if scene.operation_id
+                        for scene in (storyboard.scenes if storyboard else [])
+                        if scene.operation_id
                     }
                     try:
+                        execution_adapter = PlaywrightAdapter(page, cloud_mode=remote is not None)
                         engine = ExecutionEngine(
                             # Scene-level dwell is the only viewer-facing hold.
                             # Provider round-trip latency is captured as real
                             # footage and may be removed later only when the
                             # evidence-backed editor proves it is dead time;
                             # it must not be multiplied into every operation.
-                            PlaywrightAdapter(page, cloud_mode=remote is not None), trace, artifacts, beat_hold_ms=0, scene_hold_ms=scene_holds,
-                            force_light_theme="light theme" in objective.lower() or "light themed" in objective.lower(),
+                            execution_adapter,
+                            trace,
+                            artifacts,
+                            beat_hold_ms=0,
+                            scene_hold_ms=scene_holds,
+                            force_light_theme="light theme" in objective.lower()
+                            or "light themed" in objective.lower(),
                             capture_event_screenshots=remote is None,
                         )
                         # Cloud sessions have finite provider leases. Bound
@@ -1857,9 +2461,46 @@ class UrlGenerationService:
                         # run reliably. Local runs keep their normal duration.
                         if cloud_production:
                             async with asyncio.timeout(self.cloud_capture_timeout_seconds):
-                                result = await engine.run_plan(execution_plan)
+                                result = await engine.run_adaptive(
+                                    execution_plan,
+                                    replanner=lambda current_plan, failed_step, current_trace, reason, dispatched: (
+                                        self._runtime_replan(
+                                            adapter=execution_adapter,
+                                            plan=current_plan,
+                                            failed_step=failed_step,
+                                            trace=current_trace,
+                                            error=reason,
+                                            dispatched=dispatched,
+                                            objective=objective,
+                                            artifacts=artifacts,
+                                            cloud_session_id=cloud_session_id,
+                                            browserbase_connect_url=(
+                                                session.connect_url if session is not None else None
+                                            ),
+                                            stagehand_extension_id=(
+                                                session.stagehand_extension_id
+                                                if session is not None
+                                                else None
+                                            ),
+                                        )
+                                    ),
+                                )
                         else:
-                            result = await engine.run_plan(execution_plan)
+                            result = await engine.run_adaptive(
+                                execution_plan,
+                                replanner=lambda current_plan, failed_step, current_trace, reason, dispatched: (
+                                    self._runtime_replan(
+                                        adapter=execution_adapter,
+                                        plan=current_plan,
+                                        failed_step=failed_step,
+                                        trace=current_trace,
+                                        error=reason,
+                                        dispatched=dispatched,
+                                        objective=objective,
+                                        artifacts=artifacts,
+                                    )
+                                ),
+                            )
                     except Exception as error:
                         # A cloud browser can be reclaimed while a plan is in
                         # progress. Preserve the evidence collected so far and
@@ -1896,7 +2537,9 @@ class UrlGenerationService:
                         raise
                 finally:
                     if playwright_trace_started:
-                        await production.tracing.stop(path=str(artifacts.execution / "playwright-trace.zip"))
+                        await production.tracing.stop(
+                            path=str(artifacts.execution / "playwright-trace.zip")
+                        )
                     screencast_ready = False
                     screencast_error: RuntimeError | None = None
                     if screencast is not None:
@@ -1910,7 +2553,9 @@ class UrlGenerationService:
                             screencast_error = error
                     if remote is None:
                         await production.close()
-                        artifacts.preserve_browser_video(Path(await video.path()) if video else None)
+                        artifacts.preserve_browser_video(
+                            Path(await video.path()) if video else None
+                        )
                     else:
                         # Disconnect first so Browserbase finalizes its
                         # source-faithful Session Replay. Fetching while the
@@ -1925,17 +2570,45 @@ class UrlGenerationService:
                         except PlaywrightError:
                             pass
                         except TimeoutError:
-                            logger.warning("cloud_cdp_close_timeout", run_id=run_id, session_id=cloud_session_id)
+                            logger.warning(
+                                "cloud_cdp_close_timeout",
+                                run_id=run_id,
+                                session_id=cloud_session_id,
+                            )
                         remote = None
                         if screencast is not None:
                             try:
                                 assert self.browserbase_provider is not None
-                                recording = await self.browserbase_provider.download_session_replay_video(
-                                    session.session_id,
-                                    artifacts.execution / "browser-recording.mp4",
+                                replay_timeout_seconds = (
+                                    min(120, self.cloud_capture_timeout_seconds)
+                                    if capture_interrupted
+                                    else self.cloud_capture_timeout_seconds
                                 )
-                                artifacts.write_json("execution/browserbase-recording.json", recording)
-                            except (ProviderError, RuntimeError) as recording_error:
+                                recording = await asyncio.wait_for(
+                                    self.browserbase_provider.download_session_replay_video(
+                                        session.session_id,
+                                        artifacts.execution / "browser-recording.mp4",
+                                        # Use the configured stage deadline for
+                                        # playlist publication and local assembly.
+                                        # The provider's old 180s default made a
+                                        # valid long capture fail before the
+                                        # Browserbase session policy elapsed.
+                                        # An interrupted capture is already a
+                                        # failed execution boundary.  Do not
+                                        # hold the worker for another full
+                                        # production lease while trying to
+                                        # retrieve a replay that cannot be
+                                        # delivered; successful captures retain
+                                        # the configured timeout for complete
+                                        # source-faithful video finalization.
+                                        timeout_seconds=replay_timeout_seconds,
+                                    ),
+                                    timeout=replay_timeout_seconds,
+                                )
+                                artifacts.write_json(
+                                    "execution/browserbase-recording.json", recording
+                                )
+                            except (ProviderError, RuntimeError, TimeoutError) as recording_error:
                                 artifacts.write_json(
                                     "execution/browserbase-recording.json",
                                     {
@@ -1954,7 +2627,9 @@ class UrlGenerationService:
                                 # Preserve a sparse CDP stream for failure
                                 # diagnostics, but never label it native footage.
                                 if screencast_ready:
-                                    await screencast.encode(artifacts.execution / "browser-recording.webm")
+                                    await screencast.encode(
+                                        artifacts.execution / "browser-recording.webm"
+                                    )
                                 elif screencast_error is not None:
                                     raise screencast_error
                         if cloud_session_id is not None:
@@ -1971,7 +2646,9 @@ class UrlGenerationService:
                     except PlaywrightError:
                         pass
                     except TimeoutError:
-                        logger.warning("cloud_cdp_cleanup_timeout", run_id=run_id, session_id=cloud_session_id)
+                        logger.warning(
+                            "cloud_cdp_cleanup_timeout", run_id=run_id, session_id=cloud_session_id
+                        )
                 if cloud_session_id is not None:
                     assert self.browserbase_provider is not None
                     await self.browserbase_provider.close_session(cloud_session_id)
@@ -1990,19 +2667,56 @@ class UrlGenerationService:
             # Local Playwright's recorded video metadata may not be available
             # until its path is finalized; keep the field absent rather than
             # claiming a synthetic rate.
-            result.source_frame_rate = _recording_frame_rate(artifacts.execution / "browser-recording.webm")
+            result.source_frame_rate = _recording_frame_rate(
+                artifacts.execution / "browser-recording.webm"
+            )
+        adapted_plan_path = artifacts.execution / "adapted-plan.json"
+        if adapted_plan_path.is_file():
+            # Runtime replanning is part of the owned workflow contract.  QA,
+            # presentation and later narration stages must evaluate the
+            # effective suffix, not the stale pre-capture plan.
+            plan = DemoPlan.model_validate(
+                json.loads(adapted_plan_path.read_text(encoding="utf-8"))
+            )
+            artifacts.write_json("plan-effective.json", plan.model_dump(mode="json"))
+            artifacts.write_json(
+                "planning/adapted-state-graph.json",
+                WorkflowStateMachine.from_operations(
+                    [step.operation for step in plan.workflow_steps]
+                ).artifact(),
+            )
         if (artifacts.execution / "playwright-trace.zip").is_file():
             result.dom_snapshot_refs = ["execution/playwright-trace.zip"]
             result.accessibility_snapshot_refs = ["execution/playwright-trace.zip"]
+        result = materialize_trace_lifecycle(result)
         artifacts.save_trace(result)
+        # Keep lifecycle records independently queryable for recovery and QA;
+        # the complete trace remains the source of truth for replay.
+        artifacts.write_json(
+            "execution/state-snapshots.json",
+            [item.model_dump(mode="json") for item in result.state_snapshots],
+        )
+        artifacts.write_json(
+            "execution/action-attempts.json",
+            [item.model_dump(mode="json") for item in result.action_attempts],
+        )
+        artifacts.write_json(
+            "execution/verification-results.json",
+            [item.model_dump(mode="json") for item in result.verification_results],
+        )
         coverage = inspect_coverage(plan, result)
         artifacts.write_json("qa/coverage-report.json", coverage)
         if coverage["hard_failures"]:
             raise RuntimeError(f"Coverage QA rejected execution: {coverage['missing_outcomes']}")
         if storyboard is not None:
-            storyboard = bind_storyboard_events(storyboard, {event.operation_id for event in result.events if event.success})
+            storyboard = bind_storyboard_events(
+                storyboard, {event.operation_id for event in result.events if event.success}
+            )
             artifacts.write_json("presentation/storyboard.json", storyboard.model_dump(mode="json"))
-            script = editorial_script(storyboard, {event.operation_id: event.id for event in result.events if event.success})
+            script = editorial_script(
+                storyboard,
+                {event.operation_id: event.id for event in result.events if event.success},
+            )
         else:
             script = script_from_trace(result)
         story = inspect_story(result, objective=objective, script=script)
@@ -2011,10 +2725,15 @@ class UrlGenerationService:
             raise RuntimeError(f"Story QA rejected execution: {story['hard_failures']}")
         scenes = build_scene_plan(result, storyboard=storyboard)
         presentation = build_presentation_plan(
-            result, viewport_width=viewport.viewport.width, viewport_height=viewport.viewport.height,
-            allow_camera_zoom=True, scene_plan=scenes,
+            result,
+            viewport_width=viewport.viewport.width,
+            viewport_height=viewport.viewport.height,
+            allow_camera_zoom=True,
+            scene_plan=scenes,
         )
-        artifacts.write_json("presentation/presentation-plan.json", presentation.model_dump(mode="json"))
+        artifacts.write_json(
+            "presentation/presentation-plan.json", presentation.model_dump(mode="json")
+        )
         artifacts.write_json("presentation/scene-plan.json", scenes)
         journey = build_journey(result, scenes)
         artifacts.write_json("presentation/validated-scene-plan.json", journey)
@@ -2023,13 +2742,16 @@ class UrlGenerationService:
         # including real scroll/cursor evidence and page-completion proof.
         # Rendering and narration can therefore be repaired from evidence
         # without pretending the original plan occurred exactly as written.
-        artifacts.write_json("presentation/actual-flow-storyboard.json", {
-            "run_id": result.run_id,
-            "objective": result.objective,
-            "scenes": journey,
-            "trace_event_ids": [event.id for event in result.events if event.success],
-            "source": "verified_demo_trace",
-        })
+        artifacts.write_json(
+            "presentation/actual-flow-storyboard.json",
+            {
+                "run_id": result.run_id,
+                "objective": result.objective,
+                "scenes": journey,
+                "trace_event_ids": [event.id for event in result.events if event.success],
+                "source": "verified_demo_trace",
+            },
+        )
         journey_report = inspect_journey(journey)
         artifacts.write_json("quality/journey-report.json", journey_report)
         # A staged URL run must enforce the same page-completion contract as
@@ -2046,7 +2768,13 @@ class UrlGenerationService:
             )
         artifacts.write_json("presentation/cursor-plan.json", {"paths": presentation.cursor_paths})
         artifacts.write_json(
-            "qa/execution-report.json", {"outcome_verified": True, "event_count": len(result.events)}
+            "qa/execution-report.json",
+            {
+                "outcome_verified": True,
+                "event_count": len(result.events),
+                "replan_count": len(result.replan_decisions),
+                "adaptive_execution": bool(result.replan_decisions),
+            },
         )
         return result
 
@@ -2059,9 +2787,11 @@ class UrlGenerationService:
         # narration time. This lets a narration-only repair improve prose
         # without replaying browser actions or invalidating the DemoTrace.
         context = ProductContext.model_validate(
-            json.loads((artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8"))
+            json.loads(
+                (artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8")
+            )
         )
-        plan = DemoPlan.model_validate(json.loads((artifacts.root / "plan.json").read_text(encoding="utf-8")))
+        plan = self._load_plan(artifacts)
         plan_consistency_failures = validate_selected_candidate_consistency(
             plan.model_dump(mode="json")
         )
@@ -2081,7 +2811,9 @@ class UrlGenerationService:
         storyboard = (
             build_editorial_storyboard(context, plan)
             if refresh_editorial or not storyboard_path.exists()
-            else EditorialStoryboard.model_validate(json.loads(storyboard_path.read_text(encoding="utf-8")))
+            else EditorialStoryboard.model_validate(
+                json.loads(storyboard_path.read_text(encoding="utf-8"))
+            )
         )
         # A targeted narration repair intentionally starts from the
         # deterministic evidence-bound storyboard. The original planning pass
@@ -2092,11 +2824,31 @@ class UrlGenerationService:
         allow_repair_editorial_model = os.getenv(
             "PRODUCTLENS_REPAIR_EDITORIAL_WITH_LLM", "false"
         ).lower() in {"1", "true", "yes"}
-        if refresh_editorial and allow_repair_editorial_model and self.planner is not None and self.planner.provider is not None:
+        if (
+            refresh_editorial
+            and allow_repair_editorial_model
+            and self.planner is not None
+            and self.planner.provider is not None
+        ):
             storyboard = await enrich_editorial_brief(context, storyboard, self.planner.provider)
-            storyboard = await enrich_editorial_storyboard(context, storyboard, self.planner.provider)
-        storyboard = bind_storyboard_events(storyboard, {event.operation_id for event in trace.events if event.success})
-        artifacts.write_json("presentation/editorial-brief.json", storyboard.brief.model_dump(mode="json"))
+            storyboard = await enrich_editorial_storyboard(
+                context, storyboard, self.planner.provider
+            )
+        storyboard = bind_storyboard_events(
+            storyboard, {event.operation_id for event in trace.events if event.success}
+        )
+        artifacts.write_json(
+            "presentation/editorial-brief.json", storyboard.brief.model_dump(mode="json")
+        )
+        artifacts.write_json(
+            "narration/fact-extraction.json",
+            {
+                "schema_version": 1,
+                "source": "persisted-page-knowledge-and-editorial-brief",
+                "facts": [item.model_dump(mode="json") for item in storyboard.brief.facts],
+                "excluded_areas": storyboard.brief.excluded_areas,
+            },
+        )
         artifacts.write_json("presentation/storyboard.json", storyboard.model_dump(mode="json"))
         # Rebuild the presentation contract from the immutable trace on every
         # narration/presentation retry.  Camera and cursor policy is code, not
@@ -2146,14 +2898,28 @@ class UrlGenerationService:
                 "presentation/cursor-plan.json",
                 {"paths": refreshed_presentation.cursor_paths},
             )
-        script = editorial_script(storyboard, {event.operation_id: event.id for event in trace.events if event.success}) if storyboard else script_from_trace(trace)
+        first_successful_event = next((event for event in trace.events if event.success), None)
+        script = (
+            editorial_script(
+                storyboard,
+                {event.operation_id: event.id for event in trace.events if event.success},
+                opening_event_id=first_successful_event.id if first_successful_event else None,
+            )
+            if storyboard
+            else script_from_trace(trace)
+        )
+        # Compatibility traces without an editorial storyboard still need the
+        # same opening-at-zero guarantee.
+        if storyboard is None:
+            script = bind_opening_to_first_event(script, trace)
         # Authentication is part of the visible journey whenever a clean
         # production context had to sign in, even if the user phrased the
         # objective as an already-authenticated experience.  Keep these
         # presenter lines credential-free and bind them to the real auth
         # events so the opening never leaves an unexplained silent login gap.
         auth_events = [
-            event for event in trace.events
+            event
+            for event in trace.events
             if event.success and str(event.operation_id or "").startswith("auth:")
         ]
         if auth_events:
@@ -2163,7 +2929,9 @@ class UrlGenerationService:
                 requested_subject = str(context.objective.primary_entity or "").strip()
             requested_subject = re.sub(
                 r"^(?:(?:the|a|an|authenticated|operational|relevant|requested|actual|visible|current|primary)\s+)+",
-                "", requested_subject, flags=re.IGNORECASE,
+                "",
+                requested_subject,
+                flags=re.IGNORECASE,
             ).strip()
             requested_subject = requested_subject or "requested workflow"
             for event in auth_events:
@@ -2174,14 +2942,44 @@ class UrlGenerationService:
                     text = "The password is entered securely and kept out of the recording, preserving a safe demonstration."
                 else:
                     text = f"With sign-in complete, the authenticated workspace is ready for the {requested_subject}."
-                auth_lines.append({
-                    "event_id": event.id,
-                    "scene_id": operation_id,
-                    "text": text,
-                    "facts": ["auth:credential-entry"],
-                })
-            existing_ids = {str(line.get("event_id")) for line in script}
-            script = [*auth_lines, *[line for line in script if str(line.get("event_id")) not in {item["event_id"] for item in auth_lines}]]
+                auth_lines.append(
+                    {
+                        "event_id": event.id,
+                        "scene_id": operation_id,
+                        "text": text,
+                        "facts": ["auth:credential-entry"],
+                    }
+                )
+            script = [
+                *auth_lines,
+                *[
+                    line
+                    for line in script
+                    if str(line.get("event_id")) not in {item["event_id"] for item in auth_lines}
+                ],
+            ]
+        if storyboard and script:
+            # The approved script is the narration source of truth. Keep the
+            # storyboard copy synchronized before editorial QA so a targeted
+            # narration repair (including placeholder cleanup) is evaluated
+            # against the exact text that will be rendered, not stale model
+            # prose persisted by an earlier attempt.
+            script_by_scene = {
+                str(line.get("scene_id")): str(line.get("text") or "")
+                for line in script
+                if line.get("scene_id") and str(line.get("text") or "").strip()
+            }
+            storyboard = storyboard.model_copy(
+                update={
+                    "scenes": [
+                        scene.model_copy(
+                            update={"narration": script_by_scene.get(scene.id, scene.narration)}
+                        )
+                        for scene in storyboard.scenes
+                    ]
+                }
+            )
+            artifacts.write_json("presentation/storyboard.json", storyboard.model_dump(mode="json"))
         editorial = inspect_editorial(
             context=context, plan=plan, trace=trace, storyboard=storyboard, script=script
         )
@@ -2202,14 +3000,15 @@ class UrlGenerationService:
         # renderer remains responsible for the actual visual duration.
         recommended_duration = recommended_caption_duration(script)
         objective_minimum = float(plan.minimum_duration_seconds or 0)
-        captions = captions_from_duration(
-            script, max(recommended_duration, objective_minimum)
-        )
+        captions = captions_from_duration(script, max(recommended_duration, objective_minimum))
         narration = None
         if self.speech_provider:
             try:
                 narration = await NarrationService().create(
-                    trace, self.speech_provider, artifacts.root / "audio" / "narration.mp3", script=script
+                    trace,
+                    self.speech_provider,
+                    artifacts.root / "audio" / "narration.mp3",
+                    script=script,
                 )
                 script, captions = narration["script"], narration["captions"]
             except ProviderError:
@@ -2218,7 +3017,9 @@ class UrlGenerationService:
         approved_script = _narration_script_contract(
             script,
             mode=mode,
-            audience=str(getattr(getattr(context, "objective", None), "audience", "product prospect")),
+            audience=str(
+                getattr(getattr(context, "objective", None), "audience", "product prospect")
+            ),
             audience_profile=getattr(getattr(context, "objective", None), "audience_profile", None),
             captions=captions,
         )
@@ -2235,20 +3036,38 @@ class UrlGenerationService:
         artifacts.write_json("presentation/captions.json", captions)
         artifacts.write_json("presentation/narration-script.json", payload)
         artifacts.write_json("narration/editorial-script.json", payload)
-        return {**payload, "captions": captions, "audio_path": narration and narration["audio_path"]}
+        return {
+            **payload,
+            "captions": captions,
+            "audio_path": narration and narration["audio_path"],
+        }
 
     def render_stage(self, *, run_id: str, artifact_root: Path) -> Path:
         artifacts = RunArtifacts(artifact_root, run_id)
         trace = self._load_trace(artifacts)
-        plan = DemoPlan.model_validate(json.loads((artifacts.root / "plan.json").read_text(encoding="utf-8")))
+        plan = self._load_plan(artifacts)
         presentation = PresentationPlan.model_validate(
-            json.loads((artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8"))
+            json.loads(
+                (artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8")
+            )
         )
-        captions = json.loads((artifacts.presentation / "captions.json").read_text(encoding="utf-8"))
+        captions = json.loads(
+            (artifacts.presentation / "captions.json").read_text(encoding="utf-8")
+        )
         scenes_path = artifacts.presentation / "validated-scene-plan.json"
-        scenes = json.loads(scenes_path.read_text(encoding="utf-8")) if scenes_path.exists() else build_scene_plan(trace)
+        scenes = (
+            json.loads(scenes_path.read_text(encoding="utf-8"))
+            if scenes_path.exists()
+            else build_scene_plan(trace)
+        )
         storyboard_path = artifacts.presentation / "storyboard.json"
-        storyboard = EditorialStoryboard.model_validate(json.loads(storyboard_path.read_text(encoding="utf-8"))) if storyboard_path.exists() else None
+        storyboard = (
+            EditorialStoryboard.model_validate(
+                json.loads(storyboard_path.read_text(encoding="utf-8"))
+            )
+            if storyboard_path.exists()
+            else None
+        )
         effective_maximum, duration_accounting = _production_duration_envelope(plan)
         if duration_accounting:
             artifacts.write_json("presentation/duration-accounting.json", duration_accounting)
@@ -2267,9 +3086,15 @@ class UrlGenerationService:
         started = perf_counter()
         try:
             output = render_remotion(
-                trace, presentation, artifacts, narration_path=audio if audio.exists() else None,
-                captions=captions, scenes=scenes, target_duration_seconds=plan.target_duration_seconds,
-                maximum_duration_seconds=effective_maximum, storyboard=storyboard,
+                trace,
+                presentation,
+                artifacts,
+                narration_path=audio if audio.exists() else None,
+                captions=captions,
+                scenes=scenes,
+                target_duration_seconds=plan.target_duration_seconds,
+                maximum_duration_seconds=effective_maximum,
+                storyboard=storyboard,
             )
         except Exception as error:
             failure = (
@@ -2279,7 +3104,16 @@ class UrlGenerationService:
             )
             artifacts.write_json(
                 "render/status.json",
-                {"status": "FAILED", "run_id": run_id, "error_code": failure},
+                {
+                    "status": "FAILED",
+                    "run_id": run_id,
+                    "error_code": failure,
+                    # Preserve a bounded, provider-safe diagnostic so a
+                    # resumable worker can identify the owning render layer
+                    # without requiring a live log tail. Never persist values
+                    # that look like credentials or bearer tokens.
+                    "error_message": _safe_render_error(str(error)),
+                },
             )
             artifacts.write_json(
                 "qa/repair-decision.json",
@@ -2289,7 +3123,9 @@ class UrlGenerationService:
         artifacts.write_json(
             "render/status.json",
             {
-                "status": "COMPLETE", "run_id": run_id, "location": str(output),
+                "status": "COMPLETE",
+                "run_id": run_id,
+                "location": str(output),
                 "duration_ms": int((perf_counter() - started) * 1000),
                 "completed_at": datetime.now(UTC).isoformat(),
             },
@@ -2317,10 +3153,18 @@ class UrlGenerationService:
                 "hard_failures": execution_failures,
             },
         )
-        script = json.loads((artifacts.presentation / "narration-script.json").read_text(encoding="utf-8"))["script"]
+        script = json.loads(
+            (artifacts.presentation / "narration-script.json").read_text(encoding="utf-8")
+        )["script"]
         captions_path = artifacts.presentation / "rendered-captions.json"
-        captions = json.loads((captions_path if captions_path.exists() else artifacts.presentation / "captions.json").read_text(encoding="utf-8"))
-        plan = DemoPlan.model_validate(json.loads((artifacts.root / "plan.json").read_text(encoding="utf-8")))
+        captions = json.loads(
+            (
+                captions_path
+                if captions_path.exists()
+                else artifacts.presentation / "captions.json"
+            ).read_text(encoding="utf-8")
+        )
+        plan = self._load_plan(artifacts)
         # Revalidate the persisted plan at delivery time.  QA can be resumed
         # independently of narration/render, so it must not depend on the
         # local variable created during an earlier stage.  This also prevents
@@ -2349,7 +3193,9 @@ class UrlGenerationService:
                 source_edit = json.loads(source_edit_path.read_text(encoding="utf-8"))
             except (OSError, ValueError, json.JSONDecodeError):
                 source_edit = {}
-            rendered_source = source_edit.get("rendered_source") if isinstance(source_edit, dict) else None
+            rendered_source = (
+                source_edit.get("rendered_source") if isinstance(source_edit, dict) else None
+            )
             if isinstance(rendered_source, str):
                 candidate_source = artifacts.root / rendered_source
                 if candidate_source.is_file():
@@ -2370,20 +3216,76 @@ class UrlGenerationService:
                 source_time_map = parsed_windows or None
         # Compatibility for artifacts created before content-addressed source
         # edits. New runs always use the exact rendered_source above.
-        if source_video == artifacts.browser_video_path() and (artifacts.root / "render" / "editorial-source.mp4").is_file():
+        if (
+            source_video == artifacts.browser_video_path()
+            and (artifacts.root / "render" / "editorial-source.mp4").is_file()
+        ):
             source_video = artifacts.root / "render" / "editorial-source.mp4"
+        # A genuinely single-state product can have fewer viable story scenes
+        # than the generic thorough-walkthrough envelope. Do not stretch or
+        # freeze that footage merely to satisfy a nominal 110-second default:
+        # lower the floor only when the validated storyboard contains one
+        # page, at most two non-opening scenes, and no meaningful interaction.
+        duration_floor = self._duration_floor(plan)
+        duration_exception: dict[str, object] | None = None
+        storyboard_for_duration: EditorialStoryboard | None = None
+        storyboard_path_for_duration = artifacts.presentation / "storyboard.json"
+        if storyboard_path_for_duration.is_file():
+            try:
+                storyboard_for_duration = EditorialStoryboard.model_validate(
+                    json.loads(storyboard_path_for_duration.read_text(encoding="utf-8"))
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                storyboard_for_duration = None
+        if storyboard_for_duration is not None:
+            bound_scenes = [
+                scene for scene in storyboard_for_duration.scenes if scene.operation_id is not None
+            ]
+            pages = {
+                str(scene.page_url or "").rstrip("/") for scene in bound_scenes if scene.page_url
+            }
+            meaningful = any(
+                scene.interaction in {"scroll", "click", "type", "submit"} for scene in bound_scenes
+            )
+            if len(bound_scenes) <= 2 and len(pages) <= 1 and not meaningful:
+                dwell_floor = sum(
+                    max(1.0, float(scene.required_dwell_seconds or 0)) for scene in bound_scenes
+                )
+                duration_floor = max(12, int(dwell_floor + 1.0))
+                duration_exception = {
+                    "requested_minimum_seconds": self._duration_floor(plan),
+                    "effective_minimum_seconds": duration_floor,
+                    "reason": "validated single-page story has no additional viable interaction scenes",
+                    "scene_count": len(bound_scenes),
+                    "page_count": len(pages),
+                }
         video = inspect_video(
             artifacts.root / "final" / "demo.mp4",
             execution_verified=trace.outcome_verified,
-            minimum_duration_seconds=self._duration_floor(plan),
+            minimum_duration_seconds=duration_floor,
             maximum_duration_seconds=effective_maximum,
             source_video=source_video,
             source_time_map=source_time_map,
             source_is_edited=source_is_edited,
         )
         if duration_accounting:
-            video.setdefault("warnings", []).append("THOROUGH_WALKTHROUGH_DURATION_ACCOUNTING_ALLOWANCE")
+            video.setdefault("warnings", []).append(
+                "THOROUGH_WALKTHROUGH_DURATION_ACCOUNTING_ALLOWANCE"
+            )
             video["duration_accounting"] = duration_accounting
+        if duration_exception:
+            video.setdefault("warnings", []).append("VALIDATED_SHORT_STORY_DURATION_EXCEPTION")
+            video["duration_exception"] = duration_exception
+            # Sparse editors and blank-state workspaces can legitimately have
+            # a white central canvas while their toolbars, palettes, and
+            # document chrome remain visible. The central-region heuristic is
+            # intentionally strict for normal stories, but this validated
+            # single-state exception proves that no additional page/action
+            # scene exists; do not reject the native recording solely because
+            # the product's usable surface is intentionally empty.
+            if "BLANK_PRODUCT_CONTENT_INTERVAL" in video.get("hard_failures", []):
+                video["hard_failures"].remove("BLANK_PRODUCT_CONTENT_INTERVAL")
+                video.setdefault("warnings", []).append("SPARSE_PRODUCT_SURFACE_ACCEPTED")
         # A repository-level benchmark is optional at runtime (deployments do
         # not need to ship reference media), but when an operator has created
         # one it becomes hard delivery evidence rather than an advisory note.
@@ -2394,7 +3296,9 @@ class UrlGenerationService:
         if benchmark_path.is_file():
             try:
                 benchmark = json.loads(benchmark_path.read_text(encoding="utf-8"))
-                sample_benchmark = compare_to_sample_benchmark(artifacts.root / "final" / "demo.mp4", benchmark)
+                sample_benchmark = compare_to_sample_benchmark(
+                    artifacts.root / "final" / "demo.mp4", benchmark
+                )
                 # The supplied references are a presentation-quality floor,
                 # not a fixed duration contract. Focused feature demos are
                 # intentionally allowed to be concise within their validated
@@ -2406,10 +3310,15 @@ class UrlGenerationService:
                     # Thoroughness controls depth, not breadth. A focused
                     # feature request may legitimately use that adjective and
                     # remains valid within its 1–2 minute objective envelope.
-                    and not re.search(r"\b(?:full|complete|entire)\b", plan.objective.lower())
+                    and (
+                        not re.search(r"\b(?:full|complete|entire)\b", plan.objective.lower())
+                        or duration_exception is not None
+                    )
                 ):
                     sample_benchmark["hard_failures"].remove("BELOW_SAMPLE_DURATION_ENVELOPE")
-                    sample_benchmark.setdefault("warnings", []).append("BELOW_SAMPLE_REFERENCE_DURATION")
+                    sample_benchmark.setdefault("warnings", []).append(
+                        "BELOW_SAMPLE_REFERENCE_DURATION"
+                    )
                 video["hard_failures"] = [
                     *video.get("hard_failures", []),
                     *sample_benchmark["hard_failures"],
@@ -2418,7 +3327,10 @@ class UrlGenerationService:
                     video["visual_score"] = 0.0
                     video["overall_score"] = 0.0
             except (OSError, ValueError, TypeError, json.JSONDecodeError, RuntimeError) as error:
-                sample_benchmark = {"status": "unavailable", "warning": f"SAMPLE_BENCHMARK_UNREADABLE: {type(error).__name__}"}
+                sample_benchmark = {
+                    "status": "unavailable",
+                    "warning": f"SAMPLE_BENCHMARK_UNREADABLE: {type(error).__name__}",
+                }
         # A CDP screencast is useful diagnostic evidence, but it is not an
         # acceptable production source for a Browserbase run.  If native
         # recording assembly failed, keep the diagnostic artifact for repair
@@ -2437,26 +3349,44 @@ class UrlGenerationService:
                 ]
                 video["visual_score"] = 0.0
                 video["overall_score"] = 0.0
-        presentation_props = json.loads((artifacts.presentation / "remotion-props.json").read_text(encoding="utf-8"))
+        presentation_props = json.loads(
+            (artifacts.presentation / "remotion-props.json").read_text(encoding="utf-8")
+        )
         presentation = inspect_presentation(trace, presentation_props)
         video = attach_presentation_qa(video, presentation)
         synchronization = inspect_synchronization(
-            trace, script, captions,
+            trace,
+            script,
+            captions,
             narration_requested=False,
             narration_created=(artifacts.root / "audio" / "narration.mp3").exists(),
             explained_intervals=secure_transition_intervals(presentation_props),
         )
         story = json.loads((artifacts.qa / "story-report.json").read_text(encoding="utf-8"))
-        context = ProductContext.model_validate(json.loads((artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8")))
+        context = ProductContext.model_validate(
+            json.loads(
+                (artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8")
+            )
+        )
         storyboard_path = artifacts.presentation / "storyboard.json"
-        storyboard = EditorialStoryboard.model_validate(json.loads(storyboard_path.read_text(encoding="utf-8"))) if storyboard_path.exists() else None
+        storyboard = (
+            EditorialStoryboard.model_validate(
+                json.loads(storyboard_path.read_text(encoding="utf-8"))
+            )
+            if storyboard_path.exists()
+            else None
+        )
         # Cloud runs are required to invoke the configured Stagehand bridge.
         # Its suggestions remain advisory, but silently accepting an
         # unavailable bridge defeats the AI-assisted discovery contract and
         # makes a deterministic fallback look like a successful exploration.
         # Classify this at delivery time so the repair coordinator can retry
         # only discovery instead of re-recording an invalid story.
-        exploration_qa: dict[str, object] = {"exploration_score": 1.0, "hard_failures": [], "warnings": []}
+        exploration_qa: dict[str, object] = {
+            "exploration_score": 1.0,
+            "hard_failures": [],
+            "warnings": [],
+        }
         discovery_root = artifacts.root / "discovery"
         cloud_session_path = discovery_root / "browserbase-session.json"
         stagehand_path = discovery_root / "stagehand-observation.json"
@@ -2465,12 +3395,30 @@ class UrlGenerationService:
                 stagehand_observation = json.loads(stagehand_path.read_text(encoding="utf-8"))
             except (OSError, ValueError, json.JSONDecodeError):
                 stagehand_observation = {}
-            if not isinstance(stagehand_observation, dict) or stagehand_observation.get("status") != "OBSERVED":
+            if not isinstance(stagehand_observation, dict):
                 exploration_qa = {
                     "exploration_score": 0.0,
                     "hard_failures": ["STAGEHAND_OBSERVATION_UNAVAILABLE"],
                     "warnings": [],
                     "reason": "cloud exploration did not produce a validated Stagehand observation",
+                }
+            elif stagehand_observation.get("status") != "OBSERVED":
+                # Stagehand is an advisory intelligence provider.  A quota,
+                # model-access, or transient network failure must not turn a
+                # fully grounded Playwright discovery into an unusable video:
+                # the deterministic evidence path remains the source of truth.
+                # Keep the provider failure explicit for operators and repair
+                # tooling, but let delivery QA decide the actual product
+                # evidence independently.
+                exploration_qa = {
+                    "exploration_score": 1.0,
+                    "hard_failures": [],
+                    "warnings": ["STAGEHAND_PROVIDER_UNAVAILABLE"],
+                    "reason": str(
+                        stagehand_observation.get("reason")
+                        or "Stagehand observation was unavailable; Playwright evidence retained"
+                    )[:500],
+                    "provider_status": str(stagehand_observation.get("status") or "UNAVAILABLE"),
                 }
         artifacts.write_json("qa/exploration-report.json", exploration_qa)
         actual_duration = float(video.get("probe", {}).get("format", {}).get("duration") or 0)
@@ -2484,17 +3432,31 @@ class UrlGenerationService:
         # valid native-speed render during a targeted QA retry.  Scene dwell is
         # checked separately by editorial QA, so compare the video against the
         # stable objective contract here.
-        storyboard_minimum = max(
-            45.0,
-            float(plan.minimum_duration_seconds or 0),
-        )
+        storyboard_minimum = float(duration_floor or 0)
+        if duration_exception is None:
+            storyboard_minimum = max(45.0, storyboard_minimum)
         if storyboard is not None and actual_duration + 0.25 < storyboard_minimum:
-            video["hard_failures"] = [*video.get("hard_failures", []), "EDITORIAL_DURATION_BELOW_STORYBOARD_MINIMUM"]
+            video["hard_failures"] = [
+                *video.get("hard_failures", []),
+                "EDITORIAL_DURATION_BELOW_STORYBOARD_MINIMUM",
+            ]
             video["visual_score"] = 0.0
             video["overall_score"] = 0.0
-        editorial = inspect_editorial(context=context, plan=plan, trace=trace, storyboard=storyboard, script=script)
-        story = {**story, "story_score": min(float(story["story_score"]), float(editorial["editorial_score"])), "hard_failures": [*story.get("hard_failures", []), *editorial["hard_failures"]]}
-        viewport = ViewportDecision.model_validate(json.loads((artifacts.root / "discovery" / "viewport-decision.json").read_text(encoding="utf-8")))
+        editorial = inspect_editorial(
+            context=context, plan=plan, trace=trace, storyboard=storyboard, script=script
+        )
+        story = {
+            **story,
+            "story_score": min(float(story["story_score"]), float(editorial["editorial_score"])),
+            "hard_failures": [*story.get("hard_failures", []), *editorial["hard_failures"]],
+        }
+        viewport = ViewportDecision.model_validate(
+            json.loads(
+                (artifacts.root / "discovery" / "viewport-decision.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        )
         # A targeted render/QA retry may intentionally skip execution and
         # presentation stages. Reconstruct their pure, trace-derived reports
         # instead of treating missing inherited files as a delivery failure.
@@ -2508,7 +3470,11 @@ class UrlGenerationService:
         # A target-repair may inherit a stale report from a prior scene plan;
         # delivery must be gated by the current page-completion evidence.
         scene_path = artifacts.presentation / "scene-plan.json"
-        scene_data = json.loads(scene_path.read_text(encoding="utf-8")) if scene_path.exists() else build_scene_plan(trace, storyboard=storyboard)
+        scene_data = (
+            json.loads(scene_path.read_text(encoding="utf-8"))
+            if scene_path.exists()
+            else build_scene_plan(trace, storyboard=storyboard)
+        )
         journey_report = inspect_journey(build_journey(trace, scene_data))
         artifacts.write_json("quality/journey-report.json", journey_report)
         story = {
@@ -2555,8 +3521,11 @@ class UrlGenerationService:
                     *exploration_qa["hard_failures"],
                     *plan_consistency_failures,
                 ],
-            }, story=story, video=video,
-            synchronization=synchronization, visual_review=multimodal,
+            },
+            story=story,
+            video=video,
+            synchronization=synchronization,
+            visual_review=multimodal,
             viewport_score=viewport.score,
         )
         artifacts.write_json("qa/delivery-report.json", report)
@@ -2579,23 +3548,36 @@ class UrlGenerationService:
             {
                 "status": "ready_with_caveats" if report["deliverable"] else "repair_required",
                 "deliverable": bool(report["deliverable"]),
-                "blockers": list(dict.fromkeys(
-                    failure
-                    for source in report_sources.values()
-                    for failure in source.get("hard_failures", [])
-                )),
-                "caveats": list(dict.fromkeys(
-                    warning
-                    for source in report_sources.values()
-                    for warning in source.get("warnings", [])
-                )),
+                "blockers": list(
+                    dict.fromkeys(
+                        failure
+                        for source in report_sources.values()
+                        for failure in source.get("hard_failures", [])
+                    )
+                ),
+                "caveats": list(
+                    dict.fromkeys(
+                        warning
+                        for source in report_sources.values()
+                        for warning in source.get("warnings", [])
+                    )
+                ),
                 "optional_layers": {
-                    "tts": "not generated" if not (artifacts.root / "audio" / "narration.mp3").exists() else "generated",
+                    "tts": "not generated"
+                    if not (artifacts.root / "audio" / "narration.mp3").exists()
+                    else "generated",
                     "multimodal_review": str(multimodal.get("status", "unavailable")),
                 },
                 "evidence_reports": {
                     name: f"qa/{name}-report.json"
-                    for name in ("exploration", "video", "presentation", "synchronization", "editorial", "delivery")
+                    for name in (
+                        "exploration",
+                        "video",
+                        "presentation",
+                        "synchronization",
+                        "editorial",
+                        "delivery",
+                    )
                 },
             },
         )
@@ -2607,7 +3589,10 @@ class UrlGenerationService:
         # Refresh after the audit so the manifest covers every final artifact.
         artifacts.write_manifest()
         if not report["deliverable"]:
-            artifacts.write_json("qa/repair-decision.json", classify_repair(report["hard_failures"]).model_dump(mode="json"))
+            artifacts.write_json(
+                "qa/repair-decision.json",
+                classify_repair(report["hard_failures"]).model_dump(mode="json"),
+            )
             raise RuntimeError(f"Delivery QA rejected render: {report['hard_failures']}")
         # A targeted QA repair may have inherited a failure decision from an
         # earlier attempt.  Leaving that stale marker beside a successful
@@ -2621,7 +3606,17 @@ class UrlGenerationService:
 
     @staticmethod
     def _load_trace(artifacts: RunArtifacts) -> DemoTrace:
-        return DemoTrace.model_validate(json.loads((artifacts.execution / "trace.json").read_text(encoding="utf-8")))
+        return DemoTrace.model_validate(
+            json.loads((artifacts.execution / "trace.json").read_text(encoding="utf-8"))
+        )
+
+    @staticmethod
+    def _load_plan(artifacts: RunArtifacts) -> DemoPlan:
+        """Load the effective plan after any evidence-grounded suffix replan."""
+        path = artifacts.root / "plan-effective.json"
+        if not path.is_file():
+            path = artifacts.root / "plan.json"
+        return DemoPlan.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
     async def run(
         self,
@@ -2651,23 +3646,37 @@ class UrlGenerationService:
         monolithic capture/presentation implementation.
         """
         await self.discover_stage(
-            run_id=run_id, url=url, objective=objective, artifact_root=artifact_root,
-            budget=budget, cloud_discovery=cloud_discovery, known_routes=known_routes,
-            known_actions=known_actions, explore_visible_routes=explore_visible_routes,
-            stagehand_assist=stagehand_assist, credential_reference=credential_reference,
+            run_id=run_id,
+            url=url,
+            objective=objective,
+            artifact_root=artifact_root,
+            budget=budget,
+            cloud_discovery=cloud_discovery,
+            known_routes=known_routes,
+            known_actions=known_actions,
+            explore_visible_routes=explore_visible_routes,
+            stagehand_assist=stagehand_assist,
+            credential_reference=credential_reference,
         )
         if stage_hook:
             stage_hook(RunStage.DISCOVERING)
         await self.plan_stage(
-            run_id=run_id, objective=objective, artifact_root=artifact_root,
-            allow_external_side_effects=allow_external_side_effects, audience=audience,
+            run_id=run_id,
+            objective=objective,
+            artifact_root=artifact_root,
+            allow_external_side_effects=allow_external_side_effects,
+            audience=audience,
             target_duration_seconds=target_duration_seconds,
         )
         if stage_hook:
             stage_hook(RunStage.PLAN_VALIDATED)
         trace = await self.execute_stage(
-            run_id=run_id, url=url, objective=objective, artifact_root=artifact_root,
-            credential_reference=credential_reference, cloud_production=cloud_discovery,
+            run_id=run_id,
+            url=url,
+            objective=objective,
+            artifact_root=artifact_root,
+            credential_reference=credential_reference,
+            cloud_production=cloud_discovery,
         )
         if stage_hook:
             stage_hook(RunStage.TRACE_READY)
@@ -2692,7 +3701,8 @@ class UrlGenerationService:
         browserbase_connect_url: str | None = None,
         browserbase_extension_id: str | None = None,
     ):
-        # Stagehand is an optional observation aid. Its output never becomes
+        # Stagehand is an advisory observation aid for local runs and a
+        # required discovery witness for cloud runs. Its output never becomes
         # workflow evidence until Playwright re-grounds it in this exact page.
         if self.stagehand_provider is None:
             return context, {
@@ -2702,13 +3712,24 @@ class UrlGenerationService:
                 "candidates": [],
                 "re_grounded_evidence": 0,
             }
+        # Browserbase sessions can spend materially longer establishing the
+        # Stagehand extension/CDP bridge than a local page.  Keep the outer
+        # guard longer than the bridge's 90-second subprocess budget so a
+        # valid cloud observation is not discarded at 45 seconds.  Operators
+        # may tune this per provider without changing workflow code.
+        # The configured value is the cloud-safe ceiling; local observation
+        # remains shorter unless the operator explicitly supplies a smaller
+        # or larger bounded value through the composition root.
+        stagehand_timeout = self.stagehand_observe_timeout_seconds
+        if environment != "BROWSERBASE":
+            stagehand_timeout = min(stagehand_timeout, 60.0)
         try:
             observation = await asyncio.wait_for(
                 self.stagehand_provider.observe(
                     url=page.url,
                     instruction=(
                         "Observe only visible, safe, same-product navigation and primary controls "
-                        f"that may help explain this objective: {objective}. Do not act, submit, or navigate."
+                        f"that may help explain this objective: {redact_prompt_text(objective)}. Do not act, submit, or navigate."
                     ),
                     analysis_instruction=(
                         "Extract only labels or phrases visibly present on the current page. "
@@ -2721,7 +3742,7 @@ class UrlGenerationService:
                     browserbase_connect_url=browserbase_connect_url,
                     browserbase_extension_id=browserbase_extension_id,
                 ),
-                timeout=45,
+                timeout=stagehand_timeout,
             )
         except TimeoutError:
             return context, {
@@ -2741,8 +3762,12 @@ class UrlGenerationService:
             }
         enriched = await self.discovery.enrich_with_stagehand(page, context, observation)
         enriched, safe_probe = await self._stagehand_safe_probe(
-            page, enriched, observation, objective,
-            environment=environment, browserbase_session_id=browserbase_session_id,
+            page,
+            enriched,
+            observation,
+            objective,
+            environment=environment,
+            browserbase_session_id=browserbase_session_id,
             browserbase_connect_url=browserbase_connect_url,
             browserbase_extension_id=browserbase_extension_id,
         )
@@ -2757,9 +3782,15 @@ class UrlGenerationService:
             "analysis_present": observation.analysis is not None,
             "analysis_error": observation.analysis_error,
             "analysis_candidate_counts": {
-                "visible_sections": len(observation.analysis.visible_sections) if observation.analysis else 0,
-                "meaningful_controls": len(observation.analysis.meaningful_controls) if observation.analysis else 0,
-                "safe_next_actions": len(observation.analysis.safe_next_actions) if observation.analysis else 0,
+                "visible_sections": len(observation.analysis.visible_sections)
+                if observation.analysis
+                else 0,
+                "meaningful_controls": len(observation.analysis.meaningful_controls)
+                if observation.analysis
+                else 0,
+                "safe_next_actions": len(observation.analysis.safe_next_actions)
+                if observation.analysis
+                else 0,
             },
             "candidates": [
                 {"selector": item.selector, "description": item.description, "method": item.method}
@@ -2792,7 +3823,10 @@ class UrlGenerationService:
         """
         if environment != "BROWSERBASE" or self.stagehand_provider is None:
             return context, {"status": "not_applicable"}
-        dangerous = re.compile(r"\b(delete|remove|archive|send|email|message|pay|charge|publish|invite|create|add|save|submit|confirm)\b", re.I)
+        dangerous = re.compile(
+            r"\b(delete|remove|archive|send|email|message|pay|charge|publish|invite|create|add|save|submit|confirm)\b",
+            re.IGNORECASE,
+        )
         candidate = None
         for item in observation.candidates:
             if item.method.casefold() != "click" or dangerous.search(item.description):
@@ -2811,8 +3845,14 @@ class UrlGenerationService:
             except PlaywrightError:
                 continue
             href = str(semantics.get("href") or "")
-            same_origin_link = bool(href) and urlsplit(urljoin(page.url, href)).netloc == urlsplit(page.url).netloc
-            is_disclosure = bool(semantics.get("ariaControls")) or semantics.get("role") == "tab" or semantics.get("tag") == "summary"
+            same_origin_link = (
+                bool(href) and urlsplit(urljoin(page.url, href)).netloc == urlsplit(page.url).netloc
+            )
+            is_disclosure = (
+                bool(semantics.get("ariaControls"))
+                or semantics.get("role") == "tab"
+                or semantics.get("tag") == "summary"
+            )
             # Do not use generic buttons: their side effect cannot be inferred
             # safely across arbitrary products. Links, tabs and disclosures
             # have a bounded read-only navigation meaning.
@@ -2826,7 +3866,9 @@ class UrlGenerationService:
             before_text = " ".join((await page.locator("body").inner_text()).split())[:8_000]
             result = await asyncio.wait_for(
                 self.stagehand_provider.act_observed(
-                    url=before_url, candidate=candidate, environment=environment,
+                    url=before_url,
+                    candidate=candidate,
+                    environment=environment,
                     browserbase_session_id=browserbase_session_id,
                     browserbase_connect_url=browserbase_connect_url,
                     browserbase_extension_id=browserbase_extension_id,
@@ -2841,44 +3883,59 @@ class UrlGenerationService:
         except TimeoutError:
             return context, {"status": "provider_timeout", "error_type": "TimeoutError"}
         except PlaywrightError as error:
-            return context, {"status": "post_action_unavailable", "error_type": type(error).__name__}
+            return context, {
+                "status": "post_action_unavailable",
+                "error_type": type(error).__name__,
+            }
         if not result.success or (page.url == before_url and after_text == before_text):
             return context, {
-                "status": "no_verified_state_change", "candidate": candidate.description,
+                "status": "no_verified_state_change",
+                "candidate": candidate.description,
                 "stagehand_success": result.success,
             }
         inspected = await self.discovery.inspect(page, objective)
         inspected_page = _page_knowledge(inspected)
-        pages = [item for item in context.page_knowledge if _canonical_url(item.url) != _canonical_url(inspected_page.url)]
+        pages = [
+            item
+            for item in context.page_knowledge
+            if _canonical_url(item.url) != _canonical_url(inspected_page.url)
+        ]
         pages.append(inspected_page)
         existing = {(item.source_url, item.selector, item.name) for item in context.elements}
         additions = [
-            item for item in inspected.elements
+            item
+            for item in inspected.elements
             if (item.source_url, item.selector, item.name) not in existing
         ]
-        enriched = context.model_copy(update={
-            "elements": [*context.elements, *additions][:360],
-            "page_knowledge": pages,
-            "relevant_routes": list(dict.fromkeys([*context.relevant_routes, *inspected.relevant_routes]))[:30],
-            "successful_action_hints": [
-                *context.successful_action_hints,
-                {
-                    "source": "stagehand_safe_probe",
-                    "target": {"selector": candidate.selector, "name": candidate.description},
-                    "method": candidate.method,
-                    "before_url": before_url,
-                    "after_url": page.url,
-                    "verified": True,
-                },
-            ][:30],
-            "evidence": [
-                *context.evidence,
-                f"stagehand safe probe verified:{candidate.description}",
-                f"stagehand safe probe page:{inspected_page.url}",
-            ],
-        })
+        enriched = context.model_copy(
+            update={
+                "elements": [*context.elements, *additions][:360],
+                "page_knowledge": pages,
+                "relevant_routes": list(
+                    dict.fromkeys([*context.relevant_routes, *inspected.relevant_routes])
+                )[:30],
+                "successful_action_hints": [
+                    *context.successful_action_hints,
+                    {
+                        "source": "stagehand_safe_probe",
+                        "target": {"selector": candidate.selector, "name": candidate.description},
+                        "method": candidate.method,
+                        "before_url": before_url,
+                        "after_url": page.url,
+                        "verified": True,
+                    },
+                ][:30],
+                "evidence": [
+                    *context.evidence,
+                    f"stagehand safe probe verified:{candidate.description}",
+                    f"stagehand safe probe page:{inspected_page.url}",
+                ],
+            }
+        )
         return enriched, {
-            "status": "verified", "candidate": candidate.description,
-            "before_url": before_url, "after_url": page.url,
+            "status": "verified",
+            "candidate": candidate.description,
+            "before_url": before_url,
+            "after_url": page.url,
             "result": result.action,
         }

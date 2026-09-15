@@ -20,7 +20,10 @@ def test_sqlite_offline_migration_sql_is_generatable():
 
 def test_postgresql_offline_migration_sql_keeps_project_foreign_key():
     root = Path(__file__).resolve().parents[1]
-    environment = {**os.environ, "PRODUCTLENS_DATABASE_URL": "postgresql://user:password@db.invalid/productlens"}
+    environment = {
+        **os.environ,
+        "PRODUCTLENS_DATABASE_URL": "postgresql://user:password@db.invalid/productlens",
+    }
     result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head", "--sql"],
         cwd=root,

@@ -28,12 +28,19 @@ python -m productlens.benchmark.run_gate --gate 1
 The fixture directory remains outside the application package on purpose. Its path is
 discovered relative to this repository, and the fixtures themselves are never changed.
 
-Run gates in order. A later gate is not evidence for an earlier one.
+Run gates in order. A later gate is not evidence for an earlier one. For a
+live run, follow `GET /runs/{run_id}/events` as an SSE stream instead of
+polling `/runs/{run_id}/stages`.
 
 ## Boundaries
 
 - Playwright performs deterministic execution and captures evidence.
-- Browserbase and Stagehand are optional adapters, not workflow owners.
+- Browserbase and Stagehand are required for cloud discovery/production and
+  remain optional only for local fixture runs; neither provider owns workflow
+  truth.
+- Set `PRODUCTLENS_WORKER_CONCURRENCY` for durable local-worker fan-out and
+  `PRODUCTLENS_BROWSERBASE_CONCURRENCY`, `PRODUCTLENS_STAGEHAND_CONCURRENCY`,
+  and `PRODUCTLENS_OPENROUTER_CONCURRENCY` to apply provider backpressure.
 - LLM and TTS providers are isolated behind provider interfaces.
 - A browser recording is source evidence; `PresentationPlan` is the only contract a
   renderer consumes.

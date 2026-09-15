@@ -15,6 +15,7 @@ _PROVIDER_ENV_NAMES = {
     "BROWSERBASE_PROJECT_ID",
     "STAGEHAND_MODEL",
     "STAGEHAND_NODE",
+    "PRODUCTLENS_STAGEHAND_OBSERVE_TIMEOUT_SECONDS",
     "PRODUCTLENS_BROKER_URL",
     "PRODUCTLENS_WORKER_MODE",
     "PRODUCTLENS_AUTH_SECRET",
@@ -76,6 +77,7 @@ class Settings:
     s3_region: str | None
     cloud_capture_timeout_seconds: int
     browserbase_session_timeout_seconds: int
+    stagehand_observe_timeout_seconds: float
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -105,7 +107,9 @@ class Settings:
             openrouter_api_key=value("OPENROUTER_API_KEY"),
             openrouter_model=value("OPENROUTER_MODEL", "openrouter/free"),
             openrouter_vision_model=value("OPENROUTER_VISION_MODEL"),
-            multimodal_review_enabled=value("PRODUCTLENS_MULTIMODAL_REVIEW_ENABLED", "false").lower()
+            multimodal_review_enabled=value(
+                "PRODUCTLENS_MULTIMODAL_REVIEW_ENABLED", "false"
+            ).lower()
             in {"1", "true", "yes"},
             elevenlabs_api_key=value("ELEVENLABS_API_KEY"),
             elevenlabs_voice_id=value("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
@@ -120,7 +124,8 @@ class Settings:
             broker_url=value("PRODUCTLENS_BROKER_URL"),
             worker_mode=value("PRODUCTLENS_WORKER_MODE", "polling"),
             auth_secret=auth_secret,
-            auth_required=value("PRODUCTLENS_AUTH_REQUIRED", "true").lower() not in {"0", "false", "no"},
+            auth_required=value("PRODUCTLENS_AUTH_REQUIRED", "true").lower()
+            not in {"0", "false", "no"},
             session_ttl_seconds=int(value("PRODUCTLENS_SESSION_TTL_SECONDS", "604800")),
             artifact_storage=value("PRODUCTLENS_ARTIFACT_STORAGE", "local").lower(),
             s3_bucket=value("PRODUCTLENS_S3_BUCKET"),
@@ -134,5 +139,9 @@ class Settings:
             ),
             browserbase_session_timeout_seconds=max(
                 60, min(1800, int(value("BROWSERBASE_SESSION_TIMEOUT_SECONDS", "1800")))
+            ),
+            stagehand_observe_timeout_seconds=max(
+                30.0,
+                min(180.0, float(value("PRODUCTLENS_STAGEHAND_OBSERVE_TIMEOUT_SECONDS", "105"))),
             ),
         )

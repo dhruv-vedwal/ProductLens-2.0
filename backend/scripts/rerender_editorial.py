@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 from pathlib import Path
 
+from productlens.artifacts.store import RunArtifacts
 from productlens.config.settings import Settings
 from productlens.persistence.repository import RunRepository
 from productlens.services.generation import UrlGenerationService
 
+logger = logging.getLogger(__name__)
+
 
 async def _run(run_id: str, artifacts_root: Path) -> None:
+    artifacts = RunArtifacts(artifacts_root, run_id)
     service = UrlGenerationService.__new__(UrlGenerationService)
     service.speech_provider = None
     service.planner = None
@@ -24,8 +29,9 @@ async def _run(run_id: str, artifacts_root: Path) -> None:
         repository = RunRepository(Settings.from_environment().database_url)
         repository.ensure_stage_jobs(run_id)
         repository.update_run(run_id, stage="NARRATION", status="RUNNING")
-    except Exception:
+    except Exception:  # noqa: BLE001 - artifact-only rerenders have no DB row
         repository = None
+
     def mark(stage: str, status: str, error_code: str | None = None) -> None:
         if repository is None:
             return
@@ -47,6 +53,10 @@ async def _run(run_id: str, artifacts_root: Path) -> None:
         # claim success without the same delivery/editorial/visual checks as a
         # worker.
         await asyncio.to_thread(service.qa_stage, run_id=run_id, artifact_root=artifacts_root)
+        # Presentation-only repairs mutate storyboard, captions, scene policy,
+        # and the final MP4. Re-publish the checksum manifest after QA so a
+        # rerender cannot leave a valid-looking delivery with stale hashes.
+        artifacts.write_manifest()
         mark("VIDEO_QA", "COMPLETE")
         if repository is not None:
             repository.update_run(run_id, stage="COMPLETE", status="COMPLETE")
@@ -58,8 +68,8 @@ async def _run(run_id: str, artifacts_root: Path) -> None:
                 failed_stage = "RENDER"
             try:
                 mark(failed_stage, "FAILED", type(error).__name__)
-            except Exception:
-                pass
+            except Exception as mark_error:  # noqa: BLE001 - preserve original failure
+                logger.debug("unable to persist rerender failure: %s", mark_error)
         raise
     print(output, flush=True)
 

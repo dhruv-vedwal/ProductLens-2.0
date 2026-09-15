@@ -13,7 +13,11 @@ from pathlib import Path
 
 class S3ArtifactStorage:
     def __init__(
-        self, *, bucket: str, prefix: str = "productlens-runs", endpoint_url: str | None = None,
+        self,
+        *,
+        bucket: str,
+        prefix: str = "productlens-runs",
+        endpoint_url: str | None = None,
         region_name: str | None = None,
     ):
         if not bucket:
@@ -21,7 +25,9 @@ class S3ArtifactStorage:
         try:
             import boto3
         except ImportError as error:  # pragma: no cover - depends on deployment extra
-            raise RuntimeError("Install ProductLens with the 'storage' extra to enable S3 artifact storage") from error
+            raise RuntimeError(
+                "Install ProductLens with the 'storage' extra to enable S3 artifact storage"
+            ) from error
         self.bucket = bucket
         self.prefix = prefix.strip("/")
         self.client = boto3.client("s3", endpoint_url=endpoint_url, region_name=region_name)
@@ -45,17 +51,20 @@ class S3ArtifactStorage:
         # evidence object. Including a previous manifest here would make the
         # freshly written replacement fail local checksum verification.
         for source in sorted(
-            path for path in run_root.rglob("*")
+            path
+            for path in run_root.rglob("*")
             if path.is_file() and path.name != "artifact-manifest.json"
         ):
             relative = source.relative_to(run_root).as_posix()
             location = self.put(source, f"{run_root.name}/{relative}")
-            entries.append({
-                "path": relative,
-                "location": location,
-                "bytes": source.stat().st_size,
-                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-            })
+            entries.append(
+                {
+                    "path": relative,
+                    "location": location,
+                    "bytes": source.stat().st_size,
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }
+            )
         manifest = {"run_id": run_root.name, "artifacts": entries}
         manifest_path = run_root / "artifact-manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

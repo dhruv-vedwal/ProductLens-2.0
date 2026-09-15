@@ -9,18 +9,12 @@ offline artifact tooling can use the same rule as completion QA.
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import unquote, urlsplit, urlunsplit
+
+from productlens.urls import canonical_product_url
 
 
 def _canonical_url(value: str) -> str:
-    parsed = urlsplit(str(value or ""))
-    return urlunsplit((
-        parsed.scheme.lower(),
-        parsed.netloc.lower(),
-        unquote(parsed.path).rstrip("/") or "/",
-        parsed.query,
-        "",
-    ))
+    return canonical_product_url(str(value or ""))
 
 
 def _operation_page(operation: dict[str, Any]) -> str | None:
@@ -51,22 +45,14 @@ def validate_selected_candidate_consistency(plan: dict[str, Any]) -> list[str]:
         if isinstance(item, dict) and isinstance(item.get("operation"), dict)
     ]
     actual_pages = {
-        _canonical_url(page)
-        for operation in operations
-        if (page := _operation_page(operation))
+        _canonical_url(page) for operation in operations if (page := _operation_page(operation))
     }
-    candidate_pages = {
-        _canonical_url(page)
-        for page in candidate.get("page_urls", [])
-        if page
-    }
+    candidate_pages = {_canonical_url(page) for page in candidate.get("page_urls", []) if page}
     if actual_pages and candidate_pages != actual_pages:
         failures.append("SELECTED_CANDIDATE_ARTIFACT_MISMATCH")
 
     expected = [str(value) for value in plan.get("expected_outcomes", []) if value]
-    candidate_expected = [
-        str(value) for value in candidate.get("expected_outcomes", []) if value
-    ]
+    candidate_expected = [str(value) for value in candidate.get("expected_outcomes", []) if value]
     if expected != candidate_expected:
         failures.append("SELECTED_CANDIDATE_ARTIFACT_MISMATCH")
 
@@ -85,11 +71,8 @@ def validate_selected_candidate_consistency(plan: dict[str, Any]) -> list[str]:
         if reference
     }
     candidate_evidence = {
-        str(reference)
-        for reference in candidate.get("evidence_coverage", [])
-        if reference
+        str(reference) for reference in candidate.get("evidence_coverage", []) if reference
     }
     if evidence - candidate_evidence:
         failures.append("SELECTED_CANDIDATE_ARTIFACT_MISMATCH")
     return list(dict.fromkeys(failures))
-

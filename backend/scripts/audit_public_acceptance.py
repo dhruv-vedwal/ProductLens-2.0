@@ -8,7 +8,6 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-
 REQUIRED_ARTIFACTS = (
     "objective.json",
     "discovery/objective-understanding.json",
@@ -40,7 +39,9 @@ def _duration(path: Path) -> float | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=Path("artifacts/acceptance/public-runs.json"))
+    parser.add_argument(
+        "--manifest", type=Path, default=Path("artifacts/acceptance/public-runs.json")
+    )
     parser.add_argument("--minimum", type=int, default=8)
     args = parser.parse_args()
     manifest_path = args.manifest.resolve()

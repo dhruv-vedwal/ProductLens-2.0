@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import re
+from itertools import pairwise
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 from playwright.async_api import Error as PlaywrightError
 
 from productlens.contracts.models import OperationKind, Rect, SemanticOperation, Target, Viewport
+from productlens.execution.spatial_index import SpatialIndex
 
 
 class GroundingError(RuntimeError):
@@ -51,7 +54,9 @@ class PlaywrightAdapter:
                 continue
             self.page = candidate
             return candidate
-        raise GroundingError("The active browser page was closed and no replacement target is available")
+        raise GroundingError(
+            "The active browser page was closed and no replacement target is available"
+        )
 
     @staticmethod
     def _page_is_closed(page: Any) -> bool:
@@ -124,28 +129,44 @@ class PlaywrightAdapter:
         if target.test_id:
             candidates.append(("test_id", self.page.get_by_test_id(target.test_id)))
         if target.role and target.name:
-            candidates.append(("role", self.page.get_by_role(target.role, name=target.name, exact=True)))
-            candidates.append(("role_casefold", self.page.get_by_role(target.role, name=flexible_name, exact=False)))
+            candidates.append(
+                ("role", self.page.get_by_role(target.role, name=target.name, exact=True))
+            )
+            candidates.append(
+                (
+                    "role_casefold",
+                    self.page.get_by_role(target.role, name=flexible_name, exact=False),
+                )
+            )
             # Accessible labels can legitimately change punctuation or
             # truncation between discovery and production (for example an
             # ellipsis rendered as ``...`` versus ``…``).  Keep an additional
             # role-scoped contains query as a final semantic fallback; the
             # uniqueness/visibility checks below still reject ambiguous
             # matches, so this never degenerates into coordinate clicking.
-            candidates.append(("role_contains", self.page.get_by_role(target.role, name=target.name.replace("…", ""), exact=False)))
+            candidates.append(
+                (
+                    "role_contains",
+                    self.page.get_by_role(
+                        target.role, name=target.name.replace("…", ""), exact=False
+                    ),
+                )
+            )
             # Native controls can expose their option inventory as part of the
             # accessible name. Use the semantic leading label as a bounded
             # fallback; uniqueness and visibility checks still decide safety.
             if len(target.name.split()) >= 4 and len(target.name) >= 32:
                 prefix = target.name.split()[0]
-                candidates.append((
-                    "role_prefix",
-                    self.page.get_by_role(
-                        target.role,
-                        name=re.compile(r"^" + re.escape(prefix) + r"\b", re.IGNORECASE),
-                        exact=False,
-                    ),
-                ))
+                candidates.append(
+                    (
+                        "role_prefix",
+                        self.page.get_by_role(
+                            target.role,
+                            name=re.compile(r"^" + re.escape(prefix) + r"\b", re.IGNORECASE),
+                            exact=False,
+                        ),
+                    )
+                )
         if target.label:
             candidates.append(("label", self.page.get_by_label(target.label, exact=True)))
         # A selector captured from the observed DOM is stronger evidence for
@@ -159,9 +180,56 @@ class PlaywrightAdapter:
             candidates.append(("selector", self.page.locator(target.selector)))
         if target.text:
             candidates.append(("text", self.page.get_by_text(target.text, exact=True)))
-            flexible_text = re.compile("^" + r"\\s+".join(re.escape(part) for part in target.text.split()) + "$", re.IGNORECASE)
+            flexible_text = re.compile(
+                "^" + r"\\s+".join(re.escape(part) for part in target.text.split()) + "$",
+                re.IGNORECASE,
+            )
             candidates.append(("text_casefold", self.page.get_by_text(flexible_text)))
             candidates.append(("text_contains", self.page.get_by_text(target.text, exact=False)))
+        # Product surfaces are frequently embedded in same-origin or
+        # cross-origin iframes (hosted editors, checkout widgets, dashboards).
+        # Keep frame locators as a semantic fallback after the top-level DOM;
+        # grounded_locator still enforces uniqueness/visibility, so this does
+        # not weaken target safety or introduce coordinates.  Frame URLs are
+        # intentionally not persisted as routes: the containing page remains
+        # the story state and Playwright owns the frame execution context.
+        for index, frame in enumerate(getattr(self.page, "frames", [])[1:], start=1):
+            prefix = f"frame_{index}"
+            try:
+                if target.test_id:
+                    candidates.append((f"{prefix}:test_id", frame.get_by_test_id(target.test_id)))
+                if target.role and target.name:
+                    candidates.append(
+                        (
+                            f"{prefix}:role",
+                            frame.get_by_role(target.role, name=target.name, exact=True),
+                        )
+                    )
+                    candidates.append(
+                        (
+                            f"{prefix}:role_casefold",
+                            frame.get_by_role(target.role, name=flexible_name, exact=False),
+                        )
+                    )
+                if target.label:
+                    candidates.append(
+                        (f"{prefix}:label", frame.get_by_label(target.label, exact=True))
+                    )
+                if target.selector:
+                    candidates.append((f"{prefix}:selector", frame.locator(target.selector)))
+                if target.text:
+                    candidates.append(
+                        (f"{prefix}:text", frame.get_by_text(target.text, exact=True))
+                    )
+                    candidates.append((f"{prefix}:text_casefold", frame.get_by_text(flexible_text)))
+                    candidates.append(
+                        (f"{prefix}:text_contains", frame.get_by_text(target.text, exact=False))
+                    )
+            except (PlaywrightError, AttributeError):
+                # A frame can detach during SPA transitions. It remains an
+                # observational miss; the normal top-level candidates and
+                # runtime re-planner decide whether recovery is possible.
+                continue
         if not candidates:
             raise GroundingError(f"No deterministic grounding evidence for {target.name!r}")
         return candidates
@@ -194,6 +262,19 @@ class PlaywrightAdapter:
                 attempts.append(f"{strategy}:query-error")
                 continue
             if count == 1:
+                # A responsive shell can leave one matching node in the DOM
+                # while hiding it at the locked production viewport. Treat
+                # that as stale evidence and continue through the semantic
+                # role/text candidates instead of force-clicking a hidden
+                # element and masking the real recovery path.
+                if hasattr(locator, "is_visible"):
+                    try:
+                        if not await locator.is_visible():
+                            attempts.append(f"{strategy}:1-hidden")
+                            continue
+                    except PlaywrightError:
+                        attempts.append(f"{strategy}:visibility-error")
+                        continue
                 return locator, strategy
             if count > 1 and hasattr(locator, "nth"):
                 visible_indexes: list[int] = []
@@ -210,19 +291,42 @@ class PlaywrightAdapter:
                     # which is what a human naturally uses while continuing a
                     # page story. Geometry resolves duplicate DOM evidence but
                     # is never used as the click mechanism itself.
-                    positioned: list[tuple[float, int]] = []
+                    # Rank responsive duplicate controls from fresh geometry
+                    # evidence. The locator remains the only click mechanism;
+                    # geometry is never converted into a raw coordinate.
+                    spatial = SpatialIndex[int](cell_size=320)
                     for index in visible_indexes:
                         try:
                             box = await locator.nth(index).bounding_box()
-                            positioned.append((float(box["y"]) if box else float("inf"), index))
+                            if box:
+                                spatial.add(
+                                    index,
+                                    Rect(
+                                        x=float(box.get("x", 0)),
+                                        y=float(box.get("y", 0)),
+                                        width=float(box.get("width", 0)),
+                                        height=float(box.get("height", 0)),
+                                    ),
+                                )
                         except PlaywrightError:
-                            positioned.append((float("inf"), index))
-                    chosen = min(positioned)[1]
+                            continue
+                    if len(spatial):
+                        viewport = await self.page.evaluate(
+                            "() => ({width: window.innerWidth, height: window.innerHeight})"
+                        )
+                        chosen_entry = spatial.nearest(
+                            (
+                                float(viewport.get("width", 0)) / 2,
+                                float(viewport.get("height", 0)) / 2,
+                            ),
+                            tie_break=lambda entry: entry.rect.y,
+                        )
+                        chosen = chosen_entry.value if chosen_entry else visible_indexes[0]
+                    else:
+                        chosen = visible_indexes[0]
                     return locator.nth(chosen), f"{strategy}:visible-primary"
             attempts.append(f"{strategy}:{count}-matches")
-        raise GroundingError(
-            f"Unable to uniquely ground {target.name!r}; " + ", ".join(attempts)
-        )
+        raise GroundingError(f"Unable to uniquely ground {target.name!r}; " + ", ".join(attempts))
 
     async def visible_locator(self, target: Target) -> tuple[Any, str]:
         """Resolve evidence that an element is visible without treating it as an action target.
@@ -298,6 +402,7 @@ class PlaywrightAdapter:
         """
         self.ensure_page()
         dialogs = self.page.get_by_role("dialog")
+        had_visible_dialog = False
         try:
             count = await dialogs.count()
         except PlaywrightError:
@@ -307,6 +412,7 @@ class PlaywrightAdapter:
             try:
                 if not await dialog.is_visible():
                     continue
+                had_visible_dialog = True
                 for label in ("Close", "Cancel", "Dismiss"):
                     control = dialog.get_by_role("button", name=label, exact=False)
                     if await control.count() and await control.first.is_visible():
@@ -315,13 +421,29 @@ class PlaywrightAdapter:
                         return True
                 # Some libraries expose an icon-only close button with an
                 # aria-label but no accessible name in the dialog tree.
-                control = dialog.locator("button[aria-label*='close' i], button[data-testid*='close' i]")
+                control = dialog.locator(
+                    "button[aria-label*='close' i], button[data-testid*='close' i]"
+                )
                 if await control.count() and await control.first.is_visible():
                     await control.first.click()
                     await self.page.wait_for_timeout(350)
                     return True
             except PlaywrightError:
                 continue
+        # Native/browser-accessible dialogs and some canvas tool overlays do
+        # not expose a labelled close button but do support the standard
+        # Escape dismissal. This is a safe, read-only recovery: it never
+        # dispatches a product action or replays the failed operation.
+        if had_visible_dialog:
+            try:
+                await self.page.keyboard.press("Escape")
+                await self.page.wait_for_timeout(250)
+                for index in range(await dialogs.count()):
+                    if await dialogs.nth(index).is_visible():
+                        return False
+                return True
+            except PlaywrightError:
+                pass
         return False
 
     async def blocking_overlay(self, target: Target | None) -> str | None:
@@ -400,9 +522,182 @@ class PlaywrightAdapter:
                 except PlaywrightError:
                     await self.page.wait_for_timeout(700)
             return response
+        if operation.kind is OperationKind.POINTER_SEQUENCE:
+            payload = operation.value if isinstance(operation.value, dict) else {}
+            points = payload.get("points")
+            surface = None
+            if payload.get("pattern") == "short_reversible_stroke" and operation.target is not None:
+                surface, _ = await self.grounded_locator(operation.target)
+            if (
+                not isinstance(points, list)
+                and payload.get("pattern") == "short_reversible_stroke"
+                and operation.target is not None
+            ):
+                # Drawing coordinates are derived from the current, grounded
+                # surface geometry immediately before dispatch. This keeps a
+                # generic canvas action resilient to responsive layouts and
+                # avoids persisting provider- or site-specific coordinates.
+                box = await surface.bounding_box()
+                if not box or box.get("width", 0) < 16 or box.get("height", 0) < 16:
+                    raise GroundingError("Observed drawing surface has no usable geometry")
+                width, height = float(box["width"]), float(box["height"])
+                inset_x = min(max(width * 0.18, 24.0), width * 0.34)
+                inset_y = min(max(height * 0.18, 18.0), height * 0.34)
+                center_y = float(box["y"]) + height / 2
+                points = [
+                    {"x": float(box["x"]) + inset_x, "y": center_y - inset_y * 0.35},
+                    {"x": float(box["x"]) + width / 2, "y": center_y + inset_y * 0.35},
+                    {"x": float(box["x"]) + width - inset_x, "y": center_y - inset_y * 0.15},
+                ]
+            surface_fingerprint = None
+            surface_box = None
+            proof_box = None
+            if payload.get("pattern") == "short_reversible_stroke" and operation.target is not None:
+                # Capture a lightweight, target-local fingerprint before the
+                # gesture.  This is outcome evidence, not a product adapter:
+                # a clipped rendered screenshot is the only portable signal
+                # that covers layered canvas/SVG editors whose interactive
+                # canvas is transparent while a sibling layer paints pixels.
+                try:
+                    surface_box = await surface.bounding_box()
+                    if surface_box:
+                        # The whole editor frame can change when a tool panel
+                        # opens.  Prove the gesture itself by comparing a
+                        # padded region around the observed path, excluding
+                        # unrelated chrome/state changes from the outcome.
+                        xs = [
+                            float(point["x"])
+                            for point in points
+                            if isinstance(point, dict) and "x" in point
+                        ]
+                        ys = [
+                            float(point["y"])
+                            for point in points
+                            if isinstance(point, dict) and "y" in point
+                        ]
+                        if xs and ys:
+                            left = max(float(surface_box["x"]), min(xs) - 24)
+                            top = max(float(surface_box["y"]), min(ys) - 24)
+                            right = min(
+                                float(surface_box["x"]) + float(surface_box["width"]), max(xs) + 24
+                            )
+                            bottom = min(
+                                float(surface_box["y"]) + float(surface_box["height"]), max(ys) + 24
+                            )
+                            if right - left >= 8 and bottom - top >= 8:
+                                proof_box = {
+                                    "x": left,
+                                    "y": top,
+                                    "width": right - left,
+                                    "height": bottom - top,
+                                }
+                                surface_fingerprint = await self.page.screenshot(clip=proof_box)
+                except PlaywrightError:
+                    surface_fingerprint = None
+                payload = {**payload, "points": points}
+            if not isinstance(points, list) or len(points) < 2:
+                raise GroundingError("PointerSequence requires at least two observed points")
+            duration_ms = max(0, int(payload.get("duration_ms", 450)))
+            # Browser mouse moves are discrete events.  A three-point path is
+            # enough for cursor presentation but too sparse for drawing
+            # surfaces that build a stroke from continuous pointer movement.
+            # Interpolate a bounded, time-proportional path so the same
+            # evidence-backed gesture behaves naturally across editors.
+            if duration_ms > 0 and len(points) >= 2:
+                expanded: list[dict[str, float]] = [points[0]]
+                for start, end in pairwise(points):
+                    segment_steps = max(2, min(30, int(duration_ms / max(1, len(points) - 1) / 45)))
+                    for index in range(1, segment_steps + 1):
+                        progress = index / segment_steps
+                        expanded.append(
+                            {
+                                "x": float(start["x"])
+                                + (float(end["x"]) - float(start["x"])) * progress,
+                                "y": float(start["y"])
+                                + (float(end["y"]) - float(start["y"])) * progress,
+                            }
+                        )
+                points = expanded
+            pause_ms = duration_ms / max(1, len(points) - 1)
+            button = str(payload.get("button", "left"))
+            # A named reversible-stroke pattern is a complete drawing gesture,
+            # so it owns the pointerdown/pointerup pair unless the caller
+            # explicitly overrides it.  Previously the generated points were
+            # moved with no button pressed, making canvas/whiteboard actions
+            # silently no-op on real pages.
+            pressed = bool(
+                payload.get("press", payload.get("pattern") == "short_reversible_stroke")
+            )
+            first = points[0]
+            if not isinstance(first, dict) or not {"x", "y"} <= set(first):
+                raise GroundingError("PointerSequence points must contain observed x/y geometry")
+            # Establish the hover position before pressing. Pressing at the
+            # previous cursor location and then teleporting to the first point
+            # loses the initial pointerdown on many canvas implementations.
+            await self.page.mouse.move(float(first["x"]), float(first["y"]))
+            await self.page.wait_for_timeout(140)
+            if pressed:
+                await self.page.mouse.down(button=button)
+            for point in points[1:] if pressed else points:
+                if not isinstance(point, dict) or not {"x", "y"} <= set(point):
+                    raise GroundingError(
+                        "PointerSequence points must contain observed x/y geometry"
+                    )
+                await self.page.mouse.move(float(point["x"]), float(point["y"]))
+                if pause_ms:
+                    await self.page.wait_for_timeout(int(pause_ms))
+            if pressed or bool(payload.get("release", False)):
+                await self.page.mouse.up(button=button)
+            changed = None
+            if payload.get("pattern") == "short_reversible_stroke" and operation.target is not None:
+                try:
+                    # Canvas/SVG editors often commit their paint layer on the
+                    # next compositor tick after pointerup.  Let that render
+                    # settle before comparing the target-local witness; an
+                    # immediate screenshot can falsely report a no-op even
+                    # though the browser state changed successfully.
+                    await self.page.wait_for_timeout(120)
+                    after_fingerprint = (
+                        await self.page.screenshot(clip=proof_box) if proof_box else None
+                    )
+                    changed = bool(
+                        surface_fingerprint is not None and after_fingerprint != surface_fingerprint
+                    )
+                except PlaywrightError:
+                    changed = False
+            return {
+                "points": points,
+                "duration_ms": duration_ms,
+                "button": button,
+                **({"surface_changed": changed} if changed is not None else {}),
+            }
+        if operation.kind is OperationKind.READ_VALUE and operation.target is None:
+            return {
+                "url": self.page.url,
+                "text": (await self.page.locator("body").inner_text())[:2_000],
+            }
+        if (
+            operation.kind in {OperationKind.WAIT_FOR_STATE, OperationKind.VERIFY_STATE}
+            and operation.target is None
+        ):
+            timeout_ms = max(0, int(operation.value or 500))
+            await self.page.wait_for_timeout(timeout_ms)
+            return {"waited_ms": timeout_ms}
+        if operation.kind is OperationKind.KEY_PRESS and operation.target is None:
+            key = str(operation.value or "Escape")
+            await self.page.keyboard.press(key)
+            await self.page.wait_for_timeout(120)
+            return {"key": key, "scope": "page"}
         if operation.target is None:
             raise GroundingError(f"{operation.kind} needs a semantic target")
         locator, _ = await self.grounded_locator(operation.target)
+        if operation.kind is OperationKind.UPLOAD:
+            if not isinstance(operation.value, str) or not operation.value.strip():
+                raise GroundingError("Upload requires a local file path")
+            path = Path(operation.value).expanduser().resolve()
+            if not path.is_file():
+                raise GroundingError("Upload file does not exist")
+            return await locator.set_input_files(str(path))
         if operation.kind in {
             OperationKind.FILL_TEXT,
             OperationKind.FILL_EMAIL,
@@ -455,7 +750,9 @@ class PlaywrightAdapter:
                     currentTop: window.scrollY,
                 })"""
             )
-            desired_top = max(0, float(geometry["targetTop"]) - float(geometry["viewportHeight"]) * 0.32)
+            desired_top = max(
+                0, float(geometry["targetTop"]) - float(geometry["viewportHeight"]) * 0.32
+            )
             distance = desired_top - float(geometry["currentTop"])
             if self.cloud_mode:
                 # Remote CDP recordings can collapse a compositor animation into
@@ -482,7 +779,13 @@ class PlaywrightAdapter:
                     {"top": desired_top, "duration": duration_ms, "steps": steps},
                 )
                 await self.page.wait_for_timeout(450)
-                return motion or {"start_y": float(geometry["currentTop"]), "target_y": desired_top, "duration_ms": float(duration_ms), "steps": float(steps), "path": []}
+                return motion or {
+                    "start_y": float(geometry["currentTop"]),
+                    "target_y": desired_top,
+                    "duration_ms": float(duration_ms),
+                    "steps": float(steps),
+                    "path": [],
+                }
             # Use enough wheel samples for visible continuity without making a
             # remote CDP run spend several seconds on every landmark. Browser
             # sessions add command latency to each wheel event; a 30-sample
@@ -494,7 +797,9 @@ class PlaywrightAdapter:
                 await self.page.mouse.wheel(0, distance / steps)
                 await self.page.wait_for_timeout(70)
                 _, current_scroll = await self.view_state()
-                path.append({"x": float(current_scroll.get("x", 0)), "y": float(current_scroll.get("y", 0))})
+                path.append(
+                    {"x": float(current_scroll.get("x", 0)), "y": float(current_scroll.get("y", 0))}
+                )
             # Do not call scroll_into_view_if_needed here: it can undo the
             # directed wheel path with an abrupt anchor jump. The requested
             # target is intentionally positioned inside the reading region.
@@ -507,6 +812,47 @@ class PlaywrightAdapter:
                 "duration_ms": float(steps * 70 + 450),
                 "steps": float(steps),
                 "path": path,
+            }
+        if operation.kind is OperationKind.HOVER:
+            await locator.hover()
+            await self.page.wait_for_timeout(180)
+            return {"hovered": True}
+        if operation.kind is OperationKind.KEY_PRESS:
+            key = str(operation.value or "Enter")
+            await locator.press(key)
+            return {"key": key}
+        if operation.kind is OperationKind.DRAG:
+            payload = operation.value if isinstance(operation.value, dict) else {}
+            destination_data = payload.get("destination")
+            if not isinstance(destination_data, dict):
+                raise GroundingError("Drag requires an observed semantic destination")
+            destination = Target.model_validate(destination_data)
+            source_box = await self.target_rect(operation.target)
+            destination_box = await self.target_rect(destination)
+            if source_box is None or destination_box is None:
+                raise GroundingError("Drag requires visible source and destination geometry")
+            sx = source_box.x + source_box.width / 2
+            sy = source_box.y + source_box.height / 2
+            dx = destination_box.x + destination_box.width / 2
+            dy = destination_box.y + destination_box.height / 2
+            duration_ms = max(300, min(2_000, int(payload.get("duration_ms", 700))))
+            await self.page.mouse.move(sx, sy)
+            await self.page.wait_for_timeout(160)
+            await self.page.mouse.down()
+            steps = max(4, min(20, int(duration_ms / 50)))
+            for index in range(1, steps + 1):
+                progress = index / steps
+                # Smoothstep keeps the pointer human-like while retaining a
+                # deterministic path that can be reproduced from geometry.
+                eased = progress * progress * (3 - 2 * progress)
+                await self.page.mouse.move(sx + (dx - sx) * eased, sy + (dy - sy) * eased)
+                await self.page.wait_for_timeout(max(1, int(duration_ms / steps)))
+            await self.page.mouse.up()
+            return {
+                "source": {"x": sx, "y": sy},
+                "destination": {"x": dx, "y": dy},
+                "duration_ms": duration_ms,
+                "steps": steps,
             }
         if operation.kind == OperationKind.WAIT_FOR_STATE:
             return await locator.wait_for(state="visible", timeout=operation.value or 5_000)
@@ -534,7 +880,11 @@ class PlaywrightAdapter:
                 result = await locator.click(force=True)
             if operation.kind is OperationKind.OPEN_NAVIGATION_ITEM:
                 expected = next(
-                    (str(condition.expected) for condition in operation.postconditions if condition.kind == "url"),
+                    (
+                        str(condition.expected)
+                        for condition in operation.postconditions
+                        if condition.kind == "url"
+                    ),
                     None,
                 )
                 if expected:
@@ -554,7 +904,9 @@ class PlaywrightAdapter:
                         # auditable marker so the trace explains why it was
                         # used instead of silently pretending the click worked.
                         fallback_url = urljoin(self.page.url, expected)
-                        await self.page.goto(fallback_url, wait_until="domcontentloaded", timeout=20_000)
+                        await self.page.goto(
+                            fallback_url, wait_until="domcontentloaded", timeout=20_000
+                        )
                         await self.page.wait_for_timeout(450)
                         if not _navigation_reached(self.page.url, expected, fallback_url):
                             raise GroundingError(
@@ -580,24 +932,141 @@ class PlaywrightAdapter:
             # treating a fast cloud capture as an excuse to omit it.
             snapshot = await locator.evaluate(
                 """element => {
-                    const log = document.querySelector('[data-testid="event-log"]');
+                    const type = (element.getAttribute('type') || '').toLowerCase();
+                    const identity = [
+                      type,
+                      element.getAttribute('name') || '',
+                      element.getAttribute('autocomplete') || '',
+                      element.getAttribute('aria-label') || '',
+                      element.getAttribute('placeholder') || '',
+                    ].join(' ').toLowerCase();
+                    const sensitive = type === 'password' ||
+                      /(pass(word)?|secret|token|api[ _-]?key|one[ -]?time|otp|cvv|cvc|pin)/.test(identity);
+                    const fingerprint = value => {
+                      let hash = 2166136261;
+                      for (let index = 0; index < value.length; index += 1) {
+                        hash ^= value.charCodeAt(index);
+                        hash = Math.imul(hash, 16777619);
+                      }
+                      return (hash >>> 0).toString(16);
+                    };
                     return {
                         url: window.location.href,
                         text: (element.innerText || element.textContent || '').slice(0, 500),
-                        value: ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) ? element.value : null,
+                        page_text_hash: fingerprint((document.body?.innerText || '').slice(0, 12000)),
+                        dom_hash: fingerprint((document.body?.innerHTML || '').slice(0, 120000)),
+                        accessibility_hash: fingerprint(Array.from(document.querySelectorAll(
+                          'button,a,input,textarea,select,[role],[aria-label]'
+                        )).filter(node => {
+                          const rect = node.getBoundingClientRect();
+                          return rect.width > 0 && rect.height > 0 && getComputedStyle(node).visibility !== 'hidden';
+                        }).slice(0, 600).map(node => [
+                          node.getAttribute('role') || node.tagName.toLowerCase(),
+                          node.getAttribute('aria-label') || node.innerText || node.getAttribute('name') || '',
+                          node.getAttribute('aria-expanded') || '',
+                          node.getAttribute('aria-checked') || '',
+                          node.getAttribute('aria-selected') || '',
+                          node.disabled ? 'disabled' : ''
+                        ].join('|')).join('\\n')),
+                        value: !sensitive && ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) ? element.value : null,
                         attributes: {
                             className: typeof element.className === 'string' ? element.className : '',
                             ariaPressed: element.getAttribute('aria-pressed'),
                             checked: 'checked' in element ? element.checked : null,
                             disabled: 'disabled' in element ? element.disabled : null,
                         },
-                        visible_event_log: (log?.innerText || '').slice(-500),
                     };
                 }"""
             )
             return {**snapshot, "grounding_strategy": strategy}
         except PlaywrightError:  # Navigation can intentionally remove the previous target.
             return {"url": self.page.url, "target_available": False}
+
+    async def page_evidence(self, *, max_text: int = 6_000) -> dict[str, Any]:
+        """Capture bounded, non-secret evidence for a runtime replan.
+
+        This is intentionally read-only and does not enumerate hidden DOM or
+        credentials.  It gives a replanner the current URL, title, visible
+        prose, and visible semantic controls after an unexpected state.
+        """
+        self.ensure_page()
+        try:
+            script = """(limit) => ({
+                    url: window.location.href,
+                    title: document.title,
+                    text: (document.body?.innerText || '').slice(0, limit),
+                    controls: Array.from(document.querySelectorAll(
+                      'button, a, input, textarea, select, [role="button"], [role="link"], [role="tab"]'
+                    )).filter(element => {
+                      const box = element.getBoundingClientRect();
+                      return box.width > 0 && box.height > 0 &&
+                        getComputedStyle(element).visibility !== 'hidden';
+                    }).slice(0, 80).map(element => ({
+                      tag: element.tagName.toLowerCase(),
+                      role: element.getAttribute('role'),
+                      name: (element.getAttribute('aria-label') || element.innerText ||
+                        element.getAttribute('placeholder') || element.getAttribute('name') || '').trim().slice(0, 160),
+                      type: element.getAttribute('type'),
+                      disabled: Boolean(element.disabled),
+                    })).filter(item => item.name),
+                    shadowRoots: Array.from(document.querySelectorAll('*')).filter(element => element.shadowRoot)
+                      .slice(0, 20).map((host, index) => ({
+                        index,
+                        host: host.tagName.toLowerCase(),
+                        text: (host.shadowRoot.innerText || host.shadowRoot.textContent || '').slice(0, 1000),
+                        controls: Array.from(host.shadowRoot.querySelectorAll(
+                          'button, a, input, textarea, select, [role="button"], [role="link"], [role="tab"]'
+                        )).slice(0, 20).map(element => ({
+                          tag: element.tagName.toLowerCase(),
+                          role: element.getAttribute('role'),
+                          name: (element.getAttribute('aria-label') || element.innerText ||
+                            element.getAttribute('placeholder') || element.getAttribute('name') || '').trim().slice(0, 160),
+                        })).filter(item => item.name),
+                      })),
+                })"""
+            result = await self.page.evaluate(script, max_text)
+            # Include visible evidence hosted inside frames. The frame is an
+            # execution context, not a new product route; merge bounded text
+            # and controls so replanning can recover embedded workflows while
+            # retaining the top-level URL as the story identity.
+            frame_text: list[str] = []
+            frame_controls: list[dict[str, Any]] = []
+            for index, frame in enumerate(getattr(self.page, "frames", [])[1:], start=1):
+                try:
+                    nested = await frame.evaluate(script, max(500, max_text // 2))
+                except PlaywrightError:
+                    continue
+                nested_text = str(nested.get("text") or "").strip()
+                if nested_text:
+                    frame_text.append(f"[embedded frame {index}] {nested_text}")
+                for control in nested.get("controls", []) or []:
+                    if control not in frame_controls:
+                        frame_controls.append(control)
+            if frame_text:
+                result["text"] = (str(result.get("text") or "") + "\n" + "\n".join(frame_text))[
+                    :max_text
+                ]
+            if frame_controls:
+                result["controls"] = [*(result.get("controls", []) or []), *frame_controls[:80]]
+            shadow_text = []
+            shadow_controls = []
+            for item in result.get("shadowRoots", []) or []:
+                text = str(item.get("text") or "").strip()
+                if text:
+                    shadow_text.append(f"[shadow root {item.get('index')}] {text}")
+                for control in item.get("controls", []) or []:
+                    if control not in shadow_controls:
+                        shadow_controls.append(control)
+            if shadow_text:
+                result["text"] = (str(result.get("text") or "") + "\n" + "\n".join(shadow_text))[
+                    :max_text
+                ]
+            if shadow_controls:
+                result["controls"] = [*(result.get("controls", []) or []), *shadow_controls[:80]]
+            result.pop("shadowRoots", None)
+            return result
+        except PlaywrightError as error:
+            raise GroundingError("current page evidence is unavailable") from error
 
     async def snapshot_visible(self, target: Target) -> dict[str, Any]:
         """Snapshot a visible outcome witness without action-level uniqueness.
@@ -611,12 +1080,28 @@ class PlaywrightAdapter:
         locator, strategy = await self.visible_locator(target)
         try:
             snapshot = await locator.evaluate(
-                """element => ({
+                """element => {
+                    const type = (element.getAttribute('type') || '').toLowerCase();
+                    const identity = [type, element.getAttribute('name') || '',
+                      element.getAttribute('autocomplete') || '', element.getAttribute('aria-label') || '',
+                      element.getAttribute('placeholder') || ''].join(' ').toLowerCase();
+                    const sensitive = type === 'password' ||
+                      /(pass(word)?|secret|token|api[ _-]?key|one[ -]?time|otp|cvv|cvc|pin)/.test(identity);
+                    return {
                     url: window.location.href,
                     text: (element.innerText || element.textContent || '').slice(0, 500),
-                    value: ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) ? element.value : null,
+                    accessibility_hash: (() => {
+                      let hash = 2166136261;
+                      const value = Array.from(document.querySelectorAll('button,a,input,textarea,select,[role],[aria-label]'))
+                        .filter(node => { const rect = node.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; })
+                        .slice(0, 600).map(node => [node.getAttribute('role') || node.tagName.toLowerCase(), node.getAttribute('aria-label') || node.innerText || node.getAttribute('name') || '', node.getAttribute('aria-expanded') || '', node.getAttribute('aria-selected') || ''].join('|')).join('\\n');
+                      for (let index = 0; index < value.length; index += 1) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619); }
+                      return (hash >>> 0).toString(16);
+                    })(),
+                    value: !sensitive && ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) ? element.value : null,
                     attributes: { className: typeof element.className === 'string' ? element.className : '' },
-                })"""
+                    };
+                }"""
             )
             return {**snapshot, "grounding_strategy": strategy}
         except PlaywrightError:

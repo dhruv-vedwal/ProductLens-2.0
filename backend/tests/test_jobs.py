@@ -19,26 +19,40 @@ from productlens.contracts.models import (
 )
 from productlens.persistence.repository import RunRepository
 from productlens.providers.errors import ProviderError
-from productlens.services.jobs import DemoJobService, _form_schemas_for_context, _product_knowledge_for_context
+from productlens.services.jobs import (
+    DemoJobService,
+    _form_schemas_for_context,
+    _product_knowledge_for_context,
+)
 
 
 def test_form_persistence_prefers_scoped_capability_schemas_over_page_wide_controls():
     capability_schema = FormSchema(
         source_url="https://example.test/leads",
-        fields=[FormField(name="Full name", selector="[name=fullName]", control_type="text", required=True)],
+        fields=[
+            FormField(
+                name="Full name", selector="[name=fullName]", control_type="text", required=True
+            )
+        ],
     )
     context = ProductContext(
-        url="https://example.test/leads", title="Leads", application_type="web_application",
+        url="https://example.test/leads",
+        title="Leads",
+        application_type="web_application",
         elements=[
             # This broad page field must not replace the modal-local schema.
             # It could be a hidden/repeated design-system control in a fresh run.
             {"tag": "input", "name": "element-88", "selector": "input"},
         ],
-        capabilities=[ActionCapability(
-            kind="form", purpose="New", source_url="https://example.test/leads",
-            entry_target=Target(name="New", selector="#new"),
-            form_schema=capability_schema,
-        ).model_dump(mode="json")],
+        capabilities=[
+            ActionCapability(
+                kind="form",
+                purpose="New",
+                source_url="https://example.test/leads",
+                entry_target=Target(name="New", selector="#new"),
+                form_schema=capability_schema,
+            ).model_dump(mode="json")
+        ],
     )
 
     schemas = _form_schemas_for_context(context)
@@ -48,12 +62,18 @@ def test_form_persistence_prefers_scoped_capability_schemas_over_page_wide_contr
 
 def test_product_knowledge_snapshot_is_typed_and_content_fingerprinted():
     context = ProductContext(
-        url="https://example.test/", title="Example", application_type="web_application",
+        url="https://example.test/",
+        title="Example",
+        application_type="web_application",
         relevant_routes=["https://example.test/today"],
-        page_knowledge=[{
-            "url": "https://example.test/", "title": "Example", "purpose": "Overview",
-            "fingerprint": "fixture-fingerprint",
-        }],
+        page_knowledge=[
+            {
+                "url": "https://example.test/",
+                "title": "Example",
+                "purpose": "Overview",
+                "fingerprint": "fixture-fingerprint",
+            }
+        ],
     )
     knowledge = _product_knowledge_for_context(context, project_id="project-1")
     assert knowledge.project_id == "project-1"
@@ -133,7 +153,9 @@ async def test_fixture_job_persists_trace_and_artifact_locations(
 @pytest.mark.asyncio
 async def test_failed_cloud_generation_retains_browserbase_session_evidence(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
-    request = repository.create_request("cloud-request", "https://example.test", "Inspect dashboard")
+    request = repository.create_request(
+        "cloud-request", "https://example.test", "Inspect dashboard"
+    )
     run = repository.create_run(request["id"], str(tmp_path))
 
     class FailingGenerator:
@@ -161,10 +183,7 @@ async def test_failed_cloud_generation_retains_browserbase_session_evidence(tmp_
         "status": "FAILED",
     }
     assert repository.stage_job(run["id"], "DISCOVERY")["status"] == "FAILED"
-    assert all(
-        item["status"] == "QUEUED"
-        for item in repository.stage_jobs(run["id"])[1:]
-    )
+    assert all(item["status"] == "QUEUED" for item in repository.stage_jobs(run["id"])[1:])
 
 
 @pytest.mark.asyncio
@@ -181,8 +200,13 @@ async def test_direct_stage_validation_failure_is_not_left_running(tmp_path: Pat
     repository.update_stage_job(run["id"], "DISCOVERY", status="COMPLETE")
     with pytest.raises(ValueError):
         await DemoJobService(repository, tmp_path, url_generator=FailingGenerator()).run_url_stage(
-            run["id"], "PLANNING",
-            payload={"allow_external_side_effects": False, "audience": "prospect", "target_duration_seconds": 60},
+            run["id"],
+            "PLANNING",
+            payload={
+                "allow_external_side_effects": False,
+                "audience": "prospect",
+                "target_duration_seconds": 60,
+            },
         )
 
     assert repository.stage_job(run["id"], "PLANNING")["status"] == "FAILED"
@@ -196,12 +220,18 @@ async def test_failed_checkpoint_cannot_be_silently_skipped_on_resume(tmp_path: 
     run = repository.create_run(request["id"], str(tmp_path))
     repository.ensure_stage_jobs(run["id"])
     repository.update_stage_job(run["id"], "DISCOVERY", status="COMPLETE")
-    repository.update_stage_job(run["id"], "PLANNING", status="FAILED", error_code="EDITORIAL_REJECTED")
-    repository.update_run(run["id"], stage="PLANNING", status="FAILED", error_code="PLANNING_RUNTIMEERROR")
+    repository.update_stage_job(
+        run["id"], "PLANNING", status="FAILED", error_code="EDITORIAL_REJECTED"
+    )
+    repository.update_run(
+        run["id"], stage="PLANNING", status="FAILED", error_code="PLANNING_RUNTIMEERROR"
+    )
 
     with pytest.raises(RuntimeError, match="targeted retry"):
         await DemoJobService(repository, tmp_path, url_generator=object()).run_url_stage(
-            run["id"], "PLANNING", payload={},
+            run["id"],
+            "PLANNING",
+            payload={},
         )
 
     assert repository.stage_job(run["id"], "PLANNING")["status"] == "FAILED"
@@ -212,7 +242,9 @@ async def test_failed_checkpoint_cannot_be_silently_skipped_on_resume(tmp_path: 
 async def test_execution_stage_forwards_cloud_production_to_url_generator(tmp_path: Path):
     """The durable worker must not silently downgrade cloud production to local."""
     repository = RunRepository(tmp_path / "productlens.sqlite3")
-    request = repository.create_request("cloud-production", "https://example.test", "Inspect dashboard")
+    request = repository.create_request(
+        "cloud-production", "https://example.test", "Inspect dashboard"
+    )
     run = repository.create_run(request["id"], str(tmp_path))
     artifacts = RunArtifacts(tmp_path, run["id"])
     artifacts.write_json("presentation/presentation-plan.json", {})
@@ -223,7 +255,9 @@ async def test_execution_stage_forwards_cloud_production_to_url_generator(tmp_pa
         async def execute_stage(self, **kwargs):
             self.captured = kwargs
             return DemoTrace(
-                run_id=kwargs["run_id"], objective="Inspect dashboard", started_at=datetime.now(UTC),
+                run_id=kwargs["run_id"],
+                objective="Inspect dashboard",
+                started_at=datetime.now(UTC),
                 outcome_verified=True,
                 events=[],
             )
@@ -270,7 +304,12 @@ async def test_direct_url_stage_provisions_the_same_durable_checkpoint_ledger(tm
     )
     stages = repository.stage_jobs(run["id"])
     assert [item["stage"] for item in stages] == [
-        "DISCOVERY", "PLANNING", "EXECUTION", "NARRATION", "RENDER", "VIDEO_QA"
+        "DISCOVERY",
+        "PLANNING",
+        "EXECUTION",
+        "NARRATION",
+        "RENDER",
+        "VIDEO_QA",
     ]
     assert stages[0]["status"] == "COMPLETE"
     assert all(item["status"] == "QUEUED" for item in stages[1:])
@@ -279,7 +318,9 @@ async def test_direct_url_stage_provisions_the_same_durable_checkpoint_ledger(tm
 @pytest.mark.asyncio
 async def test_creation_intent_rehearses_before_durable_planning(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
-    request = repository.create_request("creation-stage", "https://example.test", "Create an isolated demo record")
+    request = repository.create_request(
+        "creation-stage", "https://example.test", "Create an isolated demo record"
+    )
     run = repository.create_run(request["id"], str(tmp_path))
 
     class Generator:
@@ -291,19 +332,36 @@ async def test_creation_intent_rehearses_before_durable_planning(tmp_path: Path)
 
         async def plan_stage(self, **_kwargs):
             self.calls.append("planning")
-            operation = SemanticOperation(kind=OperationKind.NAVIGATE, intent="Open product", value="https://example.test")
+            operation = SemanticOperation(
+                kind=OperationKind.NAVIGATE, intent="Open product", value="https://example.test"
+            )
             return DemoPlan(
-                objective="Create an isolated demo record", narrative_goal="demo", audience="prospect",
-                target_duration_seconds=60, selected_workflow="record",
-                workflow_steps=[WorkflowStep(id="one", intent=operation.intent, operation=operation)],
-                expected_outcomes=["record"], viewport_strategy="native", stop_conditions=["done"],
+                objective="Create an isolated demo record",
+                narrative_goal="demo",
+                audience="prospect",
+                target_duration_seconds=60,
+                selected_workflow="record",
+                workflow_steps=[
+                    WorkflowStep(id="one", intent=operation.intent, operation=operation)
+                ],
+                expected_outcomes=["record"],
+                viewport_strategy="native",
+                stop_conditions=["done"],
             )
 
     generator = Generator()
     repository.ensure_stage_jobs(run["id"])
     repository.update_stage_job(run["id"], "DISCOVERY", status="COMPLETE")
     await DemoJobService(repository, tmp_path, url_generator=generator).run_url_stage(
-        run["id"], "PLANNING",
-        payload={"allow_external_side_effects": False, "allow_isolated_record_creation": True, "cloud_discovery": False, "credential_reference": None, "audience": "prospect", "target_duration_seconds": 60},
+        run["id"],
+        "PLANNING",
+        payload={
+            "allow_external_side_effects": False,
+            "allow_isolated_record_creation": True,
+            "cloud_discovery": False,
+            "credential_reference": None,
+            "audience": "prospect",
+            "target_duration_seconds": 60,
+        },
     )
     assert generator.calls == ["rehearsal", "planning"]

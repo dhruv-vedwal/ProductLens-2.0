@@ -5,7 +5,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 import productlens.api.main as api_main
-from productlens.api.main import app, repository, settings
+from productlens.api.main import (
+    GenerationRequest,
+    RetryRequest,
+    app,
+    repository,
+    resolve_cloud_discovery,
+    settings,
+)
 from productlens.contracts.models import ObjectiveSpec, UnderstandingPreview
 
 
@@ -38,7 +45,8 @@ def isolate_api_test_queue(monkeypatch: pytest.MonkeyPatch):
 
 def account(client: TestClient, email: str) -> tuple[dict[str, str], dict]:
     response = client.post(
-        "/auth/signup", json={"email": email, "password": "correct-horse-battery", "display_name": "Demo User"}
+        "/auth/signup",
+        json={"email": email, "password": "correct-horse-battery", "display_name": "Demo User"},
     )
     assert response.status_code == 201
     payload = response.json()
@@ -48,7 +56,8 @@ def account(client: TestClient, email: str) -> tuple[dict[str, str], dict]:
 def test_authentication_and_operational_endpoints_expose_no_provider_secrets():
     client = TestClient(app)
     preflight = client.options(
-        "/runs", headers={"Origin": "http://127.0.0.1:3000", "Access-Control-Request-Method": "POST"}
+        "/runs",
+        headers={"Origin": "http://127.0.0.1:3000", "Access-Control-Request-Method": "POST"},
     )
     assert preflight.status_code == 200
     assert preflight.headers["access-control-allow-origin"] == "http://127.0.0.1:3000"
@@ -61,16 +70,50 @@ def test_authentication_and_operational_endpoints_expose_no_provider_secrets():
     assert "database_ready" in readiness.json()
     providers = client.get("/providers", headers=headers)
     assert providers.status_code == 200
-    assert all("credential_reference" in provider and "api_key" not in provider for provider in providers.json())
+    assert all(
+        "credential_reference" in provider and "api_key" not in provider
+        for provider in providers.json()
+    )
     projects = client.get("/projects", headers=headers)
     assert projects.status_code == 200 and projects.json()
     created = client.post("/projects", json={"name": "API project"}, headers=headers)
     assert created.status_code == 200 and created.json()["name"] == "API project"
-    renamed = client.patch(f"/projects/{created.json()['id']}", json={"name": "Renamed project"}, headers=headers)
+    renamed = client.patch(
+        f"/projects/{created.json()['id']}", json={"name": "Renamed project"}, headers=headers
+    )
     assert renamed.status_code == 200 and renamed.json()["name"] == "Renamed project"
     assert client.get("/runs/not-a-run/details", headers=headers).status_code == 404
     assert client.post("/auth/logout", headers=headers).status_code == 204
     assert client.get("/projects", headers=headers).status_code == 401
+
+
+def test_duration_envelope_accepts_long_evidence_backed_stories():
+    """API validation must match the 600-second ObjectiveSpec/DemoPlan envelope."""
+    request = GenerationRequest(
+        url="https://example.test",
+        objective="Show the complete workflow",
+        target_duration_seconds=600,
+    )
+    retry = RetryRequest(target_duration_seconds=600)
+    assert request.target_duration_seconds == retry.target_duration_seconds == 600
+
+
+def test_cloud_discovery_is_capability_aware_but_explicitly_overridable():
+    request = GenerationRequest(url="https://example.test", objective="Show the workflow")
+    assert request.cloud_discovery is None
+    assert (
+        GenerationRequest(
+            url="https://example.test", objective="Show the workflow", cloud_discovery=False
+        ).cloud_discovery
+        is False
+    )
+
+
+def test_cloud_discovery_resolution_uses_capability_only_for_unspecified_requests():
+    assert resolve_cloud_discovery(None, browserbase_configured=True) is True
+    assert resolve_cloud_discovery(None, browserbase_configured=False) is False
+    assert resolve_cloud_discovery(False, browserbase_configured=True) is False
+    assert resolve_cloud_discovery(True, browserbase_configured=False) is True
 
 
 def test_projects_and_runs_are_user_scoped():
@@ -78,9 +121,14 @@ def test_projects_and_runs_are_user_scoped():
     alice_headers, alice = account(client, f"alice-{uuid4().hex}@example.test")
     bob_headers, _ = account(client, f"bob-{uuid4().hex}@example.test")
     project = client.post("/projects", json={"name": "Alice launch"}, headers=alice_headers).json()
-    request = repository.create_request(str(uuid4()), "fixture://gate-1", "Alice demo", project["id"])
+    request = repository.create_request(
+        str(uuid4()), "fixture://gate-1", "Alice demo", project["id"]
+    )
     run = repository.create_run(request["id"], str(settings.artifact_root))
-    assert client.get("/projects", headers=bob_headers).json() != client.get("/projects", headers=alice_headers).json()
+    assert (
+        client.get("/projects", headers=bob_headers).json()
+        != client.get("/projects", headers=alice_headers).json()
+    )
     assert client.get(f"/runs/{run['id']}", headers=bob_headers).status_code == 404
     assert client.get(f"/runs/{run['id']}/artifacts", headers=bob_headers).status_code == 404
     assert client.get(f"/runs/{run['id']}", headers=alice_headers).status_code == 200
@@ -98,20 +146,40 @@ def test_retry_preserves_non_secret_generation_intent_but_requires_new_side_effe
     client = TestClient(app)
     headers, user = account(client, f"retry-{uuid4().hex}@example.test")
     project = repository.ensure_user_project(user["id"])
-    request = repository.create_request(str(uuid4()), "https://example.test", "Show dashboard", project["id"])
+    request = repository.create_request(
+        str(uuid4()), "https://example.test", "Show dashboard", project["id"]
+    )
     run = repository.create_run(request["id"], str(settings.artifact_root))
-    repository.enqueue_job(run["id"], "url", {"allow_external_side_effects": True, "cloud_discovery": True, "stagehand_assist": True, "max_pages": 4, "render": True, "credential_reference": "secret://productlens/demo-login", "audience": "sales leaders", "target_duration_seconds": 180})
+    repository.enqueue_job(
+        run["id"],
+        "url",
+        {
+            "allow_external_side_effects": True,
+            "cloud_discovery": True,
+            "stagehand_assist": True,
+            "max_pages": 4,
+            "render": True,
+            "credential_reference": "secret://productlens/demo-login",
+            "audience": "sales leaders",
+            "target_duration_seconds": 180,
+        },
+    )
     repository.update_run(run["id"], stage="FAILED", status="FAILED")
     response = client.post(f"/runs/{run['id']}/retry", json={}, headers=headers)
     assert response.status_code == 200
-    assert repository.job_for_run(response.json()["run_id"])["payload"]["allow_external_side_effects"] is False
+    assert (
+        repository.job_for_run(response.json()["run_id"])["payload"]["allow_external_side_effects"]
+        is False
+    )
 
 
 def test_authenticated_run_operations_are_scoped_and_preserve_evidence():
     client = TestClient(app)
     headers, user = account(client, f"operations-{uuid4().hex}@example.test")
     project = repository.ensure_user_project(user["id"])
-    request = repository.create_request(str(uuid4()), "https://example.test", "Show product", project["id"])
+    request = repository.create_request(
+        str(uuid4()), "https://example.test", "Show product", project["id"]
+    )
     run = repository.create_run(request["id"], str(settings.artifact_root))
     repository.enqueue_job(run["id"], "url", {"render": True})
 
@@ -123,13 +191,30 @@ def test_authenticated_run_operations_are_scoped_and_preserve_evidence():
     assert client.get(f"/runs/{run['id']}", headers=headers).status_code == 404
 
 
+def test_run_events_streams_terminal_status_without_polling():
+    client = TestClient(app)
+    headers, user = account(client, f"events-{uuid4().hex}@example.test")
+    project = repository.ensure_user_project(user["id"])
+    request = repository.create_request(str(uuid4()), "fixture://gate-1", "Events", project["id"])
+    run = repository.create_run(request["id"], str(settings.artifact_root))
+    repository.update_run(run["id"], stage="COMPLETE", status="COMPLETE")
+    with client.stream("GET", f"/runs/{run['id']}/events", headers=headers) as response:
+        assert response.status_code == 200
+        body = "".join(response.iter_text())
+    assert "event: status" in body
+    assert run["id"] in body
+    assert '"status":"COMPLETE"' in body
+
+
 def test_knowledge_invalidation_requires_workspace_access():
     client = TestClient(app)
     headers, user = account(client, f"knowledge-{uuid4().hex}@example.test")
     project = repository.ensure_user_project(user["id"])
     repository.create_request(str(uuid4()), "https://example.test", "Show product", project["id"])
     repository.upsert_knowledge("https://example.test", {"title": "Example"}, 0.9)
-    response = client.post("/knowledge/invalidate", json={"url": "https://example.test"}, headers=headers)
+    response = client.post(
+        "/knowledge/invalidate", json={"url": "https://example.test"}, headers=headers
+    )
     assert response.status_code == 200 and response.json()["invalidated"] is True
 
 

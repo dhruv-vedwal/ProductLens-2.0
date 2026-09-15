@@ -13,7 +13,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from productlens.contracts.models import DemoTrace
+from productlens.contracts.models import DemoTrace, OperationKind
 
 _WIDTH, _HEIGHT, _FPS = 32, 18, 2
 _FRAME_BYTES = _WIDTH * _HEIGHT
@@ -47,7 +47,10 @@ def align_trace_to_recording(
 
     native = _video_hashes(recording)
     if not native:
-        return trace, {"status": "unavailable", "reason": "native_recording_has_no_decodable_frames"}
+        return trace, {
+            "status": "unavailable",
+            "reason": "native_recording_has_no_decodable_frames",
+        }
     first_receipt, last_receipt = receipts[0][1], receipts[-1][1]
     wall_span = max(0.001, (last_receipt - first_receipt).total_seconds())
     source_duration = native[-1][0]
@@ -59,16 +62,25 @@ def align_trace_to_recording(
         witnesses.append((event.id, "occurred_at", event.occurred_at))
 
     by_event: dict[str, dict[str, float]] = {}
+    event_by_id = {event.id: event for event in trace.events}
     findings: list[dict[str, object]] = []
     previous = 0.0
     confidence_values: list[float] = []
     for event_id, field, observed_at in witnesses:
-        nearest_index = min(receipts, key=lambda item: abs((item[1] - observed_at).total_seconds()))[0]
+        nearest_index = min(
+            receipts, key=lambda item: abs((item[1] - observed_at).total_seconds())
+        )[0]
         witness = screencast_frames / f"frame-{nearest_index:07d}.jpg"
         witness_hash = _image_hash(witness)
         if witness_hash is None:
             continue
-        expected = max(0.0, min(source_duration, source_duration * (observed_at - first_receipt).total_seconds() / wall_span))
+        expected = max(
+            0.0,
+            min(
+                source_duration,
+                source_duration * (observed_at - first_receipt).total_seconds() / wall_span,
+            ),
+        )
         # Compare scores in the same normalised unit. The image hash contains
         # one bit per sampled pixel (576 bits), not 64 bits. Treating it as a
         # 64-bit hash made visually equivalent Browserbase/CDP frames look
@@ -80,8 +92,7 @@ def align_trace_to_recording(
         # evenly-spaced scene clock.
         choices = [
             (
-                distance / _HASH_BITS
-                + min(1.0, abs(second - expected) / 20.0) * 0.35,
+                distance / _HASH_BITS + min(1.0, abs(second - expected) / 20.0) * 0.35,
                 second,
                 distance,
             )
@@ -93,14 +104,35 @@ def align_trace_to_recording(
             continue
         _, source_second, distance = min(choices)
         previous = max(previous, source_second)
-        confidence = max(0.0, 1.0 - distance / _HASH_BITS)
+        visual_confidence = max(0.0, 1.0 - distance / _HASH_BITS)
+        # A cloud scroll dispatch is not guaranteed to have a distinct
+        # composited frame at the exact Playwright action timestamp: the
+        # browser may emit the first witness only after the motion begins.
+        # For scrolls, the recorder's monotonic timestamp mapping is stronger
+        # evidence of the dispatch boundary than a pre-motion pixel hash. Keep
+        # strict perceptual matching for clicks/forms/state changes, while
+        # allowing a temporally aligned scroll witness to carry the clock.
+        temporal_confidence = max(0.0, 1.0 - min(1.0, abs(source_second - expected) / 20.0))
+        event = event_by_id.get(event_id)
+        confidence = (
+            max(visual_confidence, temporal_confidence)
+            if event is not None and event.kind is OperationKind.SCROLL_TO
+            else visual_confidence
+        )
         confidence_values.append(confidence)
         by_event.setdefault(event_id, {})[field] = source_second
-        findings.append({
-            "event_id": event_id, "field": field, "witness_frame": nearest_index,
-            "source_second": round(source_second, 3), "hash_distance": distance,
-            "confidence": round(confidence, 3),
-        })
+        findings.append(
+            {
+                "event_id": event_id,
+                "field": field,
+                "witness_frame": nearest_index,
+                "source_second": round(source_second, 3),
+                "hash_distance": distance,
+                "confidence": round(confidence, 3),
+                "visual_confidence": round(visual_confidence, 3),
+                "temporal_confidence": round(temporal_confidence, 3),
+            }
+        )
     complete = len(by_event) == len([event for event in trace.events if event.success]) and all(
         {"action_at", "occurred_at"}.issubset(item) for item in by_event.values()
     )
@@ -114,12 +146,16 @@ def align_trace_to_recording(
     # aligned.  Reject genuinely weak timelines, but allow a strong average
     # with a small number of transition outliers and surface that condition in
     # the persisted report for visual QA.
-    if not complete or average < 0.75 or (
-        low_confidence > max(2, len(confidence_values) // 8) and average < 0.85
+    if (
+        not complete
+        or average < 0.75
+        or (low_confidence > max(2, len(confidence_values) // 8) and average < 0.85)
     ):
         return trace, {
-            "status": "rejected", "reason": "source_timeline_alignment_low_confidence",
-            "average_confidence": round(average, 3), "low_confidence_count": low_confidence,
+            "status": "rejected",
+            "reason": "source_timeline_alignment_low_confidence",
+            "average_confidence": round(average, 3),
+            "low_confidence_count": low_confidence,
             "findings": findings,
         }
     events = []
@@ -129,35 +165,67 @@ def align_trace_to_recording(
             events.append(event)
             continue
         action, reveal = mapped["action_at"], max(mapped["action_at"], mapped["occurred_at"])
-        events.append(event.model_copy(update={
-            "action_at": trace.recording_started_at + timedelta(seconds=action),
-            "occurred_at": trace.recording_started_at + timedelta(seconds=reveal),
-        }))
+        events.append(
+            event.model_copy(
+                update={
+                    "action_at": trace.recording_started_at + timedelta(seconds=action),
+                    "occurred_at": trace.recording_started_at + timedelta(seconds=reveal),
+                }
+            )
+        )
     return trace.model_copy(update={"events": events}), {
-        "status": "aligned", "average_confidence": round(average, 3),
-        "sample_rate": _FPS, "findings": findings,
+        "status": "aligned",
+        "average_confidence": round(average, 3),
+        "sample_rate": _FPS,
+        "findings": findings,
         "warnings": ["sparse_transition_witnesses"] if low_confidence else [],
     }
 
 
 def _video_hashes(video: Path) -> list[tuple[float, int]]:
     result = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(video), "-vf",
-         f"fps={_FPS},scale={_WIDTH}:{_HEIGHT},format=gray", "-f", "rawvideo", "-"],
-        capture_output=True, check=False,
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(video),
+            "-vf",
+            f"fps={_FPS},scale={_WIDTH}:{_HEIGHT},format=gray",
+            "-f",
+            "rawvideo",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
     )
     payload = result.stdout
     return [
-        (index / _FPS, _hash(payload[index * _FRAME_BYTES:(index + 1) * _FRAME_BYTES]))
+        (index / _FPS, _hash(payload[index * _FRAME_BYTES : (index + 1) * _FRAME_BYTES]))
         for index in range(len(payload) // _FRAME_BYTES)
     ]
 
 
 def _image_hash(path: Path) -> int | None:
     result = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path), "-frames:v", "1", "-vf",
-         f"scale={_WIDTH}:{_HEIGHT},format=gray", "-f", "rawvideo", "-"],
-        capture_output=True, check=False,
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={_WIDTH}:{_HEIGHT},format=gray",
+            "-f",
+            "rawvideo",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
     )
     return _hash(result.stdout) if len(result.stdout) == _FRAME_BYTES else None
 

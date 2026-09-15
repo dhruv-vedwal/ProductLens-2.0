@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from productlens.providers.errors import ProviderError
+from productlens.providers.limits import provider_limit
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ class StagehandProvider:
         self.openrouter_api_key = openrouter_api_key
         self.openrouter_model = openrouter_model
         self.bridge = bridge or Path(__file__).resolve().parents[3] / "stagehand" / "observe.mjs"
+        self._invoke_limit = asyncio.Semaphore(provider_limit("stagehand"))
 
     async def observe(
         self,
@@ -102,7 +104,9 @@ class StagehandProvider:
         if environment not in {"LOCAL", "BROWSERBASE"}:
             raise ValueError("Stagehand environment must be LOCAL or BROWSERBASE")
         if environment == "BROWSERBASE" and not self.browserbase_api_key:
-            raise ProviderError("stagehand", None, "Browserbase API key is required for cloud observation")
+            raise ProviderError(
+                "stagehand", None, "Browserbase API key is required for cloud observation"
+            )
         if not self.bridge.is_file():
             raise ProviderError("stagehand", None, "Stagehand bridge is not installed")
         payload = {
@@ -129,44 +133,13 @@ class StagehandProvider:
             "stagehandExtensionId": browserbase_extension_id,
             "cacheDir": str(cache_dir) if cache_dir else None,
         }
-        process: asyncio.subprocess.Process | None = None
+        # Observation and action calls share the same bounded subprocess gate.
+        # Without this path through ``_invoke``, concurrent discovery runs
+        # could each start an unbounded Stagehand process and exhaust browser
+        # slots before provider backpressure had a chance to apply.
+        response = await self._invoke(payload)
         try:
-            environment_values = os.environ.copy()
-            # The Browserbase API key authenticates both the cloud browser and
-            # Browserbase Model Gateway. It is never serialized into artifacts.
-            if self.browserbase_api_key:
-                environment_values["BROWSERBASE_API_KEY"] = self.browserbase_api_key
-            if self.browserbase_project_id:
-                environment_values["BROWSERBASE_PROJECT_ID"] = self.browserbase_project_id
-            if self.openrouter_api_key:
-                environment_values["OPENROUTER_API_KEY"] = self.openrouter_api_key
-            if self.openrouter_model:
-                environment_values["OPENROUTER_MODEL"] = self.openrouter_model
-            process = await asyncio.create_subprocess_exec(
-                self.node,
-                str(self.bridge),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=environment_values,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(json.dumps(payload).encode()), timeout=90
-            )
-        except (OSError, TimeoutError) as error:
-            # Cancelling ``communicate`` alone leaves a Node/Browserbase
-            # observation process alive. That consumes an agent slot and can
-            # hold a cloud session after ProductLens has already rejected the
-            # observation. Terminate it deterministically before surfacing the
-            # provider failure; no workflow action is retried here.
-            if process is not None:
-                await _terminate_process_tree(process)
-            raise ProviderError("stagehand", None, "Stagehand observation failed to start") from error
-        if process.returncode != 0:
-            raise ProviderError("stagehand", None, stderr.decode(errors="replace")[:500])
-        try:
-            response = json.loads(stdout)
-            if not isinstance(response, dict) or response.get("version") not in {1, 2}:
+            if response.get("version") not in {1, 2}:
                 raise ValueError("unsupported bridge response")
             observed_url = response.get("observedUrl")
             if observed_url is not None and (
@@ -196,7 +169,8 @@ class StagehandProvider:
                 analysis=analysis,
                 analysis_error=(
                     str(response.get("analysisError"))[:500]
-                    if response.get("analysisError") else None
+                    if response.get("analysisError")
+                    else None
                 ),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -204,14 +178,19 @@ class StagehandProvider:
             # output (which may contain page text or provider details).
             message = str(error)
             category = (
-                "origin" if "origin" in message else
-                "version" if "version" in message or "bridge response" in message else
-                "candidate" if "candidate" in message else
-                "analysis" if "analysis" in message else
-                "json"
+                "origin"
+                if "origin" in message
+                else "version"
+                if "version" in message or "bridge response" in message
+                else "candidate"
+                if "candidate" in message
+                else "analysis"
+                if "analysis" in message
+                else "json"
             )
             raise ProviderError(
-                "stagehand", None,
+                "stagehand",
+                None,
                 f"Stagehand returned an invalid observation ({category})",
             ) from error
 
@@ -235,7 +214,9 @@ class StagehandProvider:
         if environment not in {"LOCAL", "BROWSERBASE"}:
             raise ValueError("Stagehand environment must be LOCAL or BROWSERBASE")
         if environment == "BROWSERBASE" and not self.browserbase_api_key:
-            raise ProviderError("stagehand", None, "Browserbase API key is required for cloud action")
+            raise ProviderError(
+                "stagehand", None, "Browserbase API key is required for cloud action"
+            )
         if not self.bridge.is_file():
             raise ProviderError("stagehand", None, "Stagehand bridge is not installed")
         payload = {
@@ -269,14 +250,22 @@ class StagehandProvider:
             message = str(result.get("message") or "")[:500]
             action = str(result.get("action") or candidate.description)[:500]
             return StagehandActionResult(
-                success=result["success"], message=message, action=action,
+                success=result["success"],
+                message=message,
+                action=action,
                 observed_url=observed_url,
                 environment=str(response.get("environment") or environment),
             )
         except (TypeError, ValueError) as error:
-            raise ProviderError("stagehand", None, "Stagehand returned an invalid action result") from error
+            raise ProviderError(
+                "stagehand", None, "Stagehand returned an invalid action result"
+            ) from error
 
     async def _invoke(self, payload: dict[str, object]) -> dict[str, object]:
+        async with self._invoke_limit:
+            return await self._invoke_unbounded(payload)
+
+    async def _invoke_unbounded(self, payload: dict[str, object]) -> dict[str, object]:
         """Run the bridge with bounded lifetime and never expose its stderr."""
         process: asyncio.subprocess.Process | None = None
         try:
@@ -290,8 +279,11 @@ class StagehandProvider:
             if self.openrouter_model:
                 environment_values["OPENROUTER_MODEL"] = self.openrouter_model
             process = await asyncio.create_subprocess_exec(
-                self.node, str(self.bridge), stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                self.node,
+                str(self.bridge),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 env=environment_values,
             )
             stdout, stderr = await asyncio.wait_for(
@@ -327,7 +319,11 @@ async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
     try:
         if os.name == "nt" and getattr(process, "pid", None):
             killer = await asyncio.create_subprocess_exec(
-                "taskkill", "/PID", str(process.pid), "/T", "/F",
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -360,11 +356,18 @@ async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
 def _same_origin(requested: str, observed: str) -> bool:
     request_origin = urlsplit(requested)
     observed_origin = urlsplit(observed)
+
     def host_port(value):
         hostname = (value.hostname or "").lower().rstrip(".")
         port = value.port
         if port is None:
-            port = 443 if value.scheme.lower() == "https" else 80 if value.scheme.lower() == "http" else None
+            port = (
+                443
+                if value.scheme.lower() == "https"
+                else 80
+                if value.scheme.lower() == "http"
+                else None
+            )
         return hostname, port
 
     requested_host, requested_port = host_port(request_origin)
@@ -409,7 +412,10 @@ def _validated_candidate(value: object) -> StagehandCandidate:
     if len(selector) > 2_000 or len(description) > 1_000 or not isinstance(arguments, list):
         raise ValueError("candidate fields exceed safe bridge limits")
     return StagehandCandidate(
-        selector=selector.strip(), description=description.strip(), method=method.strip(), arguments=arguments[:20]
+        selector=selector.strip(),
+        description=description.strip(),
+        method=method.strip(),
+        arguments=arguments[:20],
     )
 
 

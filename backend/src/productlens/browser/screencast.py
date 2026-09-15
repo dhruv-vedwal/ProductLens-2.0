@@ -61,7 +61,9 @@ class CdpScreencastRecorder:
         # frame to send.  Frame count is therefore not wall-clock time.
         # Retaining the CDP timestamp prevents a 5-minute cloud recording from
         # becoming an 80-second fast-forward when FFmpeg later encodes it.
-        self._frame_timestamps.append((index, float(timestamp) if isinstance(timestamp, (int, float)) else 0.0))
+        self._frame_timestamps.append(
+            (index, float(timestamp) if isinstance(timestamp, (int, float)) else 0.0)
+        )
         self._frame_receipts.append(
             {
                 "index": index,
@@ -140,25 +142,60 @@ class CdpScreencastRecorder:
         timestamps = sorted(self._frame_timestamps)
         lines = ["ffconcat version 1.0"]
         for position, (index, timestamp) in enumerate(timestamps):
-            path = (self.output_directory / f"frame-{index:07d}.jpg").resolve().as_posix().replace("'", "\\'")
+            path = (
+                (self.output_directory / f"frame-{index:07d}.jpg")
+                .resolve()
+                .as_posix()
+                .replace("'", "\\'")
+            )
             lines.append(f"file '{path}'")
             if position + 1 < len(timestamps):
                 next_timestamp = timestamps[position + 1][1]
-                duration = next_timestamp - timestamp if timestamp and next_timestamp else 1 / self.frame_rate
+                duration = (
+                    next_timestamp - timestamp
+                    if timestamp and next_timestamp
+                    else 1 / self.frame_rate
+                )
                 # Preserve real pacing but defend against malformed metadata
                 # and pathological tab-suspension gaps.
                 lines.append(f"duration {min(2.0, max(1 / 60, duration)):.6f}")
         # ffconcat needs the final file a second time for its previous duration.
         final_index = timestamps[-1][0]
-        final_path = (self.output_directory / f"frame-{final_index:07d}.jpg").resolve().as_posix().replace("'", "\\'")
+        final_path = (
+            (self.output_directory / f"frame-{final_index:07d}.jpg")
+            .resolve()
+            .as_posix()
+            .replace("'", "\\'")
+        )
         lines.append(f"file '{final_path}'")
         concat.write_text("\n".join(lines) + "\n", encoding="utf-8")
         result = await asyncio.to_thread(
             subprocess.run,
             [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
-                "-i", str(concat), "-fps_mode", "vfr", "-c:v", "libvpx-vp9", "-deadline", "realtime",
-                "-cpu-used", "8", "-row-mt", "1", "-pix_fmt", "yuv420p", str(output),
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat),
+                "-fps_mode",
+                "vfr",
+                "-c:v",
+                "libvpx-vp9",
+                "-deadline",
+                "realtime",
+                "-cpu-used",
+                "8",
+                "-row-mt",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+                str(output),
             ],
             capture_output=True,
             text=True,

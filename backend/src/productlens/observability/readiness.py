@@ -23,7 +23,12 @@ def probe_object_storage(storage: Any) -> dict[str, Any]:
     try:
         storage.client.head_bucket(Bucket=storage.bucket)
     except Exception as error:  # pragma: no cover - provider-specific failures  # noqa: BLE001
-        return {"ready": False, "provider": type(storage).__name__, "bucket": storage.bucket, "error": str(error)}
+        return {
+            "ready": False,
+            "provider": type(storage).__name__,
+            "bucket": storage.bucket,
+            "error": str(error),
+        }
     return {"ready": True, "provider": type(storage).__name__, "bucket": storage.bucket}
 
 
@@ -37,7 +42,11 @@ def probe_database(connection: Any) -> dict[str, Any]:
         if callable(close):
             close()
         if not row or row[0] != 1:
-            return {"ready": False, "provider": type(connection).__name__, "error": "health query returned no sentinel"}
+            return {
+                "ready": False,
+                "provider": type(connection).__name__,
+                "error": "health query returned no sentinel",
+            }
     except Exception as error:  # pragma: no cover - driver-specific failures  # noqa: BLE001
         return {"ready": False, "provider": type(connection).__name__, "error": str(error)}
     return {"ready": True, "provider": type(connection).__name__}

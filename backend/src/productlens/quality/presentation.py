@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from productlens.contracts.models import DemoTrace
+from productlens.contracts.models import DemoTrace, OperationKind
 
 
 def inspect_visual_state(state: dict[str, Any]) -> dict[str, Any]:
@@ -28,7 +28,9 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
     beats = props.get("beats") if isinstance(props.get("beats"), list) else []
     captions = props.get("captions") if isinstance(props.get("captions"), list) else []
     cursor_paths = props.get("cursorPaths") if isinstance(props.get("cursorPaths"), list) else []
-    event_viewports = props.get("eventViewports") if isinstance(props.get("eventViewports"), dict) else {}
+    event_viewports = (
+        props.get("eventViewports") if isinstance(props.get("eventViewports"), dict) else {}
+    )
     source_width = float(props.get("sourceWidth") or 1920)
     source_height = float(props.get("sourceHeight") or 1080)
     successful_count = sum(event.success for event in trace.events)
@@ -37,7 +39,10 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
     if successful_count and len(beats) < successful_count:
         failures.append("MISSING_PRESENTATION_BEATS")
     successful_ids = [event.id for event in trace.events if event.success]
-    if any("eventId" in beat for beat in beats) and [str(beat.get("eventId", "")) for beat in beats] != successful_ids:
+    if (
+        any("eventId" in beat for beat in beats)
+        and [str(beat.get("eventId", "")) for beat in beats] != successful_ids
+    ):
         failures.append("PRESENTATION_BEAT_TRACE_MISMATCH")
     playback_rate = float(props.get("playbackRate") or 1.0)
     if playback_rate < 0.9:
@@ -52,7 +57,7 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
         if click_frame < start or click_frame >= end:
             failures.append("CURSOR_CLICK_OUTSIDE_PRESENTATION_BEAT")
             break
-        if zoom < 1.0 or zoom > 1.2:
+        if zoom < 1.0 or zoom > 1.36:
             failures.append("EXCESSIVE_PRESENTATION_ZOOM")
             break
     beats_by_id = {str(beat.get("eventId", "")): beat for beat in beats}
@@ -64,28 +69,91 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
         # click.  Likewise, an off-viewport navigation target cannot have a
         # truthful on-canvas cursor geometry; the director intentionally omits
         # those paths rather than drawing a jump outside the frame.
-        viewport = event_viewports.get(event.id) if isinstance(event_viewports.get(event.id), dict) else {}
-        viewport_width = float(viewport.get("width") or (event.viewport.width if event.viewport else source_width))
-        viewport_height = float(viewport.get("height") or (event.viewport.height if event.viewport else source_height))
+        viewport = (
+            event_viewports.get(event.id) if isinstance(event_viewports.get(event.id), dict) else {}
+        )
+        viewport_width = float(
+            viewport.get("width") or (event.viewport.width if event.viewport else source_width)
+        )
+        viewport_height = float(
+            viewport.get("height") or (event.viewport.height if event.viewport else source_height)
+        )
         target_in_view = (
-            event.target_rect.x >= 0 and event.target_rect.y >= 0
+            event.target_rect.x >= 0
+            and event.target_rect.y >= 0
             and event.target_rect.x + event.target_rect.width <= viewport_width
             and event.target_rect.y + event.target_rect.height <= viewport_height
         )
-        if event.kind.value == "ScrollTo" or not target_in_view:
+        if event.kind is OperationKind.SCROLL_TO or not target_in_view:
             continue
         path = path_by_id.get(event.id)
         if path is None:
             failures.append("MISSING_CURSOR_PATH")
             break
         destination = path.get("destination") if isinstance(path.get("destination"), dict) else {}
-        expected_x = (event.target_rect.x + event.target_rect.width / 2) * source_width / max(1, viewport_width)
-        expected_y = (event.target_rect.y + event.target_rect.height / 2) * source_height / max(1, viewport_height)
-        if abs(float(destination.get("x", -1)) - expected_x) > 1 or abs(float(destination.get("y", -1)) - expected_y) > 1:
+        # For a drag, ``target_rect`` identifies the source affordance.  The
+        # viewer-facing endpoint is the observed browser gesture destination;
+        # comparing it with the source center falsely rejected valid canvas
+        # and drag-and-drop demonstrations.
+        gesture = event.after.get("gesture") if isinstance(event.after, dict) else None
+        observed_destination = None
+        if event.kind is OperationKind.DRAG and isinstance(gesture, dict):
+            observed_destination = gesture.get("destination")
+        elif event.kind is OperationKind.POINTER_SEQUENCE and isinstance(gesture, dict):
+            points = gesture.get("points")
+            if isinstance(points, list) and points and isinstance(points[-1], dict):
+                observed_destination = points[-1]
+        if isinstance(observed_destination, dict):
+            expected_x = (
+                float(observed_destination.get("x", 0)) * source_width / max(1, viewport_width)
+            )
+            expected_y = (
+                float(observed_destination.get("y", 0)) * source_height / max(1, viewport_height)
+            )
+        else:
+            expected_x = (
+                (event.target_rect.x + event.target_rect.width / 2)
+                * source_width
+                / max(1, viewport_width)
+            )
+            expected_y = (
+                (event.target_rect.y + event.target_rect.height / 2)
+                * source_height
+                / max(1, viewport_height)
+            )
+        if (
+            abs(float(destination.get("x", -1)) - expected_x) > 1
+            or abs(float(destination.get("y", -1)) - expected_y) > 1
+        ):
             failures.append("CURSOR_PATH_TARGET_MISMATCH")
             break
+        if isinstance(gesture, dict) and event.kind is OperationKind.DRAG:
+            observed_source = gesture.get("source")
+            waypoints = path.get("waypoints") if isinstance(path.get("waypoints"), list) else []
+            source_waypoint = waypoints[0] if waypoints and isinstance(waypoints[0], dict) else {}
+            if isinstance(observed_source, dict):
+                source_x = (
+                    float(observed_source.get("x", 0)) * source_width / max(1, viewport_width)
+                )
+                source_y = (
+                    float(observed_source.get("y", 0)) * source_height / max(1, viewport_height)
+                )
+                if (
+                    abs(float(source_waypoint.get("x", -1)) - source_x) > 1
+                    or abs(float(source_waypoint.get("y", -1)) - source_y) > 1
+                ):
+                    failures.append("CURSOR_PATH_SOURCE_MISMATCH")
+                    break
         source = path.get("source") if isinstance(path.get("source"), dict) else {}
-        if min(float(source.get("x", -1)), float(source.get("y", -1)), float(destination.get("x", -1)), float(destination.get("y", -1))) < 0:
+        if (
+            min(
+                float(source.get("x", -1)),
+                float(source.get("y", -1)),
+                float(destination.get("x", -1)),
+                float(destination.get("y", -1)),
+            )
+            < 0
+        ):
             failures.append("CURSOR_PATH_OUTSIDE_VIEWPORT")
             break
     previous_end = 0.0
@@ -136,7 +204,9 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
     }
 
 
-def attach_presentation_qa(video_report: dict[str, Any], presentation_report: dict[str, Any]) -> dict[str, Any]:
+def attach_presentation_qa(
+    video_report: dict[str, Any], presentation_report: dict[str, Any]
+) -> dict[str, Any]:
     """Make presentation-contract failures delivery-blocking visual failures."""
     failures = [*video_report.get("hard_failures", []), *presentation_report["hard_failures"]]
     return {

@@ -17,7 +17,14 @@ BENCHMARK_ID = "productlens-local-reliability-gates-v1"
 SUPPORT_ENVELOPE = {
     "environment": "local Playwright + supplied HTML fixtures",
     "application_categories": ["CRM", "dashboard", "form workflow", "authenticated workflow"],
-    "interaction_categories": ["navigation", "forms", "selects", "modals", "scrolling", "state verification"],
+    "interaction_categories": [
+        "navigation",
+        "forms",
+        "selects",
+        "modals",
+        "scrolling",
+        "state verification",
+    ],
     "provider_backed": False,
 }
 
@@ -37,7 +44,6 @@ class GateMeasurement:
     @property
     def first_pass_rate(self) -> float:
         return self.successes / self.attempts if self.attempts else 0
-
 
 
 async def repeat_gate(gate: int, attempts: int, root: Path) -> GateMeasurement:
@@ -126,7 +132,9 @@ def _report(attempts: int, gates: tuple[int, ...], measurements: list[GateMeasur
         "overall_first_pass_rate": overall,
         "metrics": {
             "task_success_rate": overall,
-            "critical_action_success_rate": successful_actions / total_actions if total_actions else 0.0,
+            "critical_action_success_rate": successful_actions / total_actions
+            if total_actions
+            else 0.0,
             "state_verification_rate": verified_actions / total_actions if total_actions else 0.0,
             "target_grounding_accuracy": grounded_actions / total_actions if total_actions else 0.0,
             "average_repair_count": repairs / completed_runs if completed_runs else 0.0,
@@ -148,18 +156,27 @@ def aggregate_reports(reports: list[dict]) -> dict:
     than averaging percentages (which can overweight tiny samples).
     """
     if not reports:
-        return {"report_count": 0, "attempts": 0, "successes": 0, "first_pass_rate": 0.0, "eligible": False}
-    attempts = sum(int(report.get("attempts_per_gate", 0)) * len(report.get("requested_gates", [])) for report in reports)
-    successes = sum(
-        sum(int(gate.get("successes", 0)) for gate in report.get("gates", []))
+        return {
+            "report_count": 0,
+            "attempts": 0,
+            "successes": 0,
+            "first_pass_rate": 0.0,
+            "eligible": False,
+        }
+    attempts = sum(
+        int(report.get("attempts_per_gate", 0)) * len(report.get("requested_gates", []))
         for report in reports
+    )
+    successes = sum(
+        sum(int(gate.get("successes", 0)) for gate in report.get("gates", [])) for report in reports
     )
     return {
         "report_count": len(reports),
         "attempts": attempts,
         "successes": successes,
         "first_pass_rate": successes / attempts if attempts else 0.0,
-        "eligible": attempts >= 900 and len({report.get("benchmark_id") for report in reports}) == 1,
+        "eligible": attempts >= 900
+        and len({report.get("benchmark_id") for report in reports}) == 1,
         "benchmark_ids": sorted({str(report.get("benchmark_id")) for report in reports}),
         "support_envelopes": [report.get("support_envelope", {}) for report in reports],
     }

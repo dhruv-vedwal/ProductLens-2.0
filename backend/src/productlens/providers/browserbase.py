@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from contextlib import suppress
 
 import httpx
 
 from productlens.providers.errors import ProviderError
+from productlens.providers.limits import provider_limit
 
 
 @dataclass(frozen=True)
@@ -22,8 +23,14 @@ class BrowserbaseSessionInfo:
 class BrowserbaseProvider:
     """Creates remote browser sessions; Playwright remains the execution owner."""
 
-    def __init__(self, api_key: str, project_id: str | None = None, *, session_timeout_seconds: int = 1800,
-                 stagehand_extension_path: Path | None = None):
+    def __init__(
+        self,
+        api_key: str,
+        project_id: str | None = None,
+        *,
+        session_timeout_seconds: int = 1800,
+        stagehand_extension_path: Path | None = None,
+    ):
         self.api_key = api_key
         self.project_id = project_id
         self.session_timeout_seconds = max(60, min(1800, int(session_timeout_seconds)))
@@ -32,11 +39,34 @@ class BrowserbaseProvider:
             / "stagehand/node_modules/@browserbasehq/stagehand/dist/assets/stagehand-extension.zip"
         )
         self._stagehand_extensions: dict[str, str] = {}
+        self._request_limit = asyncio.Semaphore(provider_limit("browserbase"))
+
+    def _bounded_deadline(self, requested_seconds: int, *, minimum: int = 10) -> int:
+        """Keep provider waits within the isolated session's configured lease."""
+        return max(minimum, min(self.session_timeout_seconds, int(requested_seconds)))
 
     async def create_session(self) -> str:
         return (await self.create_session_info()).session_id
 
     async def create_session_info(
+        self,
+        *,
+        viewport: dict[str, int] | None = None,
+        user_metadata: dict[str, object] | None = None,
+        region: str | None = None,
+        keep_alive: bool | None = None,
+        proxies: bool | list[dict[str, object]] | None = None,
+    ) -> BrowserbaseSessionInfo:
+        async with self._request_limit:
+            return await self._create_session_info_unbounded(
+                viewport=viewport,
+                user_metadata=user_metadata,
+                region=region,
+                keep_alive=keep_alive,
+                proxies=proxies,
+            )
+
+    async def _create_session_info_unbounded(
         self,
         *,
         viewport: dict[str, int] | None = None,
@@ -90,7 +120,9 @@ class BrowserbaseProvider:
             if extension_id:
                 await self._delete_stagehand_extension(extension_id)
             response = getattr(error, "response", None)
-            raise ProviderError("browserbase", getattr(response, "status_code", None), str(error)) from error
+            raise ProviderError(
+                "browserbase", getattr(response, "status_code", None), str(error)
+            ) from error
         payload = response.json()
         connect_url = payload.get("connectUrl") or payload.get("connect_url")
         if not payload.get("id") or not connect_url:
@@ -98,7 +130,8 @@ class BrowserbaseProvider:
         if extension_id:
             self._stagehand_extensions[str(payload["id"])] = extension_id
         return BrowserbaseSessionInfo(
-            session_id=payload["id"], connect_url=connect_url,
+            session_id=payload["id"],
+            connect_url=connect_url,
             stagehand_extension_id=extension_id,
         )
 
@@ -152,7 +185,10 @@ class BrowserbaseProvider:
                     async with httpx.AsyncClient(timeout=30) as client:
                         response = await client.post(
                             f"https://api.browserbase.com/v1/sessions/{session_id}",
-                            headers={"x-bb-api-key": self.api_key, "Content-Type": "application/json"},
+                            headers={
+                                "x-bb-api-key": self.api_key,
+                                "Content-Type": "application/json",
+                            },
                             json={
                                 "status": "REQUEST_RELEASE",
                                 **({"projectId": self.project_id} if self.project_id else {}),
@@ -202,7 +238,7 @@ class BrowserbaseProvider:
                     json={},
                 )
                 requested.raise_for_status()
-                attempts = max(1, timeout_seconds // 2)
+                attempts = max(1, self._bounded_deadline(timeout_seconds) // 2)
                 completed: dict | None = None
                 for _ in range(attempts):
                     response = await client.get(
@@ -211,12 +247,17 @@ class BrowserbaseProvider:
                     )
                     response.raise_for_status()
                     downloads = response.json().get("downloads", [])
-                    failed = [item for item in downloads if str(item.get("status", "")).upper() == "FAILED"]
+                    failed = [
+                        item
+                        for item in downloads
+                        if str(item.get("status", "")).upper() == "FAILED"
+                    ]
                     if failed:
                         raise RuntimeError("Browserbase native recording assembly failed")
                     completed = next(
                         (
-                            item for item in downloads
+                            item
+                            for item in downloads
                             if str(item.get("status", "")).upper() == "COMPLETED"
                             and isinstance(item.get("downloadUrl"), str)
                         ),
@@ -231,7 +272,9 @@ class BrowserbaseProvider:
                 media.raise_for_status()
         except httpx.HTTPError as error:
             response = getattr(error, "response", None)
-            raise ProviderError("browserbase", getattr(response, "status_code", None), str(error)) from error
+            raise ProviderError(
+                "browserbase", getattr(response, "status_code", None), str(error)
+            ) from error
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(media.content)
         if not output.is_file() or output.stat().st_size == 0:
@@ -257,7 +300,8 @@ class BrowserbaseProvider:
         headers = {"x-bb-api-key": self.api_key}
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                deadline = asyncio.get_running_loop().time() + max(10, timeout_seconds)
+                replay_timeout = self._bounded_deadline(timeout_seconds)
+                deadline = asyncio.get_running_loop().time() + replay_timeout
                 pages: list[dict] = []
                 while asyncio.get_running_loop().time() < deadline:
                     response = await client.get(
@@ -275,7 +319,9 @@ class BrowserbaseProvider:
                     raise RuntimeError("Browserbase session replay is not available")
                 page = max(
                     pages,
-                    key=lambda item: int(item.get("endTimeMs", 0)) - int(item.get("startTimeMs", 0)),
+                    key=lambda item: (
+                        int(item.get("endTimeMs", 0)) - int(item.get("startTimeMs", 0))
+                    ),
                 )
                 page_id = str(page.get("pageId", "0"))
                 playlist_response = await client.get(
@@ -286,34 +332,71 @@ class BrowserbaseProvider:
                 playlist = playlist_response.text
         except httpx.HTTPError as error:
             response = getattr(error, "response", None)
-            raise ProviderError("browserbase", getattr(response, "status_code", None), str(error)) from error
-        if "#EXTM3U" not in playlist or not any(line.startswith("https://") for line in playlist.splitlines()):
+            raise ProviderError(
+                "browserbase", getattr(response, "status_code", None), str(error)
+            ) from error
+        if "#EXTM3U" not in playlist or not any(
+            line.startswith("https://") for line in playlist.splitlines()
+        ):
             raise RuntimeError("Browserbase replay returned an invalid HLS playlist")
         output.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", suffix=".m3u8", delete=False, encoding="utf-8") as handle:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".m3u8", delete=False, encoding="utf-8"
+        ) as handle:
             handle.write(playlist)
             playlist_path = Path(handle.name)
         try:
             # Replay assembly is provider work too: bound it independently of
             # the HTTP playlist polling so a corrupt/stalled signed segment
             # cannot strand a worker after the Browserbase session is closed.
-            assembly_timeout = max(30, min(300, int(timeout_seconds)))
+            # Respect the caller's bounded replay deadline.  The previous
+            # 300-second ceiling was unrelated to the configured Browserbase
+            # session timeout and caused long, valid walkthroughs to fail
+            # during local HLS assembly even after the remote recording had
+            # completed.  Callers still provide the bound; this provider does
+            # not invent a shorter product-duration limit.
+            assembly_timeout = self._bounded_deadline(timeout_seconds, minimum=30)
             try:
                 await asyncio.wait_for(
                     asyncio.to_thread(
                         subprocess.run,
-                        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file,http,https,tcp,tls,crypto", "-i", str(playlist_path), "-map", "0:v:0", "-an", "-c", "copy", str(output)],
-                        check=True, capture_output=True, text=True,
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-protocol_whitelist",
+                            "file,http,https,tcp,tls,crypto",
+                            "-i",
+                            str(playlist_path),
+                            "-map",
+                            "0:v:0",
+                            "-an",
+                            "-c",
+                            "copy",
+                            str(output),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
                         timeout=assembly_timeout,
                     ),
                     timeout=assembly_timeout + 5,
                 )
             except (TimeoutError, subprocess.TimeoutExpired) as error:
-                raise RuntimeError(f"Browserbase replay assembly timed out after {assembly_timeout}s") from error
+                raise RuntimeError(
+                    f"Browserbase replay assembly timed out after {assembly_timeout}s"
+                ) from error
         except (OSError, subprocess.CalledProcessError) as error:
             raise RuntimeError(f"Browserbase replay assembly failed: {error}") from error
         finally:
             playlist_path.unlink(missing_ok=True)
         if not output.is_file() or output.stat().st_size == 0:
             raise RuntimeError("Browserbase replay assembly produced an empty video")
-        return {"provider": "browserbase", "session_id": session_id, "page_id": page_id, "artifact": str(output)}
+        return {
+            "provider": "browserbase",
+            "session_id": session_id,
+            "page_id": page_id,
+            "artifact": str(output),
+        }

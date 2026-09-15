@@ -4,6 +4,7 @@ The execution trace is an audit trail, not a screenplay.  A rendered scene is
 therefore given a page-local role and an explicit completion contract so a tab
 cannot be considered covered simply because its navigation click succeeded.
 """
+
 from __future__ import annotations
 
 from urllib.parse import urlsplit, urlunsplit
@@ -15,10 +16,14 @@ def _page_key(url: str | None) -> str:
     if not url:
         return "unknown"
     parts = urlsplit(url)
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/", parts.query, ""))
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/", parts.query, "")
+    )
 
 
-def build_scene_plan(trace: DemoTrace, *, storyboard: EditorialStoryboard | None = None) -> list[dict]:
+def build_scene_plan(
+    trace: DemoTrace, *, storyboard: EditorialStoryboard | None = None
+) -> list[dict]:
     scenes: list[dict] = []
     # A page that has a directed local scroll is content-dense by definition.
     # Its opening/explanation captions must not sit over the lower rows/cards
@@ -48,13 +53,36 @@ def build_scene_plan(trace: DemoTrace, *, storyboard: EditorialStoryboard | None
             phase, page_stage, lead, dwell = "demonstrate", "demonstrate", 0.45, 2.0
         else:
             phase, page_stage, lead, dwell = "explain", "inspect", 0.4, 1.8
-        editorial = next((scene for scene in (storyboard.scenes if storyboard else []) if scene.operation_id == event.operation_id), None)
+        editorial = next(
+            (
+                scene
+                for scene in (storyboard.scenes if storyboard else [])
+                if scene.operation_id == event.operation_id
+            ),
+            None,
+        )
         if editorial:
             # An editorial scene has stronger semantic information than an
             # event type. Preserve its phase while retaining page-local stage.
             phase = editorial.story_phase
-            if phase in {"context", "enter", "explain", "demonstrate", "verify", "transition", "close"}:
-                page_stage = {"context": "establish", "enter": "enter", "explain": "explain", "demonstrate": "demonstrate", "verify": "verify", "transition": "transition", "close": "transition"}[phase]
+            if phase in {
+                "context",
+                "enter",
+                "explain",
+                "demonstrate",
+                "verify",
+                "transition",
+                "close",
+            }:
+                page_stage = {
+                    "context": "establish",
+                    "enter": "enter",
+                    "explain": "explain",
+                    "demonstrate": "demonstrate",
+                    "verify": "verify",
+                    "transition": "transition",
+                    "close": "transition",
+                }[phase]
         # Captions are explanatory, never an opaque obstruction. A target in
         # the lower portion of the recorded viewport gets the top safe zone;
         # otherwise the bottom overlay preserves the product's heading/nav.
@@ -114,60 +142,115 @@ def build_scene_plan(trace: DemoTrace, *, storyboard: EditorialStoryboard | None
             and event.target_rect.x + event.target_rect.width <= event.viewport.width
             and event.target_rect.y + event.target_rect.height <= event.viewport.height
         )
-        scenes.append({
-            "event_id": event.id, "scene_id": editorial.id if editorial else f"trace-{event.id}",
-            "intent": event.intent, "phase": phase, "page_stage": page_stage, "page_key": page_key,
-            "lead_seconds": lead, "dwell_seconds": editorial.required_dwell_seconds if editorial else dwell,
-            # Navigation is still a real human click. Hiding the overlay for
-            # every transition made tab changes look disconnected from the
-            # recorded gesture and masked cursor/target QA.
-            "show_cursor": kind in {OperationKind.CLICK, OperationKind.OPEN_NAVIGATION_ITEM, OperationKind.OPEN_MODAL, OperationKind.CLOSE_MODAL, OperationKind.SUBMIT, OperationKind.APPLY_FILTER},
-            "caption_safe_zone": caption_safe_zone,
-            "editorial_scene_id": editorial.id if editorial else None,
-            "completion_criteria": editorial.completion_criteria if editorial else ["verified operation completed"],
-            "required_content": editorial.visible_proof if editorial else [event.intent],
-            "required_content_groups": list(event.required_content_groups),
-            "covered_content_groups": list(event.covered_content_groups),
-            "page_contract_phases": list(event.page_contract_phases),
-            "page_contract": {
-                "page": page_key,
-                "stage": page_stage,
-                "required": ["establish", "explore", "explain", "demonstrate_or_inspect", "verify", "transition"],
-                "complete_only_after": "visible evidence is held for the required dwell and the scene completion criteria are met",
-            },
-            "camera": {
-                # Focus is an editorial exception. A form field being filled
-                # is compact, actionable evidence; headings, page transitions
-                # and ordinary reading retain the source-faithful full frame.
-                "mode": "target-focus" if compact_reading_target or kind in {
-                    OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE,
-                    OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE,
-                    OperationKind.SELECT_DATE_RANGE,
-                } else "full-frame",
-                "reason": "compact evidence region is being explained with surrounding context preserved" if compact_reading_target else "compact actionable control is being demonstrated" if kind in {
-                    OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE,
-                    OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE,
-                    OperationKind.SELECT_DATE_RANGE,
-                } else "page context is more valuable than target magnification",
-                "duration_seconds": 0.45,
-                # A form scene is the one place where the viewer needs to
-                # follow a value being entered. Give it a meaningful but
-                # bounded reframe; broad page reading retains the full frame.
-                "zoom": 1.14 if kind in {
-                    OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE,
-                    OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE,
-                    OperationKind.SELECT_DATE_RANGE,
-                } else 1.10 if compact_reading_target else 1.0,
-                "easing": "out-cubic",
-                "safety_bounds": "preserve-browser-frame",
-            },
-            "cursor": {"mode": "natural-path", "pre_action_pause_seconds": 0.25, "click_at_target_center": True},
-            "scroll": {
-                "mode": "directed" if kind is OperationKind.SCROLL_TO else "none",
-                "continuity": "intermediate-landmarks-and-settle" if kind is OperationKind.SCROLL_TO else "not-applicable",
-                "settle_seconds": 0.55 if kind is OperationKind.SCROLL_TO else 0.3,
-            },
-        })
+        scenes.append(
+            {
+                "event_id": event.id,
+                "scene_id": editorial.id if editorial else f"trace-{event.id}",
+                "intent": event.intent,
+                "phase": phase,
+                "page_stage": page_stage,
+                "page_key": page_key,
+                "lead_seconds": lead,
+                "dwell_seconds": editorial.required_dwell_seconds if editorial else dwell,
+                # Navigation is still a real human click. Hiding the overlay for
+                # every transition made tab changes look disconnected from the
+                # recorded gesture and masked cursor/target QA.
+                "show_cursor": kind
+                in {
+                    OperationKind.CLICK,
+                    OperationKind.OPEN_NAVIGATION_ITEM,
+                    OperationKind.OPEN_MODAL,
+                    OperationKind.CLOSE_MODAL,
+                    OperationKind.SUBMIT,
+                    OperationKind.APPLY_FILTER,
+                    OperationKind.DRAG,
+                    OperationKind.POINTER_SEQUENCE,
+                },
+                "caption_safe_zone": caption_safe_zone,
+                "editorial_scene_id": editorial.id if editorial else None,
+                "completion_criteria": editorial.completion_criteria
+                if editorial
+                else ["verified operation completed"],
+                "required_content": editorial.visible_proof if editorial else [event.intent],
+                "required_content_groups": list(event.required_content_groups),
+                "covered_content_groups": list(event.covered_content_groups),
+                "page_contract_phases": list(event.page_contract_phases),
+                "page_contract": {
+                    "page": page_key,
+                    "stage": page_stage,
+                    "required": [
+                        "establish",
+                        "explore",
+                        "explain",
+                        "demonstrate_or_inspect",
+                        "verify",
+                        "transition",
+                    ],
+                    "complete_only_after": "visible evidence is held for the required dwell and the scene completion criteria are met",
+                },
+                "camera": {
+                    # Focus is an editorial exception. A form field being filled
+                    # is compact, actionable evidence; headings, page transitions
+                    # and ordinary reading retain the source-faithful full frame.
+                    "mode": "target-focus"
+                    if compact_reading_target
+                    or kind
+                    in {
+                        OperationKind.FILL_TEXT,
+                        OperationKind.FILL_EMAIL,
+                        OperationKind.FILL_PHONE,
+                        OperationKind.SELECT_OPTION,
+                        OperationKind.SELECT_DATE,
+                        OperationKind.SELECT_DATE_RANGE,
+                    }
+                    else "full-frame",
+                    "reason": "compact evidence region is being explained with surrounding context preserved"
+                    if compact_reading_target
+                    else "compact actionable control is being demonstrated"
+                    if kind
+                    in {
+                        OperationKind.FILL_TEXT,
+                        OperationKind.FILL_EMAIL,
+                        OperationKind.FILL_PHONE,
+                        OperationKind.SELECT_OPTION,
+                        OperationKind.SELECT_DATE,
+                        OperationKind.SELECT_DATE_RANGE,
+                    }
+                    else "page context is more valuable than target magnification",
+                    "duration_seconds": 0.45,
+                    # A form scene is the one place where the viewer needs to
+                    # follow a value being entered. Give it a meaningful but
+                    # bounded reframe; broad page reading retains the full frame.
+                    "zoom": 1.14
+                    if kind
+                    in {
+                        OperationKind.FILL_TEXT,
+                        OperationKind.FILL_EMAIL,
+                        OperationKind.FILL_PHONE,
+                        OperationKind.SELECT_OPTION,
+                        OperationKind.SELECT_DATE,
+                        OperationKind.SELECT_DATE_RANGE,
+                    }
+                    else 1.10
+                    if compact_reading_target
+                    else 1.0,
+                    "easing": "out-cubic",
+                    "safety_bounds": "preserve-browser-frame",
+                },
+                "cursor": {
+                    "mode": "natural-path",
+                    "pre_action_pause_seconds": 0.25,
+                    "click_at_target_center": True,
+                },
+                "scroll": {
+                    "mode": "directed" if kind is OperationKind.SCROLL_TO else "none",
+                    "continuity": "intermediate-landmarks-and-settle"
+                    if kind is OperationKind.SCROLL_TO
+                    else "not-applicable",
+                    "settle_seconds": 0.55 if kind is OperationKind.SCROLL_TO else 0.3,
+                },
+            }
+        )
     return scenes
 
 
@@ -178,7 +261,11 @@ def inspect_scene_plan(trace: DemoTrace, scenes: list[dict]) -> dict:
         failures.append("SCENE_TRACE_MISMATCH")
     if any(float(scene.get("dwell_seconds", 0)) < 1.0 for scene in scenes):
         failures.append("INSUFFICIENT_SCENE_DWELL")
-    return {"editorial_score": 1.0 if not failures else 0.0, "hard_failures": failures, "scene_count": len(scenes)}
+    return {
+        "editorial_score": 1.0 if not failures else 0.0,
+        "hard_failures": failures,
+        "scene_count": len(scenes),
+    }
 
 
 def build_typed_scene_plan(
@@ -194,7 +281,11 @@ def build_typed_scene_plan(
     for index, scene in enumerate(raw):
         event = next(event for event in trace.events if event.id == scene["event_id"])
         editorial = next(
-            (item for item in (storyboard.scenes if storyboard else []) if item.id == scene.get("editorial_scene_id")),
+            (
+                item
+                for item in (storyboard.scenes if storyboard else [])
+                if item.id == scene.get("editorial_scene_id")
+            ),
             None,
         )
         typed.append(
@@ -209,12 +300,17 @@ def build_typed_scene_plan(
                 covered_content_groups=list(event.covered_content_groups),
                 required_dwell_seconds=float(scene["dwell_seconds"]),
                 completion_criteria=list(scene["completion_criteria"]),
-                action_classification=(editorial.action_classification if editorial else "essential"),
+                action_classification=(
+                    editorial.action_classification if editorial else "essential"
+                ),
                 caption_intent=(editorial.narration if editorial else event.intent),
                 transition=(
                     editorial.transition
-                    if editorial and editorial.transition in {"cut", "dissolve", "match_scroll", "hold"}
-                    else "match_scroll" if event.kind is OperationKind.SCROLL_TO else "cut"
+                    if editorial
+                    and editorial.transition in {"cut", "dissolve", "match_scroll", "hold"}
+                    else "match_scroll"
+                    if event.kind is OperationKind.SCROLL_TO
+                    else "cut"
                 ),
             )
         )

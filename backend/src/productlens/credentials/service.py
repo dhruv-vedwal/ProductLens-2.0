@@ -92,7 +92,9 @@ class EnvironmentCredentialService:
         await username.press("Backspace")
         await username.press_sequentially(credentials.username, delay=70)
         if action_observer is not None:
-            await action_observer("auth:username", "FillEmail", "Email address", 'input[type="email"]')
+            await action_observer(
+                "auth:username", "FillEmail", "Email address", 'input[type="email"]'
+            )
         # Keep the filled state on screen long enough for a caption-led
         # recording to communicate the step.  This is deliberately a small,
         # provider-neutral presentation hold; it does not expose the value or
@@ -107,7 +109,9 @@ class EnvironmentCredentialService:
         await page.wait_for_timeout(5_000)
         submit = page.locator('button[type="submit"]:visible, input[type="submit"]:visible')
         if await submit.count() != 1:
-            raise CredentialError("AUTH_UNSUPPORTED: could not uniquely identify login submit control")
+            raise CredentialError(
+                "AUTH_UNSUPPORTED: could not uniquely identify login submit control"
+            )
         # CAPTCHA/anti-bot widgets commonly enable the submit control only
         # after their token is solved.  Filling the credentials and clicking
         # immediately races that asynchronous state and used to surface as a
@@ -127,7 +131,9 @@ class EnvironmentCredentialService:
             ) from error
         await submit.click()
         if action_observer is not None:
-            await action_observer("auth:submit", "Submit", "Sign in", 'button[type="submit"], input[type="submit"]')
+            await action_observer(
+                "auth:submit", "Submit", "Sign in", 'button[type="submit"], input[type="submit"]'
+            )
         await page.wait_for_timeout(5_000)
         try:
             # Remote identity providers often complete the redirect after the

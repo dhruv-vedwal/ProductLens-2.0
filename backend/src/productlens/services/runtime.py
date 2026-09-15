@@ -18,7 +18,9 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
     settings = settings or Settings.from_environment()
     repository = RunRepository(settings.database_url)
     speech = (
-        ElevenLabsProvider(settings.elevenlabs_api_key, settings.elevenlabs_voice_id, settings.elevenlabs_tts_model)
+        ElevenLabsProvider(
+            settings.elevenlabs_api_key, settings.elevenlabs_voice_id, settings.elevenlabs_tts_model
+        )
         if settings.elevenlabs_api_key and not settings.caption_only
         else None
     )
@@ -29,7 +31,9 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
     )
     visual_reviewer = (
         OpenRouterVisualReviewer(settings.openrouter_api_key, settings.openrouter_vision_model)
-        if settings.multimodal_review_enabled and settings.openrouter_api_key and settings.openrouter_vision_model
+        if settings.multimodal_review_enabled
+        and settings.openrouter_api_key
+        and settings.openrouter_vision_model
         else None
     )
     generator = (
@@ -43,6 +47,12 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
             )
             if settings.browserbase_api_key
             else None,
+            # Stagehand is useful in both environments.  Local runs use its
+            # local browser mode; cloud runs attach it to the Browserbase
+            # session.  Keeping the provider available without a Browserbase
+            # key prevents an environment-specific intelligence gap while
+            # the generation layer still treats its output as advisory and
+            # re-grounds every suggestion in Playwright evidence.
             StagehandProvider(
                 model=settings.stagehand_model,
                 node=settings.stagehand_node,
@@ -50,11 +60,10 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
                 browserbase_project_id=settings.browserbase_project_id,
                 openrouter_api_key=settings.openrouter_api_key,
                 openrouter_model=settings.openrouter_model,
-            )
-            if settings.browserbase_api_key
-            else None,
+            ),
             visual_reviewer=visual_reviewer,
             cloud_capture_timeout_seconds=settings.cloud_capture_timeout_seconds,
+            stagehand_observe_timeout_seconds=settings.stagehand_observe_timeout_seconds,
         )
         if planner_provider
         else None
@@ -63,12 +72,17 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
         artifact_storage = LocalArtifactStorage(settings.artifact_root)
     elif settings.artifact_storage in {"s3", "s3_compatible"}:
         artifact_storage = S3ArtifactStorage(
-            bucket=settings.s3_bucket or "", prefix=settings.s3_prefix,
-            endpoint_url=settings.s3_endpoint_url, region_name=settings.s3_region,
+            bucket=settings.s3_bucket or "",
+            prefix=settings.s3_prefix,
+            endpoint_url=settings.s3_endpoint_url,
+            region_name=settings.s3_region,
         )
     else:
         raise RuntimeError("PRODUCTLENS_ARTIFACT_STORAGE must be local, s3, or s3_compatible")
     return repository, DemoJobService(
-        repository, settings.artifact_root, speech_provider=speech,
-        url_generator=generator, artifact_storage=artifact_storage,
+        repository,
+        settings.artifact_root,
+        speech_provider=speech,
+        url_generator=generator,
+        artifact_storage=artifact_storage,
     )

@@ -47,16 +47,38 @@ async def test_narration_synthesizes_each_approved_scene_separately(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     durations = iter([1.0, 2.5, 3.5])
-    monkeypatch.setattr("productlens.narration.service.audio_duration_seconds", lambda _: next(durations))
+    monkeypatch.setattr(
+        "productlens.narration.service.audio_duration_seconds", lambda _: next(durations)
+    )
+
     def concatenate(command, **_kwargs):
         Path(command[-1]).write_bytes(b"combined-audio")
         return __import__("subprocess").CompletedProcess(command, 0, "", "")
+
     monkeypatch.setattr("productlens.narration.service.subprocess.run", concatenate)
     trace = DemoTrace(
-        run_id="run", objective="Demo", started_at=datetime.now(UTC),
+        run_id="run",
+        objective="Demo",
+        started_at=datetime.now(UTC),
         events=[
-            InteractionEvent(operation_id="one", kind=OperationKind.CLICK, intent="Open one", before={}, after={}, success=True, duration_ms=1),
-            InteractionEvent(operation_id="two", kind=OperationKind.CLICK, intent="Open two", before={}, after={}, success=True, duration_ms=1),
+            InteractionEvent(
+                operation_id="one",
+                kind=OperationKind.CLICK,
+                intent="Open one",
+                before={},
+                after={},
+                success=True,
+                duration_ms=1,
+            ),
+            InteractionEvent(
+                operation_id="two",
+                kind=OperationKind.CLICK,
+                intent="Open two",
+                before={},
+                after={},
+                success=True,
+                duration_ms=1,
+            ),
         ],
     )
     speech = StubSpeech()
@@ -72,14 +94,30 @@ async def test_narration_aligns_measured_segments_to_trace_events(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     monkeypatch.setattr("productlens.narration.service.audio_duration_seconds", lambda _: 1.5)
+
     def compose(command, **_kwargs):
         Path(command[-1]).write_bytes(b"aligned-audio")
         return __import__("subprocess").CompletedProcess(command, 0, "", "")
+
     monkeypatch.setattr("productlens.narration.service.subprocess.run", compose)
     started = datetime.now(UTC)
     trace = DemoTrace(
-        run_id="run", objective="Demo", started_at=started, recording_started_at=started,
-        events=[InteractionEvent(operation_id="one", kind=OperationKind.CLICK, intent="Open one", action_at=started + timedelta(seconds=3), before={}, after={}, success=True, duration_ms=1)],
+        run_id="run",
+        objective="Demo",
+        started_at=started,
+        recording_started_at=started,
+        events=[
+            InteractionEvent(
+                operation_id="one",
+                kind=OperationKind.CLICK,
+                intent="Open one",
+                action_at=started + timedelta(seconds=3),
+                before={},
+                after={},
+                success=True,
+                duration_ms=1,
+            )
+        ],
     )
 
     result = await NarrationService().create(trace, StubSpeech(), tmp_path / "voice.mp3")

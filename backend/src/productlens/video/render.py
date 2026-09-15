@@ -45,7 +45,8 @@ def _completed_segment_after_timeout(command: list[str]) -> bool:
     """
     try:
         output_index = next(
-            index for index, value in enumerate(command)
+            index
+            for index, value in enumerate(command)
             if index > 0 and str(value).lower().endswith(".mp4")
         )
         output = Path(command[output_index])
@@ -55,7 +56,16 @@ def _completed_segment_after_timeout(command: list[str]) -> bool:
         if not output.is_file() or output.stat().st_size < 10_000:
             return False
         probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(output)],
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
+                str(output),
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -72,8 +82,19 @@ def _segment_is_complete(path: Path, *, expected_frames: int, frame_rate: int) -
         if not path.is_file() or path.stat().st_size < 10_000:
             return False
         probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
-            capture_output=True, text=True, check=False,
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         duration = float(json.loads(probe.stdout).get("format", {}).get("duration", 0))
         return probe.returncode == 0 and duration >= max(0.5, expected_frames / frame_rate - 0.35)
@@ -116,9 +137,7 @@ def _run_remotion_segment(command: list[str], *, renderer: Path, timeout_seconds
         if cold_browser_timeout and attempt == 0:
             time.sleep(2)
             continue
-        raise RuntimeError(
-            "REMOTION_SEGMENT_RENDER_FAILED: " + diagnostics.strip()[-1_000:]
-        )
+        raise RuntimeError("REMOTION_SEGMENT_RENDER_FAILED: " + diagnostics.strip()[-1_000:])
 
 
 def _render_concurrency() -> int:
@@ -202,8 +221,16 @@ def _prepare_remotion_source(raw: Path, public: Path, run_id: str) -> str:
     # still use the conservative conversion path below.
     probe = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=codec_name,pix_fmt", "-of", "json", str(raw),
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt",
+            "-of",
+            "json",
+            str(raw),
         ],
         capture_output=True,
         text=True,
@@ -218,9 +245,27 @@ def _prepare_remotion_source(raw: Path, public: Path, run_id: str) -> str:
         return source_asset
     subprocess.run(
         [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(raw),
-            "-map", "0:v:0", "-an", "-c:v", "libx264", "-preset", "veryfast",
-            "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(destination),
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(raw),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(destination),
         ],
         check=True,
         capture_output=True,
@@ -266,12 +311,14 @@ def _presentation_secret_redactions(
     for index, event in enumerate(trace.events):
         target = event.target
         semantic_text = " ".join(
-            value for value in (
+            value
+            for value in (
                 event.kind.value if hasattr(event.kind, "value") else str(event.kind),
                 event.intent,
                 target.name if target else "",
                 getattr(target, "autocomplete", "") if target else "",
-            ) if value
+            )
+            if value
         )
         if not _PRESENTATION_SECRET_TERMS.search(semantic_text):
             continue
@@ -294,17 +341,21 @@ def _presentation_secret_redactions(
             prior.page_url == current_url
             and beat_by_event.get(prior.id) is not None
             and _PRESENTATION_SECRET_TERMS.search(
-                " ".join(value for value in (
-                    prior.kind.value if hasattr(prior.kind, "value") else str(prior.kind),
-                    prior.intent,
-                    prior.target.name if prior.target else "",
-                    getattr(prior.target, "autocomplete", "") if prior.target else "",
-                ) if value)
+                " ".join(
+                    value
+                    for value in (
+                        prior.kind.value if hasattr(prior.kind, "value") else str(prior.kind),
+                        prior.intent,
+                        prior.target.name if prior.target else "",
+                        getattr(prior.target, "autocomplete", "") if prior.target else "",
+                    )
+                    if value
+                )
             )
             for prior in trace.events[:index]
         ):
             start = 0
-        for later in trace.events[index + 1:]:
+        for later in trace.events[index + 1 :]:
             later_beat = beat_by_event.get(later.id)
             if later_beat is None:
                 continue
@@ -328,41 +379,49 @@ def _presentation_secret_redactions(
             # authentication prelude rather than risk a single-frame leak.
             # This is deliberately semantic: it applies to any credential
             # field, not a known login page, product, or provider.
-            redactions.append({
-                "eventId": event.id,
-                "start": 0,
-                "end": end,
-                "mode": "secure-full-frame",
-                "label": "Signing in securely",
-            })
+            redactions.append(
+                {
+                    "eventId": event.id,
+                    "start": 0,
+                    "end": end,
+                    "mode": "secure-full-frame",
+                    "label": "Signing in securely",
+                }
+            )
             continue
-        redactions.append({
-            "eventId": event.id,
-            "start": start,
-            "end": end,
-            "mode": "target-mask",
-            # Use the exact recording-space geometry already supplied to the
-            # cursor/camera beat.  Cloud recordings often differ from the CSS
-            # viewport, so raw DOM coordinates would mask the wrong field.
-            "x": float(beat.get("x", event.target_rect.x)),
-            "y": float(beat.get("y", event.target_rect.y)),
-            "width": float(beat.get("width", event.target_rect.width)),
-            "height": float(beat.get("height", event.target_rect.height)),
-            "label": "Sensitive value redacted",
-        })
+        redactions.append(
+            {
+                "eventId": event.id,
+                "start": start,
+                "end": end,
+                "mode": "target-mask",
+                # Use the exact recording-space geometry already supplied to the
+                # cursor/camera beat.  Cloud recordings often differ from the CSS
+                # viewport, so raw DOM coordinates would mask the wrong field.
+                "x": float(beat.get("x", event.target_rect.x)),
+                "y": float(beat.get("y", event.target_rect.y)),
+                "width": float(beat.get("width", event.target_rect.width)),
+                "height": float(beat.get("height", event.target_rect.height)),
+                "label": "Sensitive value redacted",
+            }
+        )
     return redactions
 
 
 def _outro_copy(trace: DemoTrace, storyboard: EditorialStoryboard | None) -> tuple[str, str]:
     """Return a product-specific close from the approved editorial story."""
     if storyboard is not None:
-        product = re.sub(r"\bwalkthrough\b", "", storyboard.brief.title, flags=re.IGNORECASE).strip(" -:|")
+        product = re.sub(r"\bwalkthrough\b", "", storyboard.brief.title, flags=re.IGNORECASE).strip(
+            " -:|"
+        )
         product = product or concise_demo_title(trace.objective)
         final_scene = next(
             (scene for scene in reversed(storyboard.scenes) if scene.operation_id is not None),
             storyboard.scenes[-1] if storyboard.scenes else None,
         )
-        takeaway = " ".join((final_scene.narration if final_scene else storyboard.brief.product_purpose).split())[:180]
+        takeaway = " ".join(
+            (final_scene.narration if final_scene else storyboard.brief.product_purpose).split()
+        )[:180]
     else:
         product = concise_demo_title(trace.objective)
         takeaway = " ".join(trace.objective.split())[:180]
@@ -381,13 +440,19 @@ def _recording_space_rect(rect, *, viewport, source_width: int, source_height: i
         return rect
     scale_x = source_width / max(1, viewport.width)
     scale_y = source_height / max(1, viewport.height)
-    return rect.model_copy(update={
-        "x": rect.x * scale_x, "y": rect.y * scale_y,
-        "width": rect.width * scale_x, "height": rect.height * scale_y,
-    })
+    return rect.model_copy(
+        update={
+            "x": rect.x * scale_x,
+            "y": rect.y * scale_y,
+            "width": rect.width * scale_x,
+            "height": rect.height * scale_y,
+        }
+    )
 
 
-def _recording_space_cursor_paths(presentation: PresentationPlan, trace: DemoTrace, *, source_width: int, source_height: int) -> list[dict]:
+def _recording_space_cursor_paths(
+    presentation: PresentationPlan, trace: DemoTrace, *, source_width: int, source_height: int
+) -> list[dict]:
     """Return cursor paths in the same pixel space as the recorded video."""
     events = {event.id: event for event in trace.events if event.success}
     converted: list[dict] = []
@@ -399,15 +464,21 @@ def _recording_space_cursor_paths(presentation: PresentationPlan, trace: DemoTra
             continue
         scale_x = source_width / max(1, viewport.width)
         scale_y = source_height / max(1, viewport.height)
+
         def point(value: object, *, x_scale: float = scale_x, y_scale: float = scale_y) -> dict:
             raw = value if isinstance(value, dict) else {}
             return {"x": float(raw.get("x", 0)) * x_scale, "y": float(raw.get("y", 0)) * y_scale}
-        converted.append({
-            **path,
-            "source": point(path.get("source")),
-            "destination": point(path.get("destination")),
-            "waypoints": [point(item) for item in path.get("waypoints", []) if isinstance(item, dict)],
-        })
+
+        converted.append(
+            {
+                **path,
+                "source": point(path.get("source")),
+                "destination": point(path.get("destination")),
+                "waypoints": [
+                    point(item) for item in path.get("waypoints", []) if isinstance(item, dict)
+                ],
+            }
+        )
     return converted
 
 
@@ -440,7 +511,10 @@ def _editorial_cut_windows(
     # actually visible and readable.
     first_action = min(
         (
-            max(0.0, min(source_seconds, (event.action_at - trace.recording_started_at).total_seconds()))
+            max(
+                0.0,
+                min(source_seconds, (event.action_at - trace.recording_started_at).total_seconds()),
+            )
             for event in successful
         ),
         default=0.0,
@@ -448,14 +522,21 @@ def _editorial_cut_windows(
     opening_end = max(0.0, first_action - 0.45)
     opening_start = max(0.0, opening_end - 5.0)
     windows: list[tuple[float, float]] = (
-        [(opening_start, opening_end)] if opening_end - opening_start >= 1.0 else [(0.0, min(5.0, source_seconds))]
+        [(opening_start, opening_end)]
+        if opening_end - opening_start >= 1.0
+        else [(0.0, min(5.0, source_seconds))]
     )
     reading_holds_seconds = reading_holds_seconds or {}
     for event in trace.events:
         if not event.success or event.action_at is None:
             continue
-        action = max(0.0, min(source_seconds, (event.action_at - trace.recording_started_at).total_seconds()))
-        reveal = max(action, min(source_seconds, (event.occurred_at - trace.recording_started_at).total_seconds()))
+        action = max(
+            0.0, min(source_seconds, (event.action_at - trace.recording_started_at).total_seconds())
+        )
+        reveal = max(
+            action,
+            min(source_seconds, (event.occurred_at - trace.recording_started_at).total_seconds()),
+        )
         # A selected caption owns a reader-sized native dwell after the state
         # it describes becomes visible. Unnarrated trace events retain the
         # compact evidence tail, so this increases time only for the actual
@@ -497,32 +578,42 @@ def _editorial_cut_windows(
                     float(reading_holds_seconds.get(event.id, 0.0)),
                 )
                 motion_end = min(source_seconds, action + float(motion_ms) / 1000.0 + scroll_settle)
-                windows.append((
-                    max(0.0, action - (0.1 if compact_tour else 0.6)),
-                    max(action + 0.2, motion_end),
-                ))
+                windows.append(
+                    (
+                        max(0.0, action - (0.1 if compact_tour else 0.6)),
+                        max(action + 0.2, motion_end),
+                    )
+                )
             else:
-                windows.append((
+                windows.append(
+                    (
+                        max(0.0, action - (0.1 if compact_tour else 0.6)),
+                        min(source_seconds, reveal + post_reveal_hold),
+                    )
+                )
+        elif reveal - action <= 3.8:
+            windows.append(
+                (
                     max(0.0, action - (0.1 if compact_tour else 0.6)),
                     min(source_seconds, reveal + post_reveal_hold),
-                ))
-        elif reveal - action <= 3.8:
-            windows.append((
-                max(0.0, action - (0.1 if compact_tour else 0.6)),
-                min(source_seconds, reveal + post_reveal_hold),
-            ))
+                )
+            )
         else:
             # Preserve a visibly complete navigation dispatch and immediate
             # transition before cutting the remote wait; this is the causal
             # edge viewers need to understand the page change.
-            windows.append((
-                max(0.0, action - (0.1 if compact_tour else 0.6)),
-                min(source_seconds, action + (1.9 if not compact_tour else 0.3)),
-            ))
-            windows.append((
-                max(0.0, reveal - (0.3 if compact_tour else 1.9)),
-                min(source_seconds, reveal + post_reveal_hold),
-            ))
+            windows.append(
+                (
+                    max(0.0, action - (0.1 if compact_tour else 0.6)),
+                    min(source_seconds, action + (1.9 if not compact_tour else 0.3)),
+                )
+            )
+            windows.append(
+                (
+                    max(0.0, reveal - (0.3 if compact_tour else 1.9)),
+                    min(source_seconds, reveal + post_reveal_hold),
+                )
+            )
     windows.sort()
     merged: list[tuple[float, float]] = []
     for start, end in windows:
@@ -558,7 +649,10 @@ def _editorial_cut_windows(
         expanded = [
             (
                 max(0.0, start - (padding if any(index == item[0] for item in available) else 0.0)),
-                min(source_seconds, end + (padding if any(index == item[0] for item in available) else 0.0)),
+                min(
+                    source_seconds,
+                    end + (padding if any(index == item[0] for item in available) else 0.0),
+                ),
             )
             for index, (start, end) in enumerate(merged)
         ]
@@ -592,14 +686,22 @@ def _remap_trace_for_cuts(trace: DemoTrace, windows: list[tuple[float, float]]) 
         action = event.action_at or event.occurred_at
         action_seconds = (action - trace.recording_started_at).total_seconds()
         occurred_seconds = (event.occurred_at - trace.recording_started_at).total_seconds()
-        events.append(event.model_copy(update={
-            "action_at": trace.recording_started_at + timedelta(seconds=remap(action_seconds)),
-            "occurred_at": trace.recording_started_at + timedelta(seconds=remap(occurred_seconds)),
-        }))
+        events.append(
+            event.model_copy(
+                update={
+                    "action_at": trace.recording_started_at
+                    + timedelta(seconds=remap(action_seconds)),
+                    "occurred_at": trace.recording_started_at
+                    + timedelta(seconds=remap(occurred_seconds)),
+                }
+            )
+        )
     return trace.model_copy(update={"events": events})
 
 
-def _build_editorial_source(raw: Path, *, render_dir: Path, windows: list[tuple[float, float]]) -> Path:
+def _build_editorial_source(
+    raw: Path, *, render_dir: Path, windows: list[tuple[float, float]]
+) -> Path:
     """Concatenate deliberate cuts without altering the speed of retained footage."""
     # A timing repair can change the retained source windows while keeping the
     # same run id. Ordinal names such as ``000.mp4`` are therefore unsafe as a
@@ -607,15 +709,17 @@ def _build_editorial_source(raw: Path, *, render_dir: Path, windows: list[tuple[
     # footage. Bind every reusable clip set to both the exact raw recording
     # fingerprint and the exact native-speed cut list.
     raw_stat = raw.stat()
-    cut_key = hashlib.sha256(json.dumps(
-        {
-            "raw": str(raw.resolve()),
-            "size": raw_stat.st_size,
-            "mtime_ns": raw_stat.st_mtime_ns,
-            "windows": [[round(start, 3), round(end, 3)] for start, end in windows],
-        },
-        sort_keys=True,
-    ).encode("utf-8")).hexdigest()[:16]
+    cut_key = hashlib.sha256(
+        json.dumps(
+            {
+                "raw": str(raw.resolve()),
+                "size": raw_stat.st_size,
+                "mtime_ns": raw_stat.st_mtime_ns,
+                "windows": [[round(start, 3), round(end, 3)] for start, end in windows],
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
     output = render_dir / f"editorial-source-{cut_key}.mp4"
     # The source identity above includes the immutable recording fingerprint
     # and every retained native-speed window. Reusing a complete result is
@@ -632,20 +736,72 @@ def _build_editorial_source(raw: Path, *, render_dir: Path, windows: list[tuple[
     for index, (start, end) in enumerate(windows):
         clip = clips_dir / f"{index:03d}.mp4"
         if not clip.exists() or clip.stat().st_size < 10_000:
-            subprocess.run([
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}",
-                "-t", f"{end - start:.3f}", "-i", str(raw), "-map", "0:v:0", "-an",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", str(clip),
-            ], check=True, capture_output=True, text=True)
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    f"{start:.3f}",
+                    "-t",
+                    f"{end - start:.3f}",
+                    "-i",
+                    str(raw),
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "18",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(clip),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         clips.append(clip)
     listing = clips_dir / "clips.ffconcat"
-    listing.write_text("ffconcat version 1.0\n" + "".join(
-        f"file '{clip.resolve().as_posix()}'\n" for clip in clips
-    ), encoding="utf-8")
-    subprocess.run([
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(listing),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
-    ], check=True, capture_output=True, text=True)
+    listing.write_text(
+        "ffconcat version 1.0\n"
+        + "".join(f"file '{clip.resolve().as_posix()}'\n" for clip in clips),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(listing),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     return output
 
 
@@ -661,14 +817,25 @@ def _evidence_timed_beat_ranges(
     if trace.recording_started_at is None or len(trace.events) < 2 or source_seconds <= 0:
         return None
     source_positions = [
-        max(0.0, min(source_seconds, ((event.action_at or event.occurred_at) - trace.recording_started_at).total_seconds()))
+        max(
+            0.0,
+            min(
+                source_seconds,
+                (
+                    (event.action_at or event.occurred_at) - trace.recording_started_at
+                ).total_seconds(),
+            ),
+        )
         for event in trace.events
     ]
     if max(source_positions) - min(source_positions) < 0.5:
         return None
     frame_scale = screen_frames / source_seconds
     lead_frames = max(1, round(min(0.65, source_seconds / 12) * frame_scale))
-    starts = [max(0, min(screen_frames - 1, round(position * frame_scale) - lead_frames)) for position in source_positions]
+    starts = [
+        max(0, min(screen_frames - 1, round(position * frame_scale) - lead_frames))
+        for position in source_positions
+    ]
     # Timestamp order is the execution order, but clamp defensively so malformed
     # imported evidence cannot create backwards camera moves.
     starts = [max(starts[index], max(starts[:index], default=0)) for index in range(len(starts))]
@@ -679,7 +846,9 @@ def _evidence_timed_beat_ranges(
         end = max(start + 1, next_start)
         if index + 1 == len(starts):
             end = max(end, min(screen_frames, start + minimum_hold))
-        click_frame = max(start, min(screen_frames - 1, round(source_positions[index] * frame_scale)))
+        click_frame = max(
+            start, min(screen_frames - 1, round(source_positions[index] * frame_scale))
+        )
         ranges.append((start, min(screen_frames, end), click_frame))
     return ranges
 
@@ -711,7 +880,10 @@ def _evidence_timed_captions(
         if event is not None
     ]
     raw_action_positions = [
-        max(0.0, ((event.action_at or event.occurred_at) - trace.recording_started_at).total_seconds())
+        max(
+            0.0,
+            ((event.action_at or event.occurred_at) - trace.recording_started_at).total_seconds(),
+        )
         for event in ordered
         if event is not None
     ]
@@ -722,7 +894,9 @@ def _evidence_timed_captions(
     # their verified order by fitting the *whole* evidence timeline into the
     # recorded presentation window.  Normal capture has a scale of 1.0.
     evidence_span = max(raw_positions, default=0.0)
-    scale = screen_seconds / evidence_span if evidence_span > screen_seconds and evidence_span else 1.0
+    scale = (
+        screen_seconds / evidence_span if evidence_span > screen_seconds and evidence_span else 1.0
+    )
     positions = [min(screen_seconds, position * scale) for position in raw_positions]
     action_positions = [min(screen_seconds, position * scale) for position in raw_action_positions]
     # Multiple semantic events can intentionally share a state (for example,
@@ -745,8 +919,7 @@ def _evidence_timed_captions(
     # if the native recording cannot contain those beats, QA rejects it rather
     # than silently speeding the viewer through the story.
     minimum_dwells = [
-        max(2.4, len(str(caption.get("text", "")).split()) / 3.2 + 0.25)
-        for caption in captions
+        max(2.4, len(str(caption.get("text", "")).split()) / 3.2 + 0.25) for caption in captions
     ]
     if sum(minimum_dwells) > screen_seconds:
         # The renderer must not manufacture reading time by freezing source
@@ -802,7 +975,11 @@ def _evidence_timed_captions(
         # the input's DOM result creates an unexplained opening silence even
         # though the trace already proves the login interaction is on screen.
         first_is_authentication = str(event.operation_id or "").startswith("auth:")
-        desired_start = 0.0 if is_first_visible_event and (is_presenter_opening or first_is_authentication) else visible_start(index, event)
+        desired_start = (
+            0.0
+            if is_first_visible_event and (is_presenter_opening or first_is_authentication)
+            else visible_start(index, event)
+        )
         latest_start = max(0.0, screen_seconds - sum(minimum_dwells[index:]))
         start = min(desired_start, latest_start)
         if starts:
@@ -815,7 +992,9 @@ def _evidence_timed_captions(
         # old scene's copy until the next action's *settled* result produces a
         # visibly wrong caption over the incoming route. End before dispatch;
         # the intentional transition gap is preferable to false narration.
-        next_action = action_positions[index + 1] if index + 1 < len(action_positions) else screen_seconds
+        next_action = (
+            action_positions[index + 1] if index + 1 < len(action_positions) else screen_seconds
+        )
         # Preserve a readable, local dwell without bleeding into the following
         # verified state.  One-event traces simply retain the entire evidence.
         # Beat ranges begin 0.65 seconds before the following event. End the
@@ -897,7 +1076,12 @@ def render_remotion(
     render_dir = artifacts.root / "render"
     render_dir.mkdir(exist_ok=True)
     candidate_output = (render_dir / "demo.candidate.mp4").resolve()
-    public = renderer / "public"
+    # Keep render inputs run-scoped.  The shared Remotion ``public`` folder
+    # accumulated hundreds of old browser captures, forcing every render to
+    # copy hundreds of megabytes before the first frame and making long demos
+    # appear stalled.  ``--public-dir`` below points Remotion at this minimal
+    # input set instead; no historical artifact participates in a render.
+    public = (render_dir / "public").resolve()
     public.mkdir(exist_ok=True)
     # The trace can be inherited by a targeted retry. Its historical
     # ``run_id`` is useful for lineage, but media assets must be namespaced to
@@ -915,7 +1099,9 @@ def render_remotion(
     )
     artifacts.write_json("execution/source-timing-alignment.json", timing_report)
     if timing_report.get("status") == "rejected":
-        raise CaptureDurationError("native recording could not be aligned to browser-event evidence")
+        raise CaptureDurationError(
+            "native recording could not be aligned to browser-event evidence"
+        )
     if timing_report.get("status") == "aligned":
         trace = timing_trace
     narration_asset: str | None = None
@@ -926,8 +1112,14 @@ def render_remotion(
         shutil.copy2(narration_path, public / narration_asset)
     probe = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-show_entries",
-            "format=duration:stream=width,height,avg_frame_rate", "-of", "json", str(raw),
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration:stream=width,height,avg_frame_rate",
+            "-of",
+            "json",
+            str(raw),
         ],
         capture_output=True,
         text=True,
@@ -961,7 +1153,9 @@ def render_remotion(
     # product footage is never slowed or frozen merely to reach that floor.
     duration_floor = 0.0
     if storyboard is not None:
-        duration_floor = max(0.0, float(storyboard.minimum_duration_seconds) - presentation_chrome_seconds)
+        duration_floor = max(
+            0.0, float(storyboard.minimum_duration_seconds) - presentation_chrome_seconds
+        )
     if target_duration_seconds is not None and target_duration_seconds >= 180:
         duration_floor = max(duration_floor, 120.0 - presentation_chrome_seconds)
     caption_reading_holds = {
@@ -1013,8 +1207,7 @@ def render_remotion(
     # the material lag this guard repairs occurs in longer cloud recordings,
     # where provider command gaps would otherwise be plainly visible.
     removes_proven_dead_time = (
-        source_seconds >= 30.0
-        and editorial_window_seconds + 0.75 < source_seconds
+        source_seconds >= 30.0 and editorial_window_seconds + 0.75 < source_seconds
     )
     needs_duration_edit = (
         maximum_duration_seconds is not None
@@ -1032,7 +1225,9 @@ def render_remotion(
                 "mode": "native_speed_cuts",
                 "source_seconds": round(source_seconds, 3),
                 "edited_seconds": round(editorial_seconds, 3),
-                "windows": [{"start": round(start, 3), "end": round(end, 3)} for start, end in windows],
+                "windows": [
+                    {"start": round(start, 3), "end": round(end, 3)} for start, end in windows
+                ],
                 "reason": "remove proven remote transport/dead intervals; retained footage is never accelerated",
             },
         )
@@ -1053,7 +1248,9 @@ def render_remotion(
             "presentation/source-edit-plan.json",
             {
                 **source_edit_payload,
-                "rendered_source": str(render_source.resolve().relative_to(artifacts.root.resolve())),
+                "rendered_source": str(
+                    render_source.resolve().relative_to(artifacts.root.resolve())
+                ),
             },
         )
         trace = _remap_trace_for_cuts(trace, windows)
@@ -1066,10 +1263,17 @@ def render_remotion(
     # source file with the same URL.
     source_sha256 = hashlib.sha256(render_source.read_bytes()).hexdigest()
     source_stream = next(
-        (stream for stream in source_probe.get("streams", []) if stream.get("width") and stream.get("height")),
+        (
+            stream
+            for stream in source_probe.get("streams", [])
+            if stream.get("width") and stream.get("height")
+        ),
         {},
     )
-    source_width, source_height = int(source_stream.get("width", 1920)), int(source_stream.get("height", 1080))
+    source_width, source_height = (
+        int(source_stream.get("width", 1920)),
+        int(source_stream.get("height", 1080)),
+    )
     source_frame_rate = _frame_rate(source_stream.get("avg_frame_rate"))
     # Do not synthesize smoothness by interpolating a 30fps browser recording.
     # When the browser evidence genuinely supports 60fps, preserve it through
@@ -1109,7 +1313,9 @@ def render_remotion(
                 scaled_captions = [
                     {
                         **item,
-                        "start": round(float(item.get("start", 0)) / source_span * screen_seconds, 2),
+                        "start": round(
+                            float(item.get("start", 0)) / source_span * screen_seconds, 2
+                        ),
                         "end": round(float(item.get("end", 0)) / source_span * screen_seconds, 2),
                     }
                     for item in scaled_captions
@@ -1129,7 +1335,10 @@ def render_remotion(
         decision = decisions.get(event.id)
         raw_rect = decision.focus if decision else event.target_rect
         rect = _recording_space_rect(
-            raw_rect, viewport=event.viewport, source_width=source_width, source_height=source_height
+            raw_rect,
+            viewport=event.viewport,
+            source_width=source_width,
+            source_height=source_height,
         )
         if timed_ranges is None:
             start = round(index * screen_frames / max(1, len(trace.events)))
@@ -1160,7 +1369,9 @@ def render_remotion(
             }
         )
     presentation_redactions = _presentation_secret_redactions(
-        trace, beats, frame_rate=frame_rate,
+        trace,
+        beats,
+        frame_rate=frame_rate,
     )
     artifacts.write_json(
         "presentation/secret-redactions.json",
@@ -1182,7 +1393,9 @@ def render_remotion(
     artifacts.write_json("presentation/rendered-captions.json", scaled_captions)
     outro_title, outro_subtitle = _outro_copy(trace, storyboard)
     props = {
-        "title": storyboard.brief.title if storyboard else concise_demo_title(
+        "title": storyboard.brief.title
+        if storyboard
+        else concise_demo_title(
             trace.objective, action_labels=[event.intent for event in trace.events if event.success]
         ),
         # Keep the title card aligned with the approved editorial brief.  A
@@ -1209,7 +1422,8 @@ def render_remotion(
         "cursorPaths": rendered_cursor_paths,
         "eventViewports": {
             event.id: event.viewport.model_dump(mode="json")
-            for event in trace.events if event.success and event.viewport is not None
+            for event in trace.events
+            if event.success and event.viewport is not None
         },
         "narration": narration_asset,
         "captions": scaled_captions,
@@ -1232,47 +1446,56 @@ def render_remotion(
     # Use the project-pinned CLI directly. ``npx`` can block before the
     # compositor is even started (for example while resolving its launcher),
     # leaving a durable render job falsely RUNNING with no browser process.
-    local_remotion = renderer / "node_modules" / ".bin" / (
-        "remotion.cmd" if os.name == "nt" else "remotion"
+    local_remotion = (
+        renderer / "node_modules" / ".bin" / ("remotion.cmd" if os.name == "nt" else "remotion")
     )
-    remotion_cli = str(local_remotion) if local_remotion.exists() else (
-        "npx.cmd" if os.name == "nt" else "npx"
+    remotion_cli = (
+        str(local_remotion)
+        if local_remotion.exists()
+        else ("npx.cmd" if os.name == "nt" else "npx")
     )
     remotion_args = [] if local_remotion.exists() else ["remotion"]
     command_prefix = [
-            remotion_cli,
-            *remotion_args,
-            "render",
-            "src/index.ts",
-            "ProductLensDemo",
-            str(candidate_output),
-            "--props",
-            str(props_path),
-            "--concurrency",
-            str(_render_concurrency()),
-            "--timeout",
-            str(_remotion_setup_timeout_ms()),
-            "--hardware-acceleration",
-            _remotion_hardware_acceleration(),
-            # PNG intermediate frames dominate long browser-demo renders on
-            # Windows workers. High-quality JPEG intermediates are visually
-            # transparent for an already raster browser source while avoiding
-            # a multi-minute lossless-frame encode bottleneck.
-            "--image-format",
-            "jpeg",
-            "--jpeg-quality",
-            "95",
-            # Browser UI needs a constant-quality encode; bitrate remains a
-            # ceiling/target because static product frames compress efficiently
-            # and should not fail merely for being simple.
-            "--crf",
-            # CRF 20 retains sharp UI text at 1080p while materially reducing
-            # the encode cost of a two-to-three minute browser walkthrough.
-            # Resolution, source frame cadence, and scene dwell are never
-            # traded away to make a render faster.
-            "20",
-            "--log=error",
-        ]
+        remotion_cli,
+        *remotion_args,
+        "render",
+        "src/index.ts",
+        "ProductLensDemo",
+        str(candidate_output),
+        "--props",
+        str(props_path),
+        "--public-dir",
+        str(public),
+        "--concurrency",
+        str(_render_concurrency()),
+        "--timeout",
+        str(_remotion_setup_timeout_ms()),
+        "--hardware-acceleration",
+        _remotion_hardware_acceleration(),
+        # PNG intermediate frames dominate long browser-demo renders on
+        # Windows workers. High-quality JPEG intermediates are visually
+        # transparent for an already raster browser source while avoiding
+        # a multi-minute lossless-frame encode bottleneck.
+        "--image-format",
+        "jpeg",
+        "--jpeg-quality",
+        "95",
+        # Browser UI needs a constant-quality encode; bitrate remains a
+        # ceiling/target because static product frames compress efficiently
+        # and should not fail merely for being simple.
+        "--crf",
+        # CRF 20 retains sharp UI text at 1080p while materially reducing
+        # the encode cost of a two-to-three minute browser walkthrough.
+        # Resolution, source frame cadence, and scene dwell are never
+        # traded away to make a render faster.
+        "20",
+        # Browser demos contain large flat UI regions; a fast x264 preset
+        # preserves CRF quality while avoiding a multi-minute CPU-bound
+        # compression pass on every resumable segment.
+        "--x264-preset",
+        "veryfast",
+        "--log=error",
+    ]
     # Long browser walkthroughs are rendered in durable frame ranges. A worker
     # crash or deployment interruption then resumes from completed segments
     # instead of discarding hundreds of compositor seconds. The ranges retain
@@ -1315,11 +1538,13 @@ def render_remotion(
         if not segment_output.exists() or segment_output.stat().st_size == 0:
             raise RuntimeError(f"Remotion completed without segment {start}-{end}")
         segment_outputs.append(segment_output)
-        manifest.append({
-            "start_frame": start,
-            "end_frame": end,
-            "path": str(segment_output.relative_to(artifacts.root.resolve())),
-        })
+        manifest.append(
+            {
+                "start_frame": start,
+                "end_frame": end,
+                "path": str(segment_output.relative_to(artifacts.root.resolve())),
+            }
+        )
         artifacts.write_json(
             "render/segment-manifest.json",
             {
@@ -1334,28 +1559,73 @@ def render_remotion(
         return output
     concat = render_dir / "segments.ffconcat"
     concat.write_text(
-        "ffconcat version 1.0\n" + "".join(
+        "ffconcat version 1.0\n"
+        + "".join(
             f"file '{segment.resolve().as_posix().replace(chr(39), chr(92) + chr(39))}'\n"
             for segment in segment_outputs
         ),
         encoding="utf-8",
     )
-    concat_result = subprocess.run(
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat),
-         # Stream-copy concat retains independently encoded segment PTS and
-         # can introduce a visible cadence gap at every boundary. A final
-         # local CFR pass preserves all rendered frames while rebuilding one
-         # continuous presentation timeline for delivery QA.
-         "-vf", f"fps={frame_rate}", "-c:v", "libx264", "-preset", "veryfast",
-         # CRF alone can encode a mostly static UI far below a legible delivery
-         # bitrate.  Keep quality ownership in the renderer and guarantee a
-         # sane 1080p delivery floor without altering timing or browser pixels.
-         "-b:v", "2M", "-minrate", "2M", "-maxrate", "2M", "-bufsize", "4M",
-         "-x264-params", "nal-hrd=cbr",
-         "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(candidate_output)],
-        capture_output=True, text=True, check=False,
-    )
-    if concat_result.returncode != 0 or not candidate_output.exists() or candidate_output.stat().st_size < 10_000:
+    try:
+        concat_result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat),
+                # Stream-copy concat retains independently encoded segment PTS and
+                # can introduce a visible cadence gap at every boundary. A final
+                # local CFR pass preserves all rendered frames while rebuilding one
+                # continuous presentation timeline for delivery QA.
+                "-vf",
+                f"fps={frame_rate}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                # CRF alone can encode a mostly static UI far below a legible delivery
+                # bitrate.  Keep quality ownership in the renderer and guarantee a
+                # sane 1080p delivery floor without altering timing or browser pixels.
+                "-b:v",
+                "2M",
+                "-minrate",
+                "2M",
+                "-maxrate",
+                "2M",
+                "-bufsize",
+                "4M",
+                "-x264-params",
+                "nal-hrd=cbr",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(candidate_output),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            # The final CFR pass is a separate process from the resumable
+            # Remotion segments. Keep it bounded so a killed worker cannot
+            # leave an orphan ffmpeg process and a permanently RUNNING stage.
+            timeout=_render_timeout_seconds(),
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RenderTimeoutError(
+            f"Final render concat timed out after {_render_timeout_seconds()} seconds"
+        ) from error
+    if (
+        concat_result.returncode != 0
+        or not candidate_output.exists()
+        or candidate_output.stat().st_size < 10_000
+    ):
         raise RuntimeError(f"RENDER_SEGMENT_CONCAT_FAILED: {concat_result.stderr[-500:]}")
     if not candidate_output.exists() or candidate_output.stat().st_size == 0:
         raise RuntimeError("Remotion completed without a candidate video artifact")

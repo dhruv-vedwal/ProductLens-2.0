@@ -23,7 +23,9 @@ class FixturePlanningService:
             intent=f"Open benchmark fixture area: {target}",
             value=target,
         )
-        step = WorkflowStep(id="fixture-discover-relevant-workflow", intent=operation.intent, operation=operation)
+        step = WorkflowStep(
+            id="fixture-discover-relevant-workflow", intent=operation.intent, operation=operation
+        )
         return DemoPlan(
             objective=objective,
             narrative_goal=objective,

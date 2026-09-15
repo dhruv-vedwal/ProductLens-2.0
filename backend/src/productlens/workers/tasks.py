@@ -29,7 +29,11 @@ async def execute_generation_job(job_id: str) -> None:
         return
     if job["kind"] in {"fixture", "url"}:
         next_stage = next(
-            (item["stage"] for item in repository.stage_jobs(job["run_id"]) if item["status"] in {"QUEUED", "RETRYING"}),
+            (
+                item["stage"]
+                for item in repository.stage_jobs(job["run_id"])
+                if item["status"] in {"QUEUED", "RETRYING"}
+            ),
             None,
         )
         if next_stage is None:
@@ -40,9 +44,7 @@ async def execute_generation_job(job_id: str) -> None:
     await execute_claimed_generation_job(job, repository=repository, jobs=jobs)
 
 
-async def execute_claimed_generation_job(
-    job: dict[str, Any], *, repository, jobs
-) -> None:
+async def execute_claimed_generation_job(job: dict[str, Any], *, repository, jobs) -> None:
     """Fallback for an unknown job kind; supported jobs use durable stages."""
     if job["kind"] == "fixture":
         return
@@ -73,6 +75,7 @@ async def execute_generation_stage(
     repository=None,
     jobs=None,
     schedule_next: bool = True,
+    claimed_stage: dict[str, Any] | None = None,
 ) -> None:
     """Claim and execute one fixture stage exactly once.
 
@@ -86,7 +89,11 @@ async def execute_generation_stage(
     repository.recover_stale_jobs(
         max_running_seconds=int(os.getenv("PRODUCTLENS_WORKER_LEASE_SECONDS", "1800"))
     )
-    claimed = repository.claim_stage_job(run_id, stage)
+    # Broker deliveries arrive as a stage identity and must claim here.  The
+    # local async worker already owns the compare-and-set lease before it
+    # schedules a task; passing that row avoids briefly re-queuing a RUNNING
+    # stage, which could otherwise let a second worker claim duplicate work.
+    claimed = claimed_stage or repository.claim_stage_job(run_id, stage)
     if claimed is None:
         return
     job = repository.job_for_run(run_id)
@@ -96,7 +103,10 @@ async def execute_generation_stage(
     try:
         if job["kind"] == "fixture":
             await jobs.run_fixture_stage(
-                run_id, stage, gate=int(job["payload"]["gate"]), render=bool(job["payload"]["render"])
+                run_id,
+                stage,
+                gate=int(job["payload"]["gate"]),
+                render=bool(job["payload"]["render"]),
             )
         elif job["kind"] == "url":
             await jobs.run_url_stage(run_id, stage, payload=job["payload"])

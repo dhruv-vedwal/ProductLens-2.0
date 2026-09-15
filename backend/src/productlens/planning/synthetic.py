@@ -87,13 +87,20 @@ def value_for(
     for attempt in range(32):
         candidate = _candidate_value(field, seed=seed, attempt=attempt)
         normalized = _comparable(candidate)
-        if normalized and not any(normalized in value or value in normalized for value in forbidden):
+        if normalized and not any(
+            normalized in value or value in normalized for value in forbidden
+        ):
             return candidate
-    raise SyntheticDataError("Could not generate an isolated value distinct from observed product data")
+    raise SyntheticDataError(
+        "Could not generate an isolated value distinct from observed product data"
+    )
 
 
 def hydrate_operations(
-    operations: list[SemanticOperation], *, product_key: str, forbidden_values: set[str] | None = None
+    operations: list[SemanticOperation],
+    *,
+    product_key: str,
+    forbidden_values: set[str] | None = None,
 ) -> tuple[list[SemanticOperation], dict[str, str]]:
     """Fill missing typed values and retain a non-secret dataset for auditability."""
     fill_kinds = {
@@ -108,19 +115,23 @@ def hydrate_operations(
         if operation.kind in fill_kinds and operation.value in (None, ""):
             value = value_for(operation, product_key=product_key, forbidden_values=forbidden_values)
             dataset[operation.target.name if operation.target else operation.id] = value
-            hydrated.append(operation.model_copy(update={
-                "value": value,
-                # The verification contract owns the same generated value as
-                # the typed operation. Leaving ``expected=None`` made a form
-                # look compiled while guaranteeing a false postcondition at
-                # production time.
-                "postconditions": [
-                    condition.model_copy(update={"expected": value})
-                    if condition.kind == "value" and condition.expected in (None, "")
-                    else condition
-                    for condition in operation.postconditions
-                ],
-            }))
+            hydrated.append(
+                operation.model_copy(
+                    update={
+                        "value": value,
+                        # The verification contract owns the same generated value as
+                        # the typed operation. Leaving ``expected=None`` made a form
+                        # look compiled while guaranteeing a false postcondition at
+                        # production time.
+                        "postconditions": [
+                            condition.model_copy(update={"expected": value})
+                            if condition.kind == "value" and condition.expected in (None, "")
+                            else condition
+                            for condition in operation.postconditions
+                        ],
+                    }
+                )
+            )
         else:
             hydrated.append(operation)
     return hydrated, dataset

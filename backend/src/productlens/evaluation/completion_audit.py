@@ -18,14 +18,19 @@ REQUIRED_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("candidate_flows", "candidate-flows.json"),
     ("relevance_graph", "discovery/relevance-graph.json"),
     ("plan", "plan.json"),
+    ("capability_resolution", "planning/capability-resolutions.json"),
     ("plan_consistency", "qa/plan-consistency-report.json"),
     ("trace", "execution/trace.json"),
+    ("state_snapshots", "execution/state-snapshots.json"),
+    ("action_attempts", "execution/action-attempts.json"),
+    ("verification_results", "execution/verification-results.json"),
     ("presentation", "presentation/presentation-plan.json"),
     ("editorial_brief", "presentation/editorial-brief.json"),
     ("storyboard", "presentation/storyboard.json"),
     ("scene_plan", "presentation/scene-plan.json"),
     ("validated_scene_plan", "presentation/validated-scene-plan.json"),
     ("narration", "presentation/narration-script.json"),
+    ("fact_extraction", "narration/fact-extraction.json"),
     ("captions", "presentation/captions.json"),
     ("execution_qa", "qa/execution-report.json"),
     ("editorial_qa", "qa/story-report.json"),
@@ -62,7 +67,9 @@ def audit_run(root: Path) -> dict[str, object]:
     delivery_declared = False
     if delivery.is_file():
         try:
-            delivery_declared = bool(json.loads(delivery.read_text(encoding="utf-8")).get("deliverable"))
+            delivery_declared = bool(
+                json.loads(delivery.read_text(encoding="utf-8")).get("deliverable")
+            )
         except (OSError, ValueError, TypeError):
             delivery_declared = False
     manifest_valid = False
@@ -84,7 +91,11 @@ def audit_run(root: Path) -> dict[str, object]:
                 candidate = (root / relative).resolve()
                 # A manifest is an integrity boundary, not a way to hash an
                 # arbitrary absolute path or a parent-directory escape.
-                if not relative or Path(relative).is_absolute() or root_resolved not in candidate.parents:
+                if (
+                    not relative
+                    or Path(relative).is_absolute()
+                    or root_resolved not in candidate.parents
+                ):
                     checks_valid = False
                     break
                 manifest_paths.add(Path(relative).as_posix())
@@ -103,9 +114,7 @@ def audit_run(root: Path) -> dict[str, object]:
                 if not relative.endswith("page-knowledge") and relative != "artifact-manifest.json"
             }
             required_paths_present = required_paths.issubset(manifest_paths)
-            knowledge_present = any(
-                path.startswith("page-knowledge/") for path in manifest_paths
-            )
+            knowledge_present = any(path.startswith("page-knowledge/") for path in manifest_paths)
             manifest_valid = checks_valid and required_paths_present and knowledge_present
         except (OSError, ValueError, TypeError, KeyError):
             manifest_valid = False
@@ -116,7 +125,9 @@ def audit_run(root: Path) -> dict[str, object]:
     # outcome description to accompany a newer recording.
     plan_path = root / "plan.json"
     try:
-        plan_payload = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.is_file() else {}
+        plan_payload = (
+            json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.is_file() else {}
+        )
     except (OSError, ValueError, TypeError):
         plan_payload = {}
     consistency_failures = validate_selected_candidate_consistency(plan_payload)
@@ -152,7 +163,11 @@ def audit_run(root: Path) -> dict[str, object]:
     # of artifacts is not sufficient evidence that the video demonstrated it.
     objective_path = root / "objective.json"
     try:
-        objective = json.loads(objective_path.read_text(encoding="utf-8")) if objective_path.is_file() else {}
+        objective = (
+            json.loads(objective_path.read_text(encoding="utf-8"))
+            if objective_path.is_file()
+            else {}
+        )
     except (OSError, ValueError, TypeError):
         objective = {}
     if "create_isolated_record" in objective.get("permitted_mutations", []):
@@ -164,7 +179,11 @@ def audit_run(root: Path) -> dict[str, object]:
             witness = str(target.get("name", "")).casefold()
             witness_url = str(target.get("source_url", "")).casefold()
             trace = json.loads(trace_path.read_text(encoding="utf-8"))
-            submitted = [event for event in trace.get("events", []) if event.get("kind") == "Submit" and event.get("success")]
+            submitted = [
+                event
+                for event in trace.get("events", [])
+                if event.get("kind") == "Submit" and event.get("success")
+            ]
             proved = any(
                 (witness and witness in json.dumps(event.get("after", {})).casefold())
                 or (

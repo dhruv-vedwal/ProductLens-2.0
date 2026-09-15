@@ -51,9 +51,7 @@ async def test_grounding_rejects_ambiguous_or_missing_evidence():
 
 @pytest.mark.asyncio
 async def test_grounding_prefers_observed_control_selector_over_adjacent_label_text():
-    adapter = PlaywrightAdapter(
-        Page({"text:Phone": 1, 'selector:[name="phone"]': 1})
-    )
+    adapter = PlaywrightAdapter(Page({"text:Phone": 1, 'selector:[name="phone"]': 1}))
     _locator, strategy = await adapter.grounded_locator(
         Target(name="Phone", text="Phone", selector='[name="phone"]')
     )

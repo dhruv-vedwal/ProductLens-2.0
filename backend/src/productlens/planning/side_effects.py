@@ -9,10 +9,32 @@ class SideEffectPolicyError(ValueError):
     pass
 
 
-MUTATING_KINDS = {OperationKind.SUBMIT, OperationKind.CHECK, OperationKind.UNCHECK}
+# Semantic mutation categories are product-neutral.  A generic planner may
+# call the action "add item" or "create record", but both still require the
+# explicit side-effect policy.
+MUTATING_KINDS = {
+    OperationKind.SUBMIT,
+    OperationKind.CHECK,
+    OperationKind.UNCHECK,
+    OperationKind.CREATE_RECORD,
+}
 _BLOCKED_TERMS = {
-    "payment", "pay", "checkout", "invoice", "charge", "send", "email", "sms", "whatsapp",
-    "invite", "invitation", "webhook", "publish", "production", "integration", "connect app",
+    "payment",
+    "pay",
+    "checkout",
+    "invoice",
+    "charge",
+    "send",
+    "email",
+    "sms",
+    "whatsapp",
+    "invite",
+    "invitation",
+    "webhook",
+    "publish",
+    "production",
+    "integration",
+    "connect app",
 }
 # Product nouns are not a safety policy. A CRM's Lead/Booking labels happened
 # to be present in an early benchmark, but privileging them made production
@@ -22,10 +44,19 @@ _TESTABLE_TERMS = {"test", "demo", "sample", "sandbox", "isolated", "fixture"}
 
 
 def side_effect_decision(operation: SemanticOperation) -> str:
+    if operation.side_effect_policy == "blocked":
+        raise SideEffectPolicyError("Operation explicitly blocks side effects")
+    if operation.side_effect_policy == "read_only" and operation.kind in MUTATING_KINDS:
+        return "blocked_external"
     if operation.kind not in MUTATING_KINDS:
         return "read_only"
     evidence = " ".join(
-        part for part in [operation.intent, operation.target.name if operation.target else "", str(operation.value or "")]
+        part
+        for part in [
+            operation.intent,
+            operation.target.name if operation.target else "",
+            str(operation.value or ""),
+        ]
     ).lower()
     # A ProductLens test-state postcondition is deterministic fixture evidence;
     # it is stronger than a natural-language label such as "invite" and avoids
@@ -42,9 +73,15 @@ def side_effect_decision(operation: SemanticOperation) -> str:
 def authorize_operation(operation: SemanticOperation, allow_external_side_effects: bool) -> str:
     decision = side_effect_decision(operation)
     if decision == "blocked_external":
-        raise SideEffectPolicyError("Side-effecting operation is not authorized: blocked external or production effect")
+        raise SideEffectPolicyError(
+            "Side-effecting operation is not authorized: blocked external or production effect"
+        )
     if decision == "requires_explicit_authorization" and not allow_external_side_effects:
-        raise SideEffectPolicyError("Side-effecting operation is not authorized: explicit authorization required")
+        raise SideEffectPolicyError(
+            "Side-effecting operation is not authorized: explicit authorization required"
+        )
     if decision == "allowed_testable" and not allow_external_side_effects:
-        raise SideEffectPolicyError("Side-effecting operation is not authorized: isolated-demo authorization required")
+        raise SideEffectPolicyError(
+            "Side-effecting operation is not authorized: isolated-demo authorization required"
+        )
     return decision

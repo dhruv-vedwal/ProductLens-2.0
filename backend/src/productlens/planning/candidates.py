@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from hashlib import sha256
-from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit
 
 from productlens.contracts.models import (
     CandidateDemoFlow,
@@ -17,6 +17,7 @@ from productlens.contracts.models import (
     Target,
     WorkflowProposal,
 )
+from productlens.urls import canonical_product_url
 
 
 def _tokens(value: str) -> set[str]:
@@ -37,9 +38,21 @@ def _tokens(value: str) -> set[str]:
 
 
 _RELATION_ROLE_NOISE = {
-    "flow", "management", "workflow", "experience", "page", "pages",
-    "module", "feature", "area", "screen", "view", "lifecycle",
-    "journey", "progression", "context",
+    "flow",
+    "management",
+    "workflow",
+    "experience",
+    "page",
+    "pages",
+    "module",
+    "feature",
+    "area",
+    "screen",
+    "view",
+    "lifecycle",
+    "journey",
+    "progression",
+    "context",
 }
 
 # Records discovered from authenticated applications may contain customer
@@ -53,6 +66,25 @@ _SENSITIVE_LABEL_PATTERN = re.compile(
 )
 
 _PLACEHOLDER_ELEMENT_PATTERN = re.compile(r"element[-_ ]?\d+$", re.IGNORECASE)
+
+# Footer/legal documents are useful evidence only when the objective asks for
+# them explicitly. A full product walkthrough should not turn every legal
+# link discovered in a persistent footer into a chapter. This is a semantic
+# page-classification guard, not a site or route allowlist: an explicitly
+# requested policy page still passes through ``_deep_page_is_explicitly_requested``.
+_POLICY_PAGE_TERMS = {
+    "privacy",
+    "cookie",
+    "cookies",
+    "terms",
+    "legal",
+    "gdpr",
+    "sitemap",
+    "accessibility",
+    "imprint",
+    "acceptable",
+    "refund",
+}
 
 
 def _is_table_or_record_artifact(item: ObservedElement) -> bool:
@@ -77,7 +109,7 @@ def _is_table_or_record_artifact(item: ObservedElement) -> bool:
     label = " ".join((item.name or "").split())
     if role == "button" and label and label == label.upper() and len(label.split()) <= 4:
         return True
-    return False
+    return role == "button" and bool(label) and label == label.upper() and len(label.split()) <= 4
 
 
 def _is_safe_landmark(item: ObservedElement) -> bool:
@@ -91,11 +123,15 @@ def _is_safe_landmark(item: ObservedElement) -> bool:
 
 def _page_identity_words(page: PageKnowledge) -> set[str]:
     """Terms that identify a page itself, excluding navigation/body chrome."""
-    return _tokens(" ".join([
-        page.title,
-        page.purpose,
-        urlsplit(page.url).path.replace("/", " ").replace("-", " "),
-    ]))
+    return _tokens(
+        " ".join(
+            [
+                page.title,
+                page.purpose,
+                urlsplit(page.url).path.replace("/", " ").replace("-", " "),
+            ]
+        )
+    )
 
 
 def _page_proves_relationship_side(
@@ -124,10 +160,7 @@ def _page_proves_relationship_side(
     # and title remain generic.  Treat that exact observed control as
     # relationship evidence, but only when the caller has supplied labels
     # from the same page-local snapshot; never infer it from a route name.
-    return bool(
-        observed_labels
-        and any(required & _tokens(label) for label in observed_labels)
-    )
+    return bool(observed_labels and any(required & _tokens(label) for label in observed_labels))
 
 
 def _page_observed_labels(context: ProductContext, page: PageKnowledge) -> set[str]:
@@ -135,8 +168,7 @@ def _page_observed_labels(context: ProductContext, page: PageKnowledge) -> set[s
     return {
         item.name
         for item in context.elements
-        if item.name
-        and _canonical_url(context.url, item.source_url or context.url) == canonical
+        if item.name and _canonical_url(context.url, item.source_url or context.url) == canonical
     }
 
 
@@ -151,23 +183,32 @@ def _candidate_proves_required_relationships(
         return True
     selected = [
         pages_by_url[url]
-        for url in (_canonical_url(context.url, item) for item in [*candidate.page_urls, *candidate.supporting_page_urls])
+        for url in (
+            _canonical_url(context.url, item)
+            for item in [*candidate.page_urls, *candidate.supporting_page_urls]
+        )
         if url in pages_by_url
     ]
     for relation in objective.supporting_relationships:
         if not relation.required:
             continue
         source_pages = [
-            page for page in selected
+            page
+            for page in selected
             if _page_proves_relationship_side(
-                page, relation.source, relation.target,
+                page,
+                relation.source,
+                relation.target,
                 observed_labels=_page_observed_labels(context, page),
             )
         ]
         target_pages = [
-            page for page in selected
+            page
+            for page in selected
             if _page_proves_relationship_side(
-                page, relation.target, relation.source,
+                page,
+                relation.target,
+                relation.source,
             )
         ]
         if not source_pages or not target_pages:
@@ -177,7 +218,8 @@ def _candidate_proves_required_relationships(
         # the workspace merely because the noun appears in its route.
         if not any(
             _canonical_url(context.url, source.url) != _canonical_url(context.url, target.url)
-            for source in source_pages for target in target_pages
+            for source in source_pages
+            for target in target_pages
         ):
             return False
     return True
@@ -185,11 +227,10 @@ def _candidate_proves_required_relationships(
 
 def _canonical_url(base: str, value: str) -> str:
     """Compare routes by browser-visible state, not URI escaping spelling."""
-    parsed = urlsplit(urljoin(base, value))
-    return urlunsplit((
-        parsed.scheme.lower(), parsed.netloc.lower(), unquote(parsed.path).rstrip("/") or "/",
-        parsed.query, "",
-    ))
+    # Keep one canonicalization policy for every layer: normalize HTTP
+    # redirects to HTTPS, duplicate slashes/default documents, and query
+    # parameter ordering before comparing observed and planned routes.
+    return canonical_product_url(urljoin(base, value))
 
 
 def _fact_evidence_ref(page: PageKnowledge, fact: str) -> str:
@@ -222,9 +263,26 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
     # selected flow must contain a destination page whose observed content
     # matches the requested feature terms, not merely its setup page.
     context_terms = {
-        "first", "understand", "config", "configuration", "settings", "setting",
-        "relationship", "context", "actual", "flow", "experience", "explain",
-        "show", "include", "login", "avoid", "unrelated", "areas", "page", "pages",
+        "first",
+        "understand",
+        "config",
+        "configuration",
+        "settings",
+        "setting",
+        "relationship",
+        "context",
+        "actual",
+        "flow",
+        "experience",
+        "explain",
+        "show",
+        "include",
+        "login",
+        "avoid",
+        "unrelated",
+        "areas",
+        "page",
+        "pages",
     }
     feature_terms = wanted - context_terms
     # ``thorough`` describes depth, not breadth.  A focused request may ask
@@ -233,21 +291,79 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
     # responsible for preventing.  Only explicit breadth words (full,
     # complete, entire, every/each) may opt into the all-primary-pages path.
     full = bool(context.objective and context.objective.demo_type == "full_walkthrough") or bool(
-        re.search(r"\b(?:full|complete|entire)\b.*\bwalkthrough\b|\b(?:each|every)\s+(?:tab|page|section|primary)\b", objective.lower())
+        re.search(
+            r"\b(?:full|complete|entire)\b.*\bwalkthrough\b|\b(?:each|every)\s+(?:tab|page|section|primary)\b",
+            objective.lower(),
+        )
     )
     pages_by_url = {
-        _canonical_url(context.url, page.url): page
-        for page in _pages_for_context(context)
+        _canonical_url(context.url, page.url): page for page in _pages_for_context(context)
     }
+    if full and not (wanted & _POLICY_PAGE_TERMS):
+        # Provider/model candidates may still contain every discovered URL,
+        # including footer-only policy documents. Sanitize those candidates at
+        # the selection boundary so a model response cannot bypass the same
+        # page-role contract enforced for deterministic candidates. Rebuild
+        # derived fields when trimming pages; otherwise stale outcomes/evidence
+        # would leak into planning and narration.
+        sanitized: list[CandidateDemoFlow] = []
+        for candidate in candidates:
+            selected_pages = [
+                page_url
+                for page_url in candidate.page_urls
+                if (
+                    (page := pages_by_url.get(_canonical_url(context.url, page_url))) is None
+                    or not _is_footer_policy_page(context, page)
+                )
+            ]
+            selected_support = [
+                page_url
+                for page_url in candidate.supporting_page_urls
+                if (
+                    (page := pages_by_url.get(_canonical_url(context.url, page_url))) is None
+                    or not _is_footer_policy_page(context, page)
+                )
+            ]
+            if not selected_pages:
+                continue
+            if (
+                selected_pages != candidate.page_urls
+                or selected_support != candidate.supporting_page_urls
+            ):
+                evidence_pages = [
+                    pages_by_url[_canonical_url(context.url, page_url)]
+                    for page_url in [*selected_pages, *selected_support]
+                    if _canonical_url(context.url, page_url) in pages_by_url
+                ]
+                candidate = candidate.model_copy(
+                    update={
+                        "page_urls": selected_pages,
+                        "supporting_page_urls": selected_support,
+                        "expected_outcomes": [page.purpose for page in evidence_pages],
+                        "semantic_steps": [f"complete:{page.purpose}" for page in evidence_pages],
+                        "evidence_coverage": [
+                            reference
+                            for page in evidence_pages
+                            for reference in _page_evidence(page)
+                        ],
+                    }
+                )
+            sanitized.append(candidate)
+        candidates = sanitized
+        if not candidates:
+            return None
     # A requested relationship is a planning requirement, not merely a
     # scoring hint. If discovery captured a candidate that proves both
     # semantic sides, a shorter route that omits the setup/detail evidence is
     # ineligible even when its lexical score is higher.
     relationship_candidates = [
-        candidate for candidate in candidates
+        candidate
+        for candidate in candidates
         if _candidate_proves_required_relationships(candidate, pages_by_url, context)
     ]
-    relationship_context_candidates = [candidate for candidate in relationship_candidates if candidate.supporting_page_urls]
+    relationship_context_candidates = [
+        candidate for candidate in relationship_candidates if candidate.supporting_page_urls
+    ]
     if relationship_context_candidates:
         candidates = relationship_context_candidates
     elif relationship_candidates:
@@ -263,15 +379,23 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
     opening_feature_match = 0
     opening_path_match = False
     if opening_page is not None and feature_terms:
-        opening_words = _tokens(" ".join([
-            opening_page.title, opening_page.purpose, *opening_page.visible_sections,
-            *opening_page.visible_facts, urlsplit(opening_page.url).path,
-        ]))
+        opening_words = _tokens(
+            " ".join(
+                [
+                    opening_page.title,
+                    opening_page.purpose,
+                    *opening_page.visible_sections,
+                    *opening_page.visible_facts,
+                    urlsplit(opening_page.url).path,
+                ]
+            )
+        )
         opening_feature_match = len(opening_words & feature_terms)
         path = urlsplit(opening_page.url).path.casefold()
         opening_path_match = any(term in path for term in feature_terms if len(term) >= 4)
     required_relationships = bool(
-        context.objective and any(item.required for item in context.objective.supporting_relationships)
+        context.objective
+        and any(item.required for item in context.objective.supporting_relationships)
     )
     # A post-authentication opening state can be an unrelated default module.
     # Once discovery has captured a destination whose *page identity* names
@@ -283,20 +407,30 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
         primary_identity_terms = _tokens(context.objective.primary_entity) - _RELATION_ROLE_NOISE
         if primary_identity_terms:
             identity_matches = [
-                candidate for candidate in candidates
+                candidate
+                for candidate in candidates
                 if any(
-                    page is not None
-                    and bool(primary_identity_terms & _page_identity_words(page))
+                    page is not None and bool(primary_identity_terms & _page_identity_words(page))
                     for page_url in candidate.page_urls[1:]
                     for page in [pages_by_url.get(_canonical_url(context.url, page_url))]
                 )
             ]
             if identity_matches:
                 candidates = identity_matches
-    if opening_page is not None and opening_feature_match and opening_path_match and not full and not required_relationships:
+    if (
+        opening_page is not None
+        and opening_feature_match
+        and opening_path_match
+        and not full
+        and not required_relationships
+    ):
         opening_url = _canonical_url(context.url, opening_page.url)
-        opening_candidates = [candidate for candidate in candidates if candidate.page_urls and
-                              _canonical_url(context.url, candidate.page_urls[0]) == opening_url]
+        opening_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.page_urls
+            and _canonical_url(context.url, candidate.page_urls[0]) == opening_url
+        ]
         # Keep a single configuration/support page only when its own evidence
         # matches the request's context vocabulary.  Never substitute another
         # route just because it is easy to click.
@@ -315,7 +449,13 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
             if page_words & context_terms:
                 contextual.append(candidate)
         if contextual:
-            requested_context = wanted & {"config", "configuration", "settings", "setting", "relationship"}
+            requested_context = wanted & {
+                "config",
+                "configuration",
+                "settings",
+                "setting",
+                "relationship",
+            }
             if requested_context:
                 # Configuration is useful only when the supporting page also
                 # contains evidence for the requested feature.  A generic
@@ -331,18 +471,25 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
                     )
                     if support_page is None:
                         continue
-                    support_words = _tokens(" ".join([
-                        support_page.title,
-                        support_page.purpose,
-                        *support_page.visible_sections,
-                        *support_page.visible_facts,
-                        *support_page.scroll_landmarks,
-                    ]))
+                    support_words = _tokens(
+                        " ".join(
+                            [
+                                support_page.title,
+                                support_page.purpose,
+                                *support_page.visible_sections,
+                                *support_page.visible_facts,
+                                *support_page.scroll_landmarks,
+                            ]
+                        )
+                    )
                     if feature_terms and not (support_words & feature_terms):
                         continue
                     with_support.append(candidate)
                 if with_support:
-                    def support_detail_score(candidate: CandidateDemoFlow) -> tuple[int, int, float]:
+
+                    def support_detail_score(
+                        candidate: CandidateDemoFlow,
+                    ) -> tuple[int, int, float]:
                         """Prefer a relationship detail page over its navigation shell.
 
                         Both a shell and its detail page can repeat a feature
@@ -357,14 +504,26 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
                         )
                         if support_page is None:
                             return (0, 0, candidate.score)
-                        identity = _tokens(" ".join([
-                            support_page.title,
-                            support_page.purpose,
-                            urlsplit(support_page.url).path.replace("/", " ").replace("-", " "),
-                        ]))
+                        identity = _tokens(
+                            " ".join(
+                                [
+                                    support_page.title,
+                                    support_page.purpose,
+                                    urlsplit(support_page.url)
+                                    .path.replace("/", " ")
+                                    .replace("-", " "),
+                                ]
+                            )
+                        )
                         relationship_hits = 0
-                        for relation in (context.objective.supporting_relationships if context.objective else []):
-                            source_words = _tokens(relation.source) - {"flow", "management", "experience"}
+                        for relation in (
+                            context.objective.supporting_relationships if context.objective else []
+                        ):
+                            source_words = _tokens(relation.source) - {
+                                "flow",
+                                "management",
+                                "experience",
+                            }
                             relationship_hits = max(relationship_hits, len(identity & source_words))
                         return (
                             len(identity & requested_context),
@@ -383,14 +542,30 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
             if page is None:
                 continue
             path_terms = _tokens(urlsplit(page.url).path)
-            page_words = _tokens(" ".join([
-                page.title, page.purpose, *page.visible_sections, *page.visible_facts,
-            ]))
+            page_words = _tokens(
+                " ".join(
+                    [
+                        page.title,
+                        page.purpose,
+                        *page.visible_sections,
+                        *page.visible_facts,
+                    ]
+                )
+            )
             best_match = max(best_match, len((page_words | path_terms) & feature_terms))
         candidate_destination_matches[id(candidate)] = best_match
     has_feature_destination = any(value >= 1 for value in candidate_destination_matches.values())
     for candidate in candidates:
-        words = _tokens(" ".join([candidate.name, *candidate.rationale, *candidate.expected_outcomes, *candidate.evidence_coverage]))
+        words = _tokens(
+            " ".join(
+                [
+                    candidate.name,
+                    *candidate.rationale,
+                    *candidate.expected_outcomes,
+                    *candidate.evidence_coverage,
+                ]
+            )
+        )
         overlap = len(words & wanted)
         breadth = len(candidate.page_urls)
         score = candidate.score + overlap * 0.08
@@ -402,10 +577,19 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
                 continue
             path_match = bool(_tokens(urlsplit(page.url).path) & feature_terms)
             destination_path_match = destination_path_match or path_match
-            page_words = _tokens(" ".join([
-                page.title, page.purpose, *page.visible_sections, *page.visible_facts,
-            ]))
-            destination_matches.append(len((page_words | _tokens(urlsplit(page.url).path)) & feature_terms))
+            page_words = _tokens(
+                " ".join(
+                    [
+                        page.title,
+                        page.purpose,
+                        *page.visible_sections,
+                        *page.visible_facts,
+                    ]
+                )
+            )
+            destination_matches.append(
+                len((page_words | _tokens(urlsplit(page.url).path)) & feature_terms)
+            )
         if destination_path_match:
             # A same-origin route whose path semantically names the requested
             # feature is stronger evidence than a generic setup page whose
@@ -433,16 +617,22 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
                 if not relation.required:
                     continue
                 source_indexes = [
-                    index for index, page_url in enumerate(canonical_pages)
+                    index
+                    for index, page_url in enumerate(canonical_pages)
                     if _page_proves_relationship_side(
-                        pages_by_url[page_url], relation.source, relation.target,
+                        pages_by_url[page_url],
+                        relation.source,
+                        relation.target,
                         observed_labels=_page_observed_labels(context, pages_by_url[page_url]),
                     )
                 ]
                 target_indexes = [
-                    index for index, page_url in enumerate(canonical_pages)
+                    index
+                    for index, page_url in enumerate(canonical_pages)
                     if _page_proves_relationship_side(
-                        pages_by_url[page_url], relation.target, relation.source,
+                        pages_by_url[page_url],
+                        relation.target,
+                        relation.source,
                     )
                 ]
                 if source_indexes and target_indexes:
@@ -458,8 +648,14 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
     # module. This is driven solely by the primary entity and observed page
     # identity; relationship support pages remain attached and are never
     # promoted into the main story.
-    if not full and context.objective and context.objective.primary_entity and selected_candidate.page_urls:
+    if (
+        not full
+        and context.objective
+        and context.objective.primary_entity
+        and selected_candidate.page_urls
+    ):
         primary_terms = _tokens(context.objective.primary_entity) - _RELATION_ROLE_NOISE
+
         def is_primary(url: str) -> bool:
             page = pages_by_url.get(_canonical_url(context.url, url))
             if page is None:
@@ -469,6 +665,7 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
             # requested feature), which would misclassify a post-login shell
             # as the operational destination and defeat this reordering.
             return bool(primary_terms & _page_identity_words(page))
+
         if primary_terms and not is_primary(selected_candidate.page_urls[0]):
             primary_pages = [url for url in selected_candidate.page_urls if is_primary(url)]
             if primary_pages:
@@ -480,27 +677,40 @@ def select_candidate_flow(context: ProductContext, objective: str) -> CandidateD
                 # the latter displace the requested workflow.
                 prefix = selected_candidate.page_urls[:1] if generic_opening else []
                 ordered = list(dict.fromkeys([*prefix, *primary_pages]))
-                ordered_pages = [pages_by_url[_canonical_url(context.url, url)] for url in ordered if _canonical_url(context.url, url) in pages_by_url]
-                selected_candidate = selected_candidate.model_copy(update={
-                    "page_urls": ordered,
-                    # Reordering is a semantic selection change, not merely a
-                    # URL list edit. Refresh derived outcomes/steps/evidence
-                    # so stale post-login-shell labels cannot leak into the
-                    # persisted plan or narration contract.
-                    "expected_outcomes": [page.purpose for page in ordered_pages],
-                    "semantic_steps": [f"complete:{page.purpose}" for page in ordered_pages],
-                    "evidence_coverage": [
-                        reference for page in [*ordered_pages, *[
-                            pages_by_url[_canonical_url(context.url, url)]
-                            for url in selected_candidate.supporting_page_urls
-                            if _canonical_url(context.url, url) in pages_by_url
-                        ]] for reference in _page_evidence(page)
-                    ],
-                })
+                ordered_pages = [
+                    pages_by_url[_canonical_url(context.url, url)]
+                    for url in ordered
+                    if _canonical_url(context.url, url) in pages_by_url
+                ]
+                selected_candidate = selected_candidate.model_copy(
+                    update={
+                        "page_urls": ordered,
+                        # Reordering is a semantic selection change, not merely a
+                        # URL list edit. Refresh derived outcomes/steps/evidence
+                        # so stale post-login-shell labels cannot leak into the
+                        # persisted plan or narration contract.
+                        "expected_outcomes": [page.purpose for page in ordered_pages],
+                        "semantic_steps": [f"complete:{page.purpose}" for page in ordered_pages],
+                        "evidence_coverage": [
+                            reference
+                            for page in [
+                                *ordered_pages,
+                                *[
+                                    pages_by_url[_canonical_url(context.url, url)]
+                                    for url in selected_candidate.supporting_page_urls
+                                    if _canonical_url(context.url, url) in pages_by_url
+                                ],
+                            ]
+                            for reference in _page_evidence(page)
+                        ],
+                    }
+                )
     return selected_candidate
 
 
-def candidate_flows_from_evidence(context: ProductContext, objective: str) -> list[CandidateDemoFlow]:
+def candidate_flows_from_evidence(
+    context: ProductContext, objective: str
+) -> list[CandidateDemoFlow]:
     """Return several auditable alternatives, never a route-order tour.
 
     Discovery may provide model-ranked candidates, but they are only useful
@@ -520,11 +730,21 @@ def candidate_flows_from_evidence(context: ProductContext, objective: str) -> li
     # Match the selector's breadth semantics: thoroughness must not broaden a
     # feature walkthrough into every discovered route.
     full = bool(context.objective and context.objective.demo_type == "full_walkthrough") or bool(
-        re.search(r"\b(?:full|complete|entire)\b.*\bwalkthrough\b|\b(?:each|every)\s+(?:tab|page|section|primary)\b", objective.lower())
+        re.search(
+            r"\b(?:full|complete|entire)\b.*\bwalkthrough\b|\b(?:each|every)\s+(?:tab|page|section|primary)\b",
+            objective.lower(),
+        )
     )
     relevance = {page.url: _page_relevance(page, wanted) for page in pages}
     ordered = sorted(pages, key=lambda page: (-relevance[page.url], pages.index(page)))
-    opening = next((page for page in pages if _canonical_url(context.url, page.url) == _canonical_url(context.url, context.url)), pages[0])
+    opening = next(
+        (
+            page
+            for page in pages
+            if _canonical_url(context.url, page.url) == _canonical_url(context.url, context.url)
+        ),
+        pages[0],
+    )
     generated: list[CandidateDemoFlow] = []
     if full:
         # A complete walkthrough covers safe *primary* sections and their
@@ -534,7 +754,8 @@ def candidate_flows_from_evidence(context: ProductContext, objective: str) -> li
         # route sweep we are trying to prevent. Keep a deep route only when
         # the request explicitly names it or it is the sole available detail.
         primary_pages = [
-            page for page in pages
+            page
+            for page in pages
             if _is_primary_page(context, page) or _deep_page_is_explicitly_requested(page, wanted)
         ]
         primary_pages = _order_pages_by_visible_navigation(context, primary_pages)
@@ -547,48 +768,79 @@ def candidate_flows_from_evidence(context: ProductContext, objective: str) -> li
         primary_pages = _insert_representative_detail_pages(context, primary_pages, pages)
         # Preserve discovery/navigation order for a whole-product journey; it
         # creates continuity and avoids returning to Home to patch coverage.
-        generated.append(_flow_from_pages(
-            "complete evidence walkthrough", primary_pages, relevance, objective,
-            rationale=["every selected primary page has captured local evidence", "opening page is completed before transition"],
-        ))
+        generated.append(
+            _flow_from_pages(
+                "complete evidence walkthrough",
+                primary_pages,
+                relevance,
+                objective,
+                rationale=[
+                    "every selected primary page has captured local evidence",
+                    "opening page is completed before transition",
+                ],
+            )
+        )
     else:
         for page in ordered:
             selection = [opening] if page.url == opening.url else [opening, page]
-            generated.append(_flow_from_pages(
-                f"focused evidence walkthrough: {page.purpose}", selection, relevance, objective,
-                rationale=["requested feature overlap", "only supporting context retained"],
-            ))
+            generated.append(
+                _flow_from_pages(
+                    f"focused evidence walkthrough: {page.purpose}",
+                    selection,
+                    relevance,
+                    objective,
+                    rationale=["requested feature overlap", "only supporting context retained"],
+                )
+            )
         # If the request explicitly asks how a feature relates to setup or
         # configuration, add the strongest observed context page as a single
         # supporting chapter.  The actual feature page remains first and is
         # completed before this optional context; unrelated routes are never
         # pulled in merely because they are navigable.
-        context_requested = wanted & {"config", "configuration", "settings", "setting", "relationship"}
+        context_requested = wanted & {
+            "config",
+            "configuration",
+            "settings",
+            "setting",
+            "relationship",
+        }
         if context_requested:
             support = next(
                 (
-                    page for page in ordered
+                    page
+                    for page in ordered
                     if page is not opening
-                    and _tokens(" ".join([page.title, page.purpose, *page.visible_sections])) & context_requested
+                    and _tokens(" ".join([page.title, page.purpose, *page.visible_sections]))
+                    & context_requested
                 ),
                 None,
             )
             if support is not None:
-                generated.append(_flow_from_pages(
-                    f"focused evidence walkthrough: {opening.purpose} with supporting context",
-                    [opening, support], relevance, objective,
-                    rationale=["requested feature evidence established first", "explicit setup relationship is grounded"],
-                ))
+                generated.append(
+                    _flow_from_pages(
+                        f"focused evidence walkthrough: {opening.purpose} with supporting context",
+                        [opening, support],
+                        relevance,
+                        objective,
+                        rationale=[
+                            "requested feature evidence established first",
+                            "explicit setup relationship is grounded",
+                        ],
+                    )
+                )
         relationship_pages: list[PageKnowledge] = [opening]
         relationship_support: list[PageKnowledge] = []
-        for relation in (context.objective.supporting_relationships if context.objective else []):
+        for relation in context.objective.supporting_relationships if context.objective else []:
             if not relation.required:
                 continue
             source = next(
                 (
-                    page for page in ordered
+                    page
+                    for page in ordered
                     if _page_proves_relationship_side(
-                        page, relation.source, relation.target,
+                        page,
+                        relation.source,
+                        relation.target,
                         observed_labels=_page_observed_labels(context, page),
                     )
                 ),
@@ -596,10 +848,13 @@ def candidate_flows_from_evidence(context: ProductContext, objective: str) -> li
             )
             target = next(
                 (
-                    page for page in ordered
+                    page
+                    for page in ordered
                     if page is not source
                     and _page_proves_relationship_side(
-                        page, relation.target, relation.source,
+                        page,
+                        relation.target,
+                        relation.source,
                     )
                 ),
                 None,
@@ -616,15 +871,19 @@ def candidate_flows_from_evidence(context: ProductContext, objective: str) -> li
             if target not in relationship_pages:
                 relationship_pages.append(target)
         if relationship_support:
-            generated.append(_flow_from_pages(
-                "focused evidence walkthrough with required context relationship",
-                relationship_pages, relevance, objective,
-                rationale=[
-                    "explicit relationship detail is semantically grounded",
-                    "operational experience is demonstrated without a setup detour",
-                ],
-                supporting_pages=relationship_support,
-            ))
+            generated.append(
+                _flow_from_pages(
+                    "focused evidence walkthrough with required context relationship",
+                    relationship_pages,
+                    relevance,
+                    objective,
+                    rationale=[
+                        "explicit relationship detail is semantically grounded",
+                        "operational experience is demonstrated without a setup detour",
+                    ],
+                    supporting_pages=relationship_support,
+                )
+            )
     # Keep independently discovered alternatives only when they refer to
     # known pages.  This rejects stale/deep route candidates rather than
     # letting a successful click silently broaden a story.
@@ -637,10 +896,97 @@ def candidate_flows_from_evidence(context: ProductContext, objective: str) -> li
     # explicitly validated below.
     if not full:
         for candidate in known:
-            if candidate.page_urls and all(_canonical_url(context.url, url) in page_urls for url in candidate.page_urls):
+            if candidate.page_urls and all(
+                _canonical_url(context.url, url) in page_urls for url in candidate.page_urls
+            ):
                 generated.append(candidate)
     deduped: dict[tuple[str, ...], CandidateDemoFlow] = {}
     for candidate in generated:
+        # A page's readable duration is not determined by headings alone.
+        # Interactive surfaces (forms, tables, editors, canvases, and
+        # overlays) each add a bounded establish/explain/verify chapter.  Use
+        # observed DOM semantics and capability evidence, never a product or
+        # route name, so a sparse-looking canvas is not rejected merely
+        # because its toolbar has no textual headings.  The cap keeps this an
+        # evidence estimate rather than a renderer padding mechanism.
+        capability_kinds: set[str] = set()
+        for page_url in candidate.page_urls:
+            canonical_page = _canonical_url(context.url, page_url)
+            page_elements = [
+                item
+                for item in context.elements
+                if _canonical_url(item.source_url or context.url, item.source_url or context.url)
+                == canonical_page
+            ]
+            for item in page_elements:
+                tag = (item.tag or "").casefold()
+                role = (item.role or "").casefold()
+                if tag in {"canvas", "svg"} or role in {"application", "graphics-document"}:
+                    capability_kinds.add("visual_surface")
+                if item.draggable or item.dropzone:
+                    capability_kinds.add("drag_drop")
+                if tag in {"input", "textarea", "select"} or role in {
+                    "textbox",
+                    "combobox",
+                    "checkbox",
+                    "radio",
+                }:
+                    capability_kinds.add("form")
+                if item.shadow_host:
+                    capability_kinds.add("shadow_dom")
+            for capability in context.capabilities:
+                # Resumed runs can contain pre-contract dictionaries from
+                # older artifact snapshots. Read them defensively while the
+                # typed RuntimeCapability model remains authoritative for new
+                # records.
+                capability_source = (
+                    capability.get("source_url")
+                    if isinstance(capability, dict)
+                    else getattr(capability, "source_url", None)
+                )
+                capability_kind = (
+                    capability.get("kind")
+                    if isinstance(capability, dict)
+                    else getattr(capability, "kind", None)
+                )
+                if (
+                    isinstance(capability_source, str)
+                    and _canonical_url(capability_source, capability_source) == canonical_page
+                    and isinstance(capability_kind, str)
+                ):
+                    capability_kinds.add(capability_kind)
+        if capability_kinds:
+            # Visual/editing surfaces need several distinct, evidence-backed
+            # beats (orient the workspace, explain controls, show the surface,
+            # and verify its state) even when the DOM exposes only one canvas
+            # node. Other capabilities receive smaller bounded weights; this
+            # is a content estimate, not an instruction to pad footage.
+            capability_weights = {
+                "visual_surface": 4,
+                "canvas": 4,
+                "graph": 4,
+                "form": 3,
+                "drag_drop": 3,
+                "rich_text": 3,
+                "table": 2,
+                "virtualized_table": 2,
+                "modal": 2,
+                "detail": 2,
+                "iframe": 2,
+                "shadow_dom": 1,
+            }
+            capability_beats = min(
+                8,
+                sum(capability_weights.get(kind, 1) for kind in capability_kinds),
+            )
+            candidate = candidate.model_copy(
+                update={
+                    "estimated_duration_seconds": min(
+                        180,
+                        candidate.estimated_duration_seconds + capability_beats * 10,
+                    )
+                }
+            )
         key = (
             *(_canonical_url(context.url, url) for url in candidate.page_urls),
             "|support|",
@@ -652,11 +998,36 @@ def candidate_flows_from_evidence(context: ProductContext, objective: str) -> li
     return sorted(deduped.values(), key=lambda candidate: candidate.score, reverse=True)
 
 
+def _is_footer_policy_page(context: ProductContext, page: PageKnowledge) -> bool:
+    """Return whether a policy-like page is reachable only from page chrome."""
+    identity = _tokens(f"{page.title} {page.purpose}")
+    if not identity & _POLICY_PAGE_TERMS:
+        return False
+    page_url = _canonical_url(context.url, page.url)
+    controls = [*context.navigation, *context.elements]
+    has_primary_entry = any(
+        item.href
+        and not urlsplit(item.href).fragment
+        and item.navigation_scope != "footer"
+        and _canonical_url(item.source_url or context.url, item.href) == page_url
+        and (item.navigation_scope == "primary" or not (_tokens(item.name) & _POLICY_PAGE_TERMS))
+        for item in controls
+    )
+    return not has_primary_entry
+
+
 def _is_primary_page(context: ProductContext, page: PageKnowledge) -> bool:
     """Whether a page is an opening or top-level same-origin destination."""
     page_url = _canonical_url(context.url, page.url)
     if page_url == _canonical_url(context.url, context.url):
         return True
+    # A shallow URL is not sufficient proof that a page is a primary product
+    # area. Legal/consent documents commonly live at ``/<name>`` and are
+    # exposed only from the footer. Keep them out of a complete walkthrough
+    # unless a visible non-footer control actually establishes them as a
+    # product destination.
+    if _is_footer_policy_page(context, page):
+        return False
     path = [segment for segment in urlsplit(page_url).path.split("/") if segment]
     return len(path) <= 1
 
@@ -675,7 +1046,8 @@ def _route_ancestors(pages: list[PageKnowledge], page: PageKnowledge) -> list[Pa
         ancestor_path = "/" + "/".join(path[:depth])
         match = next(
             (
-                candidate for candidate in pages
+                candidate
+                for candidate in pages
                 if urlsplit(candidate.url).scheme == target.scheme
                 and urlsplit(candidate.url).netloc == target.netloc
                 and urlsplit(candidate.url).path.rstrip("/") == ancestor_path
@@ -715,7 +1087,13 @@ def _order_pages_by_visible_navigation(
     return sorted(
         ordered,
         key=lambda page: (
-            len([segment for segment in urlsplit(_canonical_url(context.url, page.url)).path.split("/") if segment]),
+            len(
+                [
+                    segment
+                    for segment in urlsplit(_canonical_url(context.url, page.url)).path.split("/")
+                    if segment
+                ]
+            ),
             order_index[id(page)],
         ),
     )
@@ -753,7 +1131,9 @@ def _insert_representative_detail_pages(
         # belongs after the owning collection page.  Otherwise inserting it
         # after the root causes the journey to enter detail first and later
         # return to the parent collection.
-        insertion_page = parent if parent in primary_urls else (source if source in primary_urls else parent)
+        insertion_page = (
+            parent if parent in primary_urls else (source if source in primary_urls else parent)
+        )
         if insertion_page in primary_urls:
             detail_by_source.setdefault(insertion_page, page)
             selected_detail_urls.add(target)
@@ -774,8 +1154,21 @@ def _deep_page_is_explicitly_requested(page: PageKnowledge, objective_tokens: se
     retain it. Generic product-tour words deliberately carry no such weight.
     """
     generic = {
-        "full", "complete", "thorough", "walkthrough", "demo", "video", "product",
-        "website", "application", "pages", "page", "tabs", "tab", "show", "tour",
+        "full",
+        "complete",
+        "thorough",
+        "walkthrough",
+        "demo",
+        "video",
+        "product",
+        "website",
+        "application",
+        "pages",
+        "page",
+        "tabs",
+        "tab",
+        "show",
+        "tour",
     }
     path = [segment for segment in urlsplit(page.url).path.split("/") if segment]
     # Use the leaf route subject only. A request for the parent ``Engineering
@@ -836,16 +1229,27 @@ def _editorial_landmark_groups(
         # by contrast, are commonly independent selectable designs; retain
         # each target so the planner can prove every observed component.
         if all(_heading_level(item) == 3 for item in groups[1]):
-            groups = [groups[0], *[groups[1][index:index + 3] for index in range(0, len(groups[1]), 3)]]
+            groups = [
+                groups[0],
+                *[groups[1][index : index + 3] for index in range(0, len(groups[1]), 3)],
+            ]
         else:
             groups = [groups[0], *[[item] for item in groups[1]]]
     # Sparse pages without section hierarchy (for example a list of article
     # cards) still need several visible beats. Keep at most three adjacent
     # cards per beat so every card is traversed and explained, without turning
     # a long collection into a route-like slideshow.
-    if len(groups) == 1 and len(groups[0]) > 1 and all(_heading_level(item) > 2 for item in groups[0]):
+    if (
+        len(groups) == 1
+        and len(groups[0]) > 1
+        and all(_heading_level(item) > 2 for item in groups[0])
+    ):
         items = groups[0]
-        groups = [items[index:index + 3] for index in range(0, len(items), 3)] if len(items) > 6 else [[item] for item in items]
+        groups = (
+            [items[index : index + 3] for index in range(0, len(items), 3)]
+            if len(items) > 6
+            else [[item] for item in items]
+        )
     # A dense h2 section often contains a card collection (featured work,
     # roles, designs, or metrics).  Keep its section heading with the first
     # cards, then continue in three-card beats.  This preserves continuous
@@ -854,10 +1258,10 @@ def _editorial_landmark_groups(
     expanded: list[list[ObservedElement]] = []
     for group in groups:
         parent = [group[0]] if group and _heading_level(group[0]) <= 2 else []
-        children = group[len(parent):]
+        children = group[len(parent) :]
         if len(children) > 3 and all(_heading_level(item) >= 3 for item in children):
             expanded.append([*parent, *children[:3]])
-            expanded.extend(children[index:index + 3] for index in range(3, len(children), 3))
+            expanded.extend(children[index : index + 3] for index in range(3, len(children), 3))
         else:
             expanded.append(group)
     groups = expanded
@@ -883,7 +1287,7 @@ def _limit_editorial_groups(
             range(len(groups) - 1),
             key=lambda item: (len(groups[item]) + len(groups[item + 1]), item),
         )
-        groups[index:index + 2] = [[*groups[index], *groups[index + 1]]]
+        groups[index : index + 2] = [[*groups[index], *groups[index + 1]]]
     return groups
 
 
@@ -904,7 +1308,7 @@ def _split_rich_content_groups(
             expanded.append(group)
             continue
         parent = [group[0]] if _heading_level(group[0]) <= 2 else []
-        children = group[len(parent):]
+        children = group[len(parent) :]
         rich = {
             index
             for index, item in enumerate(children)
@@ -928,7 +1332,9 @@ def _split_rich_content_groups(
                     body,
                     flags=re.IGNORECASE,
                 )
-                signature = " ".join(sorted(_tokens((body[start.start():] if start else body)[:260])))
+                signature = " ".join(
+                    sorted(_tokens((body[start.start() :] if start else body)[:260]))
+                )
                 if saw_rich and signature not in seen_signatures:
                     expanded.append(current)
                     current = []
@@ -948,8 +1354,7 @@ def _group_fact_signature(page: PageKnowledge, group: list[ObservedElement]) -> 
     # story beats; coalescing them would collapse a data-heavy workflow into a
     # single no-op scroll.  Only heading/card evidence may be merged.
     if not any(
-        (item.tag or "").lower() in {"h1", "h2", "h3", "h4", "h5", "h6"}
-        or item.role == "heading"
+        (item.tag or "").lower() in {"h1", "h2", "h3", "h4", "h5", "h6"} or item.role == "heading"
         for item in group
     ):
         return ""
@@ -968,7 +1373,7 @@ def _group_fact_signature(page: PageKnowledge, group: list[ObservedElement]) -> 
         # real explanatory sentence (company/role pairs are the common case).
         if start is None:
             continue
-        signature = " ".join(sorted(_tokens(body[start.start():][:260])))
+        signature = " ".join(sorted(_tokens(body[start.start() :][:260])))
         if signature:
             return signature
     return ""
@@ -1020,21 +1425,47 @@ def _select_representative_groups(
     # weaker cues keep useful context eligible without crowding those beats
     # out. These are semantic words, not acceptance-site names or routes.
     content_cues = {
-        "intern": 4, "developer": 4, "engineer": 4, "experience": 3, "career": 4,
-        "role": 4, "contribution": 4, "project": 4, "delivery": 4, "deliveries": 4,
-        "system": 3, "note": 3, "article": 3, "feature": 3, "metric": 2,
-        "achievement": 3, "message": 3, "form": 3, "result": 3, "outcome": 3,
-        "detail": 2, "challenge": 3, "architecture": 3, "decision": 3,
-        "recovery": 3, "scale": 3, "build": 3, "progress": 3, "today": 3,
-        "week": 3, "lesson": 3, "module": 3, "stage": 2, "platform": 2,
-        "application": 2, "work": 2,
+        "intern": 4,
+        "developer": 4,
+        "engineer": 4,
+        "experience": 3,
+        "career": 4,
+        "role": 4,
+        "contribution": 4,
+        "project": 4,
+        "delivery": 4,
+        "deliveries": 4,
+        "system": 3,
+        "note": 3,
+        "article": 3,
+        "feature": 3,
+        "metric": 2,
+        "achievement": 3,
+        "message": 3,
+        "form": 3,
+        "result": 3,
+        "outcome": 3,
+        "detail": 2,
+        "challenge": 3,
+        "architecture": 3,
+        "decision": 3,
+        "recovery": 3,
+        "scale": 3,
+        "build": 3,
+        "progress": 3,
+        "today": 3,
+        "week": 3,
+        "lesson": 3,
+        "module": 3,
+        "stage": 2,
+        "platform": 2,
+        "application": 2,
+        "work": 2,
     }
 
     def score(group: list[ObservedElement], index: int) -> tuple[int, int, int]:
         text = " ".join(
-            " ".join(str(value or "").split())
-            for item in group
-            for value in (item.name, item.text)
+            " ".join(str(value or "").split()) for item in group for value in (item.name, item.text)
         ).casefold()
         words = set(re.findall(r"[a-z0-9]{3,}", text))
         cue_score = sum(content_cues[word] for word in words if word in content_cues)
@@ -1056,15 +1487,23 @@ def _select_representative_groups(
     return [groups[index] for index in sorted(chosen)]
 
 
-def build_page_complete_proposal(context: ProductContext, candidate: CandidateDemoFlow) -> WorkflowProposal:
+def build_page_complete_proposal(
+    context: ProductContext, candidate: CandidateDemoFlow
+) -> WorkflowProposal:
     """Compile evidence into a complete page journey, not generic tab labels.
 
     Each page receives the same editorial contract. Navigation is represented
     only by a discovered visible control; absent one, a direct URL fallback is
     explicitly marked so workflow QA can account for it.
     """
-    page_by_url = {_canonical_url(context.url, page.url): page for page in _pages_for_context(context)}
-    pages = [page_by_url[_canonical_url(context.url, url)] for url in candidate.page_urls if _canonical_url(context.url, url) in page_by_url]
+    page_by_url = {
+        _canonical_url(context.url, page.url): page for page in _pages_for_context(context)
+    }
+    pages = [
+        page_by_url[_canonical_url(context.url, url)]
+        for url in candidate.page_urls
+        if _canonical_url(context.url, url) in page_by_url
+    ]
     if not pages:
         raise ValueError("candidate has no fresh PageKnowledge")
     # Candidate selection may be invoked from a persisted/legacy context that
@@ -1074,8 +1513,16 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
     objective_text = str(context.objective.raw if context.objective else "")
     full_walkthrough = bool(
         context.objective and context.objective.demo_type == "full_walkthrough"
-    ) or bool(re.search(r"\b(?:full|complete|entire)\b.*\bwalkthrough\b|\b(?:each|every)\s+(?:tab|page|section|primary)\b", objective_text, re.IGNORECASE))
-    full_walkthrough = full_walkthrough or bool(re.search(r"\b(?:full|complete|entire)\b", candidate.name, re.IGNORECASE))
+    ) or bool(
+        re.search(
+            r"\b(?:full|complete|entire)\b.*\bwalkthrough\b|\b(?:each|every)\s+(?:tab|page|section|primary)\b",
+            objective_text,
+            re.IGNORECASE,
+        )
+    )
+    full_walkthrough = full_walkthrough or bool(
+        re.search(r"\b(?:full|complete|entire)\b", candidate.name, re.IGNORECASE)
+    )
     # Keep the validated workflow contract within its provider-independent
     # operation bound while preserving every meaningful group on each page.
     # Navigation consumes one operation per additional page; the remainder is
@@ -1098,12 +1545,18 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
     )
     # Execution owns duplicate-opening suppression; the plan still declares
     # the initial state explicitly so its trace has a canonical first page.
-    steps: list[SemanticOperation] = [SemanticOperation(
-        kind=OperationKind.NAVIGATE, intent="Establish the evidenced opening page once",
-        value=_canonical_url(context.url, pages[0].url),
-        postconditions=[Postcondition(kind="url", expected=_canonical_url(context.url, pages[0].url))],
-        page_url=_canonical_url(context.url, pages[0].url), evidence_refs=_page_evidence(pages[0]),
-    )]
+    steps: list[SemanticOperation] = [
+        SemanticOperation(
+            kind=OperationKind.NAVIGATE,
+            intent="Establish the evidenced opening page once",
+            value=_canonical_url(context.url, pages[0].url),
+            postconditions=[
+                Postcondition(kind="url", expected=_canonical_url(context.url, pages[0].url))
+            ],
+            page_url=_canonical_url(context.url, pages[0].url),
+            evidence_refs=_page_evidence(pages[0]),
+        )
+    ]
     outcomes: list[str] = []
     previous: PageKnowledge | None = None
     # Full tours may surface the same card collection on multiple pages.  It
@@ -1111,27 +1564,41 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
     # sweep and steals time from the destination page's own story.  Track only
     # observed child subjects, never URL/product-specific labels.
     established_subjects: set[str] = set()
-    has_completed_local_page = False
     for index, page in enumerate(pages):
         page_url = _canonical_url(context.url, page.url)
+        page_subject = _page_story_subject(page)
         evidence = _page_evidence(page)
         if index and previous is not None:
             control = _navigation_control(context, previous.url, page.url)
             if control:
-                steps.append(SemanticOperation(
-                    kind=OperationKind.OPEN_NAVIGATION_ITEM,
-                    intent=f"Move to {page.purpose} using the visible {control.name} control",
-                    target=Target(name=control.name, selector=control.selector, text=control.text or control.name, source_url=control.source_url),
-                    postconditions=[Postcondition(kind="url", expected=page_url)],
-                    story_phase="transition", page_url=page_url, evidence_refs=evidence,
-                ))
+                steps.append(
+                    SemanticOperation(
+                        kind=OperationKind.OPEN_NAVIGATION_ITEM,
+                        intent=f"Move to {page.purpose} using the visible {control.name} control",
+                        target=Target(
+                            name=control.name,
+                            selector=control.selector,
+                            text=control.text or control.name,
+                            source_url=control.source_url,
+                        ),
+                        postconditions=[Postcondition(kind="url", expected=page_url)],
+                        story_phase="transition",
+                        page_url=page_url,
+                        evidence_refs=evidence,
+                    )
+                )
             else:
-                steps.append(SemanticOperation(
-                    kind=OperationKind.NAVIGATE,
-                    intent=f"Open the evidenced {page.purpose} page (no reliable visible navigation control was discovered)",
-                    value=page_url, postconditions=[Postcondition(kind="url", expected=page_url)],
-                    story_phase="transition", page_url=page_url, evidence_refs=[*evidence, "fallback:direct-navigation-no-visible-control"],
-                ))
+                steps.append(
+                    SemanticOperation(
+                        kind=OperationKind.NAVIGATE,
+                        intent=f"Open the evidenced {page.purpose} page (no reliable visible navigation control was discovered)",
+                        value=page_url,
+                        postconditions=[Postcondition(kind="url", expected=page_url)],
+                        story_phase="transition",
+                        page_url=page_url,
+                        evidence_refs=[*evidence, "fallback:direct-navigation-no-visible-control"],
+                    )
+                )
         landmarks = _page_landmarks(context, page)
         if not landmarks:
             if index == 0:
@@ -1141,33 +1608,39 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
                 # content beat until fresh discovery supplies one. Preserve
                 # the visible transition rather than replacing it with a
                 # duplicate direct load or inventing a scroll target.
-                if (
-                    not page.fingerprint.startswith("observed:")
-                    and (page.visible_facts or page.evidence_refs)
+                if not page.fingerprint.startswith("observed:") and (
+                    page.visible_facts or page.evidence_refs
                 ):
-                    steps.append(SemanticOperation(
-                        kind=OperationKind.VERIFY_STATE,
-                        intent=(
-                            f"Hold on the evidenced {page.purpose or page.title} workspace, "
-                            "read its visible content, and establish the opening context"
-                        ),
-                        target=Target(
-                            name=page.purpose or page.title or "page content",
-                            selector="body", text=page.title or page.purpose,
-                            source_url=page.url,
-                        ),
-                        postconditions=[Postcondition(kind="url", expected=page_url)],
-                        critical=True, story_phase="establish", page_url=page_url,
-                        page_contract_phases=["establish", "explore", "explain", "verify"],
-                        evidence_refs=evidence,
-                        required_content_groups=[page.purpose or page.title],
-                        covered_content_groups=[page.purpose or page.title],
-                    ))
+                    steps.append(
+                        SemanticOperation(
+                            kind=OperationKind.VERIFY_STATE,
+                            intent=(
+                                f"Hold on the evidenced {page_subject} workspace, "
+                                "read its visible content, and establish the opening context"
+                            ),
+                            target=Target(
+                                name=page_subject,
+                                selector="body",
+                                text=page.title or page_subject,
+                                source_url=page.url,
+                            ),
+                            postconditions=[Postcondition(kind="url", expected=page_url)],
+                            critical=True,
+                            story_phase="establish",
+                            page_url=page_url,
+                            page_contract_phases=["establish", "explore", "explain", "verify"],
+                            evidence_refs=evidence,
+                            required_content_groups=[page_subject],
+                            covered_content_groups=[page_subject],
+                        )
+                    )
                     outcomes.append(
-                        f"{page.purpose}: evidenced opening workspace held, explored, explained, and verified"
+                        f"{page_subject}: evidenced opening workspace held, explored, explained, and verified"
                     )
                 else:
-                    outcomes.append(f"{page.purpose}: opening state established before visible navigation")
+                    outcomes.append(
+                        f"{page_subject}: opening state established before visible navigation"
+                    )
                 previous = page
                 continue
             # Some authenticated workspaces expose a complete, readable
@@ -1177,33 +1650,36 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
             # scene rather than selecting a record value or failing the
             # workflow. Execution verifies the URL/page state and the
             # storyboard supplies the reading dwell from the captured frame.
-            if (
-                not page.fingerprint.startswith("observed:")
-                and (page.visible_facts or page.evidence_refs)
+            if not page.fingerprint.startswith("observed:") and (
+                page.visible_facts or page.evidence_refs
             ):
-                steps.append(SemanticOperation(
-                    kind=OperationKind.VERIFY_STATE,
-                    intent=(
-                        f"Hold on the evidenced {page.purpose or page.title} workspace, "
-                        "read its visible content, and verify the page before continuing"
-                    ),
-                    target=Target(
-                        name=page.purpose or page.title or "page content",
-                        selector="body", text=page.title or page.purpose,
-                        source_url=page.url,
-                    ),
-                    postconditions=[Postcondition(kind="url", expected=page_url)],
-                    critical=True, story_phase="establish", page_url=page_url,
-                    page_contract_phases=["establish", "explore", "explain", "verify"],
-                    evidence_refs=evidence,
-                    required_content_groups=[page.purpose or page.title],
-                    covered_content_groups=[page.purpose or page.title],
-                ))
+                steps.append(
+                    SemanticOperation(
+                        kind=OperationKind.VERIFY_STATE,
+                        intent=(
+                            f"Hold on the evidenced {page_subject} workspace, "
+                            "read its visible content, and verify the page before continuing"
+                        ),
+                        target=Target(
+                            name=page_subject,
+                            selector="body",
+                            text=page.title or page_subject,
+                            source_url=page.url,
+                        ),
+                        postconditions=[Postcondition(kind="url", expected=page_url)],
+                        critical=True,
+                        story_phase="establish",
+                        page_url=page_url,
+                        page_contract_phases=["establish", "explore", "explain", "verify"],
+                        evidence_refs=evidence,
+                        required_content_groups=[page_subject],
+                        covered_content_groups=[page_subject],
+                    )
+                )
                 outcomes.append(
-                    f"{page.purpose}: evidenced workspace held, explored, explained, and verified"
+                    f"{page_subject}: evidenced workspace held, explored, explained, and verified"
                 )
                 previous = page
-                has_completed_local_page = True
                 continue
             raise ValueError(f"page lacks readable local evidence: {page.url}")
         page_subjects = {" ".join(item.name.split()).casefold() for item in landmarks}
@@ -1215,9 +1691,7 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
         if index and len(landmarks) > 1:
             first_name = " ".join(landmarks[0].name.split()).casefold()
             title_names = {
-                " ".join(value.split()).casefold()
-                for value in (page.title, page.purpose)
-                if value
+                " ".join(value.split()).casefold() for value in (page.title, page.purpose) if value
             }
             # A page-local h1 can be meaningful content (for example the
             # first career role on a timeline).  Skip it only when it truly
@@ -1237,10 +1711,7 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
         if index:
             retained_groups: list[list[ObservedElement]] = []
             for group in landmark_groups:
-                group_names = {
-                    " ".join(item.name.split()).casefold()
-                    for item in group
-                }
+                group_names = {" ".join(item.name.split()).casefold() for item in group}
                 child_names = {
                     " ".join(item.name.split()).casefold()
                     for item in group[1:]
@@ -1250,9 +1721,7 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
                 # second page uses a different heading level for it. Keep a
                 # page's own unique content, but suppress a group made wholly
                 # of subjects already explained on an earlier page.
-                if (
-                    group_names and group_names.issubset(established_subjects)
-                ) or (
+                if (group_names and group_names.issubset(established_subjects)) or (
                     child_names and child_names.issubset(established_subjects)
                 ):
                     continue
@@ -1269,6 +1738,25 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
         # it keeps a dense but meaningful page within a 2–3 minute demo.
         landmark_groups = _split_rich_content_groups(page, landmark_groups)
         landmark_groups = _coalesce_duplicate_fact_groups(page, landmark_groups)
+        # A long landing page can expose the same campaign/card title in
+        # multiple DOM containers (desktop/mobile variants, sticky promos,
+        # duplicated navigation). Keep the first evidence-backed occurrence;
+        # repeating it later adds no viewer value and produces repetitive
+        # narration. This is label-based and product-neutral, never a route
+        # or benchmark allowlist.
+        unique_groups: list[list[ObservedElement]] = []
+        seen_group_subjects: set[str] = set()
+        for group in landmark_groups:
+            subjects = {
+                " ".join(item.name.split()).casefold()
+                for item in group
+                if " ".join(item.name.split()).strip()
+            }
+            if subjects and subjects <= seen_group_subjects:
+                continue
+            unique_groups.append(group)
+            seen_group_subjects.update(subjects)
+        landmark_groups = unique_groups or landmark_groups
         # A focused workflow can open on a post-login dashboard that is not
         # the requested feature. The real opening footage still establishes
         # the application, but unrelated dashboard cards must not become a
@@ -1276,8 +1764,7 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
         # objective vocabulary and page evidence, never product routes.
         if index == 0 and len(pages) > 1 and context.objective is not None:
             objective_terms = _tokens(
-                " ".join(context.objective.requested_features)
-                or context.objective.raw
+                " ".join(context.objective.requested_features) or context.objective.raw
             )
             # Objective parsing intentionally preserves the raw request for
             # auditability, so requested_features can include connective
@@ -1285,27 +1772,78 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
             # unrelated opening page appear relevant merely because both
             # pages say ``the`` or ``flow``.
             objective_terms -= {
-                "the", "and", "for", "with", "from", "into", "this", "that",
-                "show", "include", "explain", "actual", "experience", "product",
-                "prospect", "login", "journey", "context", "only", "brief",
-                "supporting", "page", "pages", "use", "understand", "relationship",
-                "discovered", "settings", "config", "configuration", "flow",
-                "demonstrate", "meaningful", "controls", "resulting", "state",
-                "repeatedly", "revisit", "cover", "unrelated", "modules",
+                "the",
+                "and",
+                "for",
+                "with",
+                "from",
+                "into",
+                "this",
+                "that",
+                "show",
+                "include",
+                "explain",
+                "actual",
+                "experience",
+                "product",
+                "prospect",
+                "login",
+                "journey",
+                "context",
+                "only",
+                "brief",
+                "supporting",
+                "page",
+                "pages",
+                "use",
+                "understand",
+                "relationship",
+                "discovered",
+                "settings",
+                "config",
+                "configuration",
+                "flow",
+                "demonstrate",
+                "meaningful",
+                "controls",
+                "resulting",
+                "state",
+                "repeatedly",
+                "revisit",
+                "cover",
+                "unrelated",
+                "modules",
             }
-            opening_terms = _tokens(" ".join([
-                page.title, page.purpose, *page.visible_sections,
-                *page.scroll_landmarks, urlsplit(page.url).path,
-            ]))
-            destination_terms = _tokens(" ".join(
-                " ".join([
-                    selected_page.title, selected_page.purpose,
-                    *selected_page.visible_sections, *selected_page.scroll_landmarks,
-                    urlsplit(selected_page.url).path,
-                ])
-                for selected_page in pages[1:]
-            ))
-            if objective_terms and not (opening_terms & objective_terms) and (destination_terms & objective_terms):
+            opening_terms = _tokens(
+                " ".join(
+                    [
+                        page.title,
+                        page.purpose,
+                        *page.visible_sections,
+                        *page.scroll_landmarks,
+                        urlsplit(page.url).path,
+                    ]
+                )
+            )
+            destination_terms = _tokens(
+                " ".join(
+                    " ".join(
+                        [
+                            selected_page.title,
+                            selected_page.purpose,
+                            *selected_page.visible_sections,
+                            *selected_page.scroll_landmarks,
+                            urlsplit(selected_page.url).path,
+                        ]
+                    )
+                    for selected_page in pages[1:]
+                )
+            )
+            if (
+                objective_terms
+                and not (opening_terms & objective_terms)
+                and (destination_terms & objective_terms)
+            ):
                 previous = page
                 # The opening scene owns the stable context. Do not add a
                 # token VerifyState/ScrollTo scene merely to narrate an
@@ -1314,7 +1852,8 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
         # The opening hold already proves the root h1; scrolling back to it
         # makes the first moments look like an unnecessary reload.
         if (
-            index == 0 and len(landmark_groups) > 1
+            index == 0
+            and len(landmark_groups) > 1
             and len(landmark_groups[0]) == 1
             and _heading_level(landmark_groups[0][0]) <= 1
         ):
@@ -1323,27 +1862,31 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
         # work. Every later page keeps setup, representative evidence, and a
         # conclusion inside the requested full-tour duration.
         landmark_groups = _select_representative_groups(
-            # Focused destinations get two representative local beats: one
-            # establishes the page and one proves its outcome.  Additional
-            # groups remain in PageKnowledge for extraction, but spending an
-            # action on every repeated control creates a crawler-like tour.
-            landmark_groups, maximum=local_group_budget if (full_walkthrough or not has_completed_local_page) else 2
+            # Focused destinations get two representative local beats on every
+            # page: one establishes the page and one proves its outcome.
+            # Additional groups remain in PageKnowledge for extraction, but
+            # spending an action on every repeated card creates a crawler-like
+            # tour (and leaves no time for a meaningful interaction).
+            landmark_groups,
+            maximum=local_group_budget if full_walkthrough else 2,
         )
-        group_names = [
-            " ".join(item.name.split())
-            for group in landmark_groups for item in group
-        ]
+        group_names = [" ".join(item.name.split()) for group in landmark_groups for item in group]
         for phase_index, group in enumerate(landmark_groups):
             landmark = group[-1]
             group_items = [" ".join(item.name.split()) for item in group]
             if len(landmark_groups) == 1:
-                phase, contract_phases = "establish", ("establish", "explore", "explain", "demonstrate", "verify")
+                phase, contract_phases = (
+                    "establish",
+                    ("establish", "explore", "explain", "demonstrate", "verify"),
+                )
             elif phase_index == 0:
                 phase, contract_phases = "establish", ("establish",)
             elif phase_index == len(landmark_groups) - 1:
                 phase, contract_phases = (
                     "demonstrate",
-                    ("explore", "explain", "demonstrate", "verify") if len(landmark_groups) == 2 else ("demonstrate", "verify"),
+                    ("explore", "explain", "demonstrate", "verify")
+                    if len(landmark_groups) == 2
+                    else ("demonstrate", "verify"),
                 )
             else:
                 phase, contract_phases = "explore", ("explore", "explain")
@@ -1366,37 +1909,58 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
                 # the route. Verify that evidence with a dwell instead of
                 # manufacturing a zero-distance ScrollTo; a later landmark
                 # still provides the page's continuous exploration motion.
-                len(group) == 1
-                and _heading_level(landmark) <= 1
+                len(group) == 1 and _heading_level(landmark) <= 1
             )
-            operation_kind = OperationKind.VERIFY_STATE if is_already_established_heading else OperationKind.SCROLL_TO
+            operation_kind = (
+                OperationKind.VERIFY_STATE
+                if is_already_established_heading
+                else OperationKind.SCROLL_TO
+            )
             postconditions = (
-                [Postcondition(kind="visible", expected=landmark.name, target=Target(
-                    name=landmark.name, selector=landmark.selector,
-                    text=landmark.text or landmark.name, source_url=landmark.source_url,
-                ))]
-                if is_already_established_heading else []
+                [
+                    Postcondition(
+                        kind="visible",
+                        expected=landmark.name,
+                        target=Target(
+                            name=landmark.name,
+                            selector=landmark.selector,
+                            text=landmark.text or landmark.name,
+                            source_url=landmark.source_url,
+                        ),
+                    )
+                ]
+                if is_already_established_heading
+                else []
             )
-            steps.append(SemanticOperation(
-                kind=operation_kind,
-                intent=_phase_intent(
-                    phase,
-                    page,
-                    landmark.name if len(group) == 1 else ", ".join(group_items),
-                    fact,
-                ),
-                target=Target(name=landmark.name, selector=landmark.selector, text=landmark.text or landmark.name, source_url=landmark.source_url),
-                postconditions=postconditions,
-                critical=True, story_phase=phase, page_url=page_url,
-                page_contract_phases=list(contract_phases),
-                evidence_refs=[
-                    *evidence,
-                    *[f"element:{item.name}" for item in group],
-                    *fact_refs,
-                ],
-                required_content_groups=group_names,
-                covered_content_groups=group_items,
-            ))
+            steps.append(
+                SemanticOperation(
+                    kind=operation_kind,
+                    intent=_phase_intent(
+                        phase,
+                        page,
+                        landmark.name if len(group) == 1 else ", ".join(group_items),
+                        fact,
+                    ),
+                    target=Target(
+                        name=landmark.name,
+                        selector=landmark.selector,
+                        text=landmark.text or landmark.name,
+                        source_url=landmark.source_url,
+                    ),
+                    postconditions=postconditions,
+                    critical=True,
+                    story_phase=phase,
+                    page_url=page_url,
+                    page_contract_phases=list(contract_phases),
+                    evidence_refs=[
+                        *evidence,
+                        *[f"element:{item.name}" for item in group],
+                        *fact_refs,
+                    ],
+                    required_content_groups=group_names,
+                    covered_content_groups=group_items,
+                )
+            )
             established_subjects.update(item.casefold() for item in group_items)
         # If the page's records and form are already in the initial viewport,
         # inspect one observed field rather than dispatching a no-op scroll or
@@ -1406,42 +1970,168 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
         if form_controls:
             primary_field = form_controls[0]
             field_names = [" ".join(item.name.split()) for item in form_controls[:3]]
-            steps.append(SemanticOperation(
-                kind=OperationKind.VERIFY_STATE,
-                intent=(
-                    f"Inspect the visible {primary_field.name} form context and the "
-                    f"available record fields before any action is taken"
-                ),
-                target=Target(
-                    name=primary_field.name, selector=primary_field.selector,
-                    text=primary_field.text or primary_field.name,
-                    source_url=primary_field.source_url,
-                ),
-                postconditions=[Postcondition(
-                    kind="visible", expected=primary_field.name,
+            steps.append(
+                SemanticOperation(
+                    kind=OperationKind.VERIFY_STATE,
+                    intent=(
+                        f"Inspect the visible {primary_field.name} form context and the "
+                        f"available record fields before any action is taken"
+                    ),
                     target=Target(
-                        name=primary_field.name, selector=primary_field.selector,
+                        name=primary_field.name,
+                        selector=primary_field.selector,
                         text=primary_field.text or primary_field.name,
                         source_url=primary_field.source_url,
                     ),
-                )],
-                critical=True, story_phase="explore", page_url=page_url,
-                page_contract_phases=["explore", "explain"],
-                evidence_refs=[
-                    *evidence,
-                    *[f"form-field:{page.url}:{name}" for name in field_names],
-                    *[f"element:{name}" for name in field_names],
-                ],
-                required_content_groups=field_names,
-                covered_content_groups=field_names,
-            ))
-        outcomes.append(f"{page.purpose}: visible content established, explored, explained, demonstrated, and verified")
+                    postconditions=[
+                        Postcondition(
+                            kind="visible",
+                            expected=primary_field.name,
+                            target=Target(
+                                name=primary_field.name,
+                                selector=primary_field.selector,
+                                text=primary_field.text or primary_field.name,
+                                source_url=primary_field.source_url,
+                            ),
+                        )
+                    ],
+                    critical=True,
+                    story_phase="explore",
+                    page_url=page_url,
+                    page_contract_phases=["explore", "explain"],
+                    evidence_refs=[
+                        *evidence,
+                        *[f"form-field:{page.url}:{name}" for name in field_names],
+                        *[f"element:{name}" for name in field_names],
+                    ],
+                    required_content_groups=field_names,
+                    covered_content_groups=field_names,
+                )
+            )
+        # Visual editors expose a safe, local demonstration surface rather
+        # than a conventional form or route. When the objective explicitly
+        # asks to draw/design/diagram and discovery observed both a tool
+        # control and a canvas-like region, compile an evidence-backed tool
+        # activation followed by a short, reversible stroke. The executor
+        # derives the stroke geometry from the observed surface at runtime;
+        # neither the tool name nor editor-specific coordinates are embedded.
+        objective_tokens = _tokens(
+            " ".join([objective_text, *getattr(context.objective, "requested_features", [])])
+        )
+        visual_intent = bool(
+            objective_tokens
+            & {"draw", "drawing", "design", "diagram", "whiteboard", "shape", "shapes", "canvas"}
+            or any(token.startswith("draw") for token in objective_tokens)
+        )
+        surface_candidates = [
+            item
+            for item in context.elements
+            if _canonical_url(context.url, item.source_url or context.url) == page_url
+            and (item.tag or "").casefold() in {"canvas", "svg"}
+            and item.actionable
+        ]
+        # Prefer a native canvas for pointer editing when both a canvas and an
+        # SVG overlay are observed.  SVG is retained as a generic fallback for
+        # editors whose semantic drawing surface is SVG; no product-specific
+        # selector or coordinate is assumed.
+        surface = max(
+            surface_candidates,
+            key=lambda item: (
+                int((item.tag or "").casefold() == "canvas"),
+                int(bool(item.selector)),
+                -len(item.name),
+            ),
+            default=None,
+        )
+        if visual_intent and surface:
+            tool_candidates = [
+                item
+                for item in context.elements
+                if _canonical_url(context.url, item.source_url or context.url) == page_url
+                and item.actionable
+                and (item.tag or "").casefold() in {"button", "a"}
+                and not item.href
+                and not _is_control_chrome(item)
+                and not _PLACEHOLDER_ELEMENT_PATTERN.fullmatch(item.name.strip())
+            ]
+
+            def tool_score(
+                item: ObservedElement, *, tokens: set[str] = objective_tokens
+            ) -> tuple[int, int, int, int]:
+                words = _tokens(item.name)
+                overlap = len(words & tokens)
+                draw_like = int(any(token.startswith("draw") for token in words))
+                # Prefer a concise tool label over a settings toggle whose
+                # explanatory sentence happens to contain ``drawing``.
+                concise_draw = int(draw_like and len(words) <= 2)
+                return concise_draw, draw_like, overlap, -len(item.name)
+
+            tool = max(tool_candidates, key=tool_score, default=None)
+            if tool:
+                source_target = Target(
+                    name=tool.name,
+                    selector=tool.selector,
+                    text=tool.text or tool.name,
+                    source_url=tool.source_url,
+                )
+                destination_target = Target(
+                    name=surface.name,
+                    selector=surface.selector,
+                    text=surface.text or surface.name,
+                    source_url=surface.source_url,
+                )
+                steps.append(
+                    SemanticOperation(
+                        kind=OperationKind.CLICK,
+                        intent=f"Activate the observed {tool.name} drawing tool",
+                        target=source_target,
+                        postconditions=[
+                            Postcondition(kind="visible", expected=tool.name, target=source_target)
+                        ],
+                        critical=True,
+                        story_phase="demonstrate",
+                        page_url=page_url,
+                        page_contract_phases=["explain", "demonstrate"],
+                        evidence_refs=[*evidence, f"element:{tool.name}"],
+                    )
+                )
+                steps.append(
+                    SemanticOperation(
+                        kind=OperationKind.POINTER_SEQUENCE,
+                        intent=(f"Draw one short reversible stroke on the observed {surface.name}"),
+                        target=destination_target,
+                        value={
+                            "pattern": "short_reversible_stroke",
+                            "duration_ms": 1_200,
+                            "press": True,
+                            "release": True,
+                        },
+                        postconditions=[
+                            Postcondition(
+                                kind="visible", expected=surface.name, target=destination_target
+                            )
+                        ],
+                        critical=True,
+                        story_phase="demonstrate",
+                        page_url=page_url,
+                        page_contract_phases=["demonstrate", "verify"],
+                        evidence_refs=[
+                            *evidence,
+                            f"element:{tool.name}",
+                            f"element:{surface.name}",
+                        ],
+                        required_content_groups=[surface.name],
+                        covered_content_groups=[surface.name],
+                    )
+                )
+        outcomes.append(
+            f"{page_subject}: visible content established, explored, explained, demonstrated, and verified"
+        )
         # Discovery still records unselected sibling cards.  Mark their names
         # as established context so a duplicate collection on a later page is
         # not promoted merely because the earlier chapter used representative
         # beats to meet the requested duration.
         established_subjects.update(page_subjects)
-        has_completed_local_page = True
         previous = page
     # Keep the public workflow label concise and compatible with callers that
     # use it as the selected feature name.  Generated candidate names carry
@@ -1449,7 +2139,7 @@ def build_page_complete_proposal(context: ProductContext, candidate: CandidateDe
     # useful in candidate artifacts but noisy in the durable DemoPlan.
     workflow_label = candidate.name
     if workflow_label.lower().startswith("focused evidence walkthrough:") and len(pages) > 1:
-        workflow_label = pages[1].purpose or pages[1].title or workflow_label
+        workflow_label = _page_story_subject(pages[1]) or workflow_label
     return WorkflowProposal(
         narrative_goal="Guide the viewer through evidence-backed product pages and their visible value.",
         selected_workflow=workflow_label,
@@ -1489,7 +2179,9 @@ def _pages_for_context(context: ProductContext) -> list[PageKnowledge]:
     for capability in context.capabilities:
         source_url = capability.get("source_url")
         if isinstance(source_url, str) and source_url:
-            capabilities_by_page.setdefault(_canonical_url(context.url, source_url), []).append(capability)
+            capabilities_by_page.setdefault(_canonical_url(context.url, source_url), []).append(
+                capability
+            )
     enriched_pages: list[PageKnowledge] = []
     for page in pages:
         capabilities = capabilities_by_page.get(_canonical_url(context.url, page.url), [])
@@ -1497,7 +2189,7 @@ def _pages_for_context(context: ProductContext) -> list[PageKnowledge]:
             enriched_pages.append(page)
             continue
         markers = [
-            f"{str(capability.get('kind', 'interaction'))}:{str(capability.get('purpose', 'verified interaction'))}"
+            f"{capability.get('kind', 'interaction')!s}:{capability.get('purpose', 'verified interaction')!s}"
             for capability in capabilities
         ]
         evidence = [
@@ -1506,19 +2198,27 @@ def _pages_for_context(context: ProductContext) -> list[PageKnowledge]:
             for reference in capability.get("evidence_refs", [])
             if isinstance(reference, str) and reference.startswith("capability:")
         ]
-        enriched_pages.append(page.model_copy(update={
-            "form_schemas": list(dict.fromkeys([*page.form_schemas, *markers])),
-            "evidence_refs": list(dict.fromkeys([*page.evidence_refs, *evidence])),
-        }))
+        enriched_pages.append(
+            page.model_copy(
+                update={
+                    "form_schemas": list(dict.fromkeys([*page.form_schemas, *markers])),
+                    "evidence_refs": list(dict.fromkeys([*page.evidence_refs, *evidence])),
+                }
+            )
+        )
     # A full walkthrough always establishes the current opening state first,
     # even when persisted PageKnowledge was written in exploration order.
-    return sorted(enriched_pages, key=lambda page: 0 if _canonical_url(context.url, page.url) == root else 1)
+    return sorted(
+        enriched_pages, key=lambda page: 0 if _canonical_url(context.url, page.url) == root else 1
+    )
 
 
 def _observed_pages(context: ProductContext) -> list[PageKnowledge]:
     grouped: dict[str, list] = {}
     for element in context.elements:
-        grouped.setdefault(_canonical_url(context.url, element.source_url or context.url), []).append(element)
+        grouped.setdefault(
+            _canonical_url(context.url, element.source_url or context.url), []
+        ).append(element)
     # Migration bridge for runs captured before PageKnowledge was persisted:
     # primary controls are visible evidence of a candidate destination.  Fresh
     # discovery replaces these shallow records with page-local evidence before
@@ -1544,20 +2244,33 @@ def _observed_pages(context: ProductContext) -> list[PageKnowledge]:
         names = list(dict.fromkeys(item.name.strip() for item in elements if item.name.strip()))
         if not names:
             continue
-        headings = [item.name.strip() for item in elements if item.tag in {"h1", "h2", "h3", "h4"} and item.name.strip()]
-        result.append(PageKnowledge(
-            url=url, title=context.title, purpose=headings[0] if headings else context.title,
-            visible_sections=headings or names[:4], scroll_landmarks=headings or names[:3],
-            actionable_controls=[item.name for item in elements if item.actionable][:12],
-            visible_facts=[item.text or item.name for item in elements if (item.text or item.name)][:8],
-            evidence_refs=[f"dom:{url}:{index}" for index, _ in enumerate(elements[:8])],
-            fingerprint=f"observed:{url}",
-        ))
+        headings = [
+            item.name.strip()
+            for item in elements
+            if item.tag in {"h1", "h2", "h3", "h4"} and item.name.strip()
+        ]
+        result.append(
+            PageKnowledge(
+                url=url,
+                title=context.title,
+                purpose=headings[0] if headings else context.title,
+                visible_sections=headings or names[:4],
+                scroll_landmarks=headings or names[:3],
+                actionable_controls=[item.name for item in elements if item.actionable][:12],
+                visible_facts=[
+                    item.text or item.name for item in elements if (item.text or item.name)
+                ][:8],
+                evidence_refs=[f"dom:{url}:{index}" for index, _ in enumerate(elements[:8])],
+                fingerprint=f"observed:{url}",
+            )
+        )
     return result
 
 
 def _page_relevance(page: PageKnowledge, wanted: set[str]) -> float:
-    words = _tokens(" ".join([page.title, page.purpose, *page.visible_sections, *page.visible_facts]))
+    words = _tokens(
+        " ".join([page.title, page.purpose, *page.visible_sections, *page.visible_facts])
+    )
     return min(1.0, 0.25 + len(words & wanted) * 0.16 + min(0.2, len(page.evidence_refs) * 0.03))
 
 
@@ -1571,8 +2284,14 @@ def _flow_from_pages(
     supporting_pages: list[PageKnowledge] | None = None,
 ) -> CandidateDemoFlow:
     supporting_pages = supporting_pages or []
-    evidence = [reference for page in [*pages, *supporting_pages] for reference in _page_evidence(page)]
-    score = min(1.0, sum(relevance[page.url] for page in pages) / max(1, len(pages)) + min(0.25, len(evidence) * 0.02))
+    evidence = [
+        reference for page in [*pages, *supporting_pages] for reference in _page_evidence(page)
+    ]
+    score = min(
+        1.0,
+        sum(relevance[page.url] for page in pages) / max(1, len(pages))
+        + min(0.25, len(evidence) * 0.02),
+    )
     # Candidate duration is a discovery estimate, never a renderer stretch
     # target.  Count independent readable concepts on the *production* pages
     # (supporting relationship pages can ground narration without consuming
@@ -1596,7 +2315,9 @@ def _flow_from_pages(
         # few headings. Count it once from observed controls, never once per
         # table button/row, so form workflows are not incorrectly classified
         # as a twenty-second route tour.
-        interaction_beats = 2 if len(page.actionable_controls) >= 3 else 1 if page.actionable_controls else 0
+        interaction_beats = (
+            2 if len(page.actionable_controls) >= 3 else 1 if page.actionable_controls else 0
+        )
         # A safely probed form has distinct opening, guided entry, and visible
         # verification beats. It is still bounded as one chapter, not one beat
         # per field/control, and never represents an unverified submission.
@@ -1607,16 +2328,24 @@ def _flow_from_pages(
         content_beats += min(6, max(1, len(concepts | fact_beats)) + interaction_beats)
     estimated_duration = min(180, 10 + content_beats * 10 + max(0, len(pages) - 1) * 5)
     return CandidateDemoFlow(
-        name=name, page_urls=[page.url for page in pages],
-        supporting_page_urls=[page.url for page in supporting_pages], rationale=rationale,
-        expected_outcomes=[page.purpose for page in pages], risks=["side effects excluded"],
-        estimated_duration_seconds=estimated_duration, evidence_coverage=evidence,
-        semantic_steps=[f"complete:{page.purpose}" for page in pages], score=round(score, 3),
+        name=name,
+        page_urls=[page.url for page in pages],
+        supporting_page_urls=[page.url for page in supporting_pages],
+        rationale=rationale,
+        expected_outcomes=[page.purpose for page in pages],
+        risks=["side effects excluded"],
+        estimated_duration_seconds=estimated_duration,
+        evidence_coverage=evidence,
+        semantic_steps=[f"complete:{page.purpose}" for page in pages],
+        score=round(score, 3),
     )
 
 
 def _page_evidence(page: PageKnowledge) -> list[str]:
-    return page.evidence_refs or [f"page:{page.url}", *[f"section:{section}" for section in page.visible_sections[:3]]]
+    return page.evidence_refs or [
+        f"page:{page.url}",
+        *[f"section:{section}" for section in page.visible_sections[:3]],
+    ]
 
 
 def navigation_control_for_transition(context: ProductContext, source_url: str, destination: str):
@@ -1628,22 +2357,70 @@ def navigation_control_for_transition(context: ProductContext, source_url: str, 
     # convenience flag. Its href plus source provenance is the stronger
     # evidence; otherwise a valid visible tab would be downgraded to a direct
     # route transition merely because of migration metadata.
-    exact = next((item for item in controls if item.href
-                 and _canonical_url(item.source_url or context.url, item.source_url or context.url) == source
-                 and _canonical_url(item.source_url or context.url, item.href) == target), None)
+    exact = next(
+        (
+            item
+            for item in controls
+            if item.href
+            # Fragment links move within the already-open document.  They
+            # are useful local evidence, but they are not a page transition
+            # and must never satisfy a cross-page navigation lookup after URL
+            # canonicalization strips the fragment.
+            and not urlsplit(item.href).fragment
+            and _canonical_url(item.source_url or context.url, item.source_url or context.url)
+            == source
+            and _canonical_url(item.source_url or context.url, item.href) == target
+        ),
+        None,
+    )
     if exact is not None:
         return exact
-    # Persistent global navigation is sometimes captured against its opening
-    # URL during migration. Only a control explicitly observed in primary
-    # navigation may be re-grounded on another page. Reusing arbitrary card
-    # links here can send the run back into a representative detail route
-    # merely because its label exists in stale discovery evidence.
+    # Fresh page evidence is authoritative. If the active route exposes any
+    # primary controls, or has a fully captured page with no primary controls,
+    # do not reuse a shell link recorded on another route. Sparse legacy
+    # in-memory contexts (without page evidence) retain the compatibility
+    # fallback below.
+    active_primary = [
+        item
+        for item in controls
+        if item.href
+        and _canonical_url(context.url, item.source_url or context.url) == source
+        and (item in context.navigation or item.navigation_scope == "primary")
+    ]
+    active_page = next(
+        (
+            page
+            for page in context.page_knowledge
+            if _canonical_url(context.url, page.url) == source
+        ),
+        None,
+    )
+    if active_primary or (active_page is not None and active_page.evidence_refs):
+        return None
+    # Persistent global navigation is sometimes captured against a page-local
+    # snapshot during migration. It is still only valid when its source
+    # provenance matches the page being left; reusing a control observed on a
+    # different route can dispatch a stale header after an app/workspace
+    # transition and makes workflow validation report a false page state.
     persistent_controls = [
         *context.navigation,
         *(item for item in context.elements if item.navigation_scope == "primary"),
     ]
-    return next((item for item in persistent_controls if item.href
-                 and _canonical_url(item.source_url or context.url, item.href) == target), None)
+    return next(
+        (
+            item
+            for item in persistent_controls
+            if item.href
+            and not urlsplit(item.href).fragment
+            and (
+                _canonical_url(context.url, item.source_url or context.url) == source
+                or active_page is None
+                or not active_page.evidence_refs
+            )
+            and _canonical_url(item.source_url or context.url, item.href) == target
+        ),
+        None,
+    )
 
 
 # Compatibility for the internal call sites retained while integrations move
@@ -1659,12 +2436,65 @@ def _is_control_chrome(item: ObservedElement) -> bool:
     Keeping this classification generic prevents a plan from mistaking a
     toolbar for an explanation of the records, content, or result below it.
     """
-    words = _tokens(item.name)
+    # Do not use the broader evidence tokenizer here: its plural stemming
+    # would turn ``previous`` into ``previou`` and make a plain pagination
+    # control look like reader content.
+    words = set(re.findall(r"[a-z0-9]{3,}", item.name.casefold()))
     chrome = {
-        "search", "filter", "filters", "sort", "column", "columns", "refresh",
-        "export", "import", "upload", "download", "bulk", "menu", "actions",
-        "view", "views", "new", "add", "create", "close", "back", "next",
+        "search",
+        "filter",
+        "filters",
+        "sort",
+        "column",
+        "columns",
+        "refresh",
+        "export",
+        "import",
+        "upload",
+        "download",
+        "bulk",
+        "menu",
+        "actions",
+        "view",
+        "views",
+        "new",
+        "add",
+        "create",
+        "close",
+        "back",
+        "next",
+        "previous",
+        "prev",
+        "first",
+        "last",
+        "page",
+        "pagination",
     }
+    # Consent banners are transient mechanics rather than product content.
+    # Treat their action labels as chrome only when the element is actionable
+    # and every word belongs to the consent vocabulary; a real Privacy or
+    # Cookie policy page therefore remains eligible as reader content.
+    consent = {
+        "cookie",
+        "cookies",
+        "consent",
+        "accept",
+        "reject",
+        "necessary",
+        "only",
+        "close",
+        "preferences",
+        "non",
+        "essential",
+        "allow",
+        "and",
+    }
+    if item.actionable and (
+        (words & {"cookie", "cookies", "consent"} and words <= consent)
+        or words <= {"necessary", "only"}
+        or ("skip" in words and "content" in words)
+    ):
+        return True
     return bool(words) and words.issubset(chrome)
 
 
@@ -1680,7 +2510,11 @@ def _has_descriptive_landmark_evidence(page: PageKnowledge, item: ObservedElemen
     content-shape based rather than a product-specific allowlist.
     """
     name = " ".join(item.name.split()).casefold()
-    if not name or item.actionable or (item.tag or "").casefold() in {"input", "select", "textarea", "button"}:
+    if (
+        not name
+        or item.actionable
+        or (item.tag or "").casefold() in {"input", "select", "textarea", "button"}
+    ):
         return False
     for raw_fact in page.visible_facts:
         heading, separator, body = raw_fact.partition("::")
@@ -1703,7 +2537,9 @@ def _is_operational_workspace(page: PageKnowledge) -> bool:
     """Identify a dense records/form workspace from observed local evidence."""
     evidence = " ".join(page.visible_facts).casefold()
     has_creation = bool(re.search(r"\b(?:new|add|create)\b", evidence))
-    has_records_surface = bool(re.search(r"\b(?:filter|search|table|status|columns?|results?|records?)\b", evidence))
+    has_records_surface = bool(
+        re.search(r"\b(?:filter|search|table|status|columns?|results?|records?)\b", evidence)
+    )
     return has_creation and has_records_surface
 
 
@@ -1718,7 +2554,8 @@ def _page_form_controls(context: ProductContext, page: PageKnowledge) -> list[Ob
     """
     canonical = _canonical_url(context.url, page.url)
     controls = [
-        item for item in context.elements
+        item
+        for item in context.elements
         if _canonical_url(context.url, item.source_url or context.url) == canonical
         and (item.tag or "").casefold() in {"input", "select", "textarea"}
         and item.name.strip()
@@ -1727,27 +2564,71 @@ def _page_form_controls(context: ProductContext, page: PageKnowledge) -> list[Ob
     # Repeated responsive markup should not create repeated inspection beats.
     seen: set[str] = set()
     return [
-        item for item in controls
-        if not (" ".join(item.name.split()).casefold() in seen
-                or seen.add(" ".join(item.name.split()).casefold()))
+        item
+        for item in controls
+        if not (
+            " ".join(item.name.split()).casefold() in seen
+            or seen.add(" ".join(item.name.split()).casefold())
+        )
     ]
 
 
 def _page_landmarks(context: ProductContext, page: PageKnowledge):
     canonical = _canonical_url(context.url, page.url)
-    candidates = [item for item in context.elements if item.name.strip()
-                  and item.navigation_scope != "footer"
-                  and _is_safe_landmark(item)
-                  and _canonical_url(context.url, item.source_url or context.url) == canonical]
+    # Visual editors and design-system shells often expose starter copy such
+    # as ``Heading``/``Title`` alongside lorem ipsum. Those labels describe a
+    # template placeholder, not a user-facing chapter. Suppress only when the
+    # same page evidence proves the placeholder pattern; a real product whose
+    # section is genuinely named "Heading" remains eligible.
+    page_evidence_text = " ".join(str(value) for value in page.visible_facts).casefold()
+    placeholder_landmark = bool(
+        "lorem ipsum" in page_evidence_text
+        and any(token in page_evidence_text for token in ("heading", "title", "description"))
+    )
+    placeholder_labels = {"heading", "title", "description"}
+    candidates = [
+        item
+        for item in context.elements
+        if item.name.strip()
+        and item.navigation_scope != "footer"
+        and _is_safe_landmark(item)
+        and _canonical_url(context.url, item.source_url or context.url) == canonical
+        and not (
+            placeholder_landmark
+            and (
+                " ".join(item.name.split()).casefold() in placeholder_labels
+                or "lorem ipsum" in " ".join(item.name.split()).casefold()
+                or any(
+                    " ".join(item.name.split()).casefold().startswith(f"{label} ")
+                    for label in placeholder_labels
+                )
+                # An editor palette/menu is commonly exposed as href-less
+                # anchor/button controls. When the page itself is proven to
+                # contain starter lorem copy, short controls are chrome or
+                # template samples rather than reader-facing content. Keep
+                # non-anchor workspace evidence available for the actual
+                # editor surface.
+                or (item.tag in {"a", "button"} and not item.href and len(_tokens(item.name)) <= 2)
+            )
+        )
+    ]
     if not candidates and page.fingerprint.startswith("observed:"):
-        candidates = [item for item in context.navigation if item.href and _canonical_url(item.source_url or context.url, item.href) == canonical]
+        candidates = [
+            item
+            for item in context.navigation
+            if item.href and _canonical_url(item.source_url or context.url, item.href) == canonical
+        ]
     # A reading landmark is page content, not another navigation affordance.
     # In particular, a short Contact page often exposes a footer full of links;
     # treating those links as evidence would turn the last chapter into an
     # accidental route sweep. Prefer headings, then other non-actionable local
     # content. Actionable controls are a last-resort fallback for pages which
     # genuinely have no readable landmarks.
-    headings = [item for item in candidates if item.tag in {"h1", "h2", "h3", "h4"} or item.role == "heading"]
+    headings = [
+        item
+        for item in candidates
+        if item.tag in {"h1", "h2", "h3", "h4"} or item.role == "heading"
+    ]
     passive = [item for item in candidates if not item.actionable and item not in headings]
     observed_control_names = {
         " ".join(value.split()).casefold()
@@ -1755,12 +2636,11 @@ def _page_landmarks(context: ProductContext, page: PageKnowledge):
         if value and not _PLACEHOLDER_ELEMENT_PATTERN.fullmatch(value.strip())
     }
     navigation_names = {
-        " ".join(item.name.split()).casefold()
-        for item in context.navigation
-        if item.name
+        " ".join(item.name.split()).casefold() for item in context.navigation if item.name
     }
     actionable = [
-        item for item in candidates
+        item
+        for item in candidates
         if item.actionable
         and not item.href
         and item.navigation_scope != "primary"
@@ -1797,7 +2677,8 @@ def _page_landmarks(context: ProductContext, page: PageKnowledge):
         # title-only chapter. The controls are only scroll/read targets here;
         # execution still requires an explicit semantic action to dispatch.
         supplemental = [
-            item for item in [*passive, *actionable]
+            item
+            for item in [*passive, *actionable]
             if len(" ".join((item.text or item.name).split())) >= 6
             and " ".join(item.name.split()).casefold()
             not in {"menu", "close", "back", "home", "settings"}
@@ -1816,13 +2697,35 @@ def _page_landmarks(context: ProductContext, page: PageKnowledge):
     configuration = _configuration_landmark(context, page)
     if configuration is not None and configuration not in reading_candidates:
         reading_candidates.append(configuration)
-    wanted = {" ".join(value.split()).lower() for value in [*page.scroll_landmarks, *page.visible_sections]}
-    reading_candidates.sort(key=lambda item: (0 if " ".join(item.name.split()).lower() in wanted else 1, 0 if item.tag in {"h1", "h2", "h3", "h4"} else 1))
+    wanted = {
+        " ".join(value.split()).lower()
+        for value in [*page.scroll_landmarks, *page.visible_sections]
+    }
+    reading_candidates.sort(
+        key=lambda item: (
+            0 if " ".join(item.name.split()).lower() in wanted else 1,
+            0 if item.tag in {"h1", "h2", "h3", "h4"} else 1,
+        )
+    )
     unique, names = [], set()
     for item in reading_candidates:
         name = " ".join(item.name.split()).lower()
         if name and name not in names and len(name) <= 180:
-            names.add(name); unique.append(item)
+            names.add(name)
+            unique.append(item)
+    if placeholder_landmark:
+        # Once starter lorem evidence is present, href-less palette/menu
+        # controls and search/color inputs are implementation chrome. They
+        # are still available to the interaction kernel, but must not become
+        # reader-facing scenes. Preserve any non-form workspace surface; if
+        # none remains the page compiler will emit a verified page-level hold.
+        unique = [
+            item
+            for item in unique
+            if not (
+                item.actionable and (item.tag in {"a", "button", "input", "select", "textarea"})
+            )
+        ]
     # A featured-work collection belongs to the opening product story. On a
     # later page, a visually repeated project strip/footer is supporting
     # content, not permission to replace that page's own career/design/note
@@ -1837,18 +2740,70 @@ def _page_landmarks(context: ProductContext, page: PageKnowledge):
     return _collapse_repeated_series(unique)[:32]
 
 
+def _page_story_subject(page: PageKnowledge) -> str:
+    """Return a reader-facing page subject, avoiding proven template filler."""
+    subject = " ".join((page.purpose or page.title or "page content").split())
+    evidence = " ".join(str(value) for value in page.visible_facts).casefold()
+    if "lorem ipsum" in evidence and (
+        subject.casefold() in {"heading", "title", "description"}
+        or "lorem ipsum" in subject.casefold()
+    ):
+        # The document title is a better neutral description of a blank editor
+        # than its starter heading. It is evidence-backed and does not encode
+        # a site-specific route or workflow.
+        return " ".join((page.title or "workspace").split())
+    return subject or "page content"
+
+
 def _configuration_landmark(context: ProductContext, page: PageKnowledge):
     """Find an observed feature-configuration control for page-local context."""
     objective = getattr(context, "objective", None)
     if objective is None:
         return None
-    raw = " ".join(getattr(objective, "requested_features", []) or []) or str(getattr(objective, "raw", ""))
+    raw = " ".join(getattr(objective, "requested_features", []) or []) or str(
+        getattr(objective, "raw", "")
+    )
     requested = _tokens(raw) - {
-        "the", "and", "for", "with", "from", "into", "this", "that", "show", "include",
-        "explain", "actual", "experience", "product", "login", "journey", "context", "only",
-        "brief", "supporting", "page", "pages", "use", "understand", "relationship", "settings",
-        "setting", "config", "configuration", "flow", "demonstrate", "meaningful", "controls",
-        "resulting", "state", "repeatedly", "revisit", "cover", "unrelated", "modules",
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "into",
+        "this",
+        "that",
+        "show",
+        "include",
+        "explain",
+        "actual",
+        "experience",
+        "product",
+        "login",
+        "journey",
+        "context",
+        "only",
+        "brief",
+        "supporting",
+        "page",
+        "pages",
+        "use",
+        "understand",
+        "relationship",
+        "settings",
+        "setting",
+        "config",
+        "configuration",
+        "flow",
+        "demonstrate",
+        "meaningful",
+        "controls",
+        "resulting",
+        "state",
+        "repeatedly",
+        "revisit",
+        "cover",
+        "unrelated",
+        "modules",
     }
     page_words = _tokens(" ".join([page.title, page.purpose, *page.visible_sections]))
     if not requested or not page_words & {"settings", "setting", "config", "configuration"}:
@@ -1856,7 +2811,8 @@ def _configuration_landmark(context: ProductContext, page: PageKnowledge):
     canonical = _canonical_url(context.url, page.url)
     return next(
         (
-            item for item in context.elements
+            item
+            for item in context.elements
             if item.name.strip()
             and item.actionable
             and "config" in item.name.casefold()
@@ -1927,15 +2883,17 @@ def _fact_for_landmark(page: PageKnowledge, landmark: str, index: int) -> str:
         # for that section. Prefer a longer captured fact even when the label
         # itself has an exact lexical match.
         bare_label = normalized_fact == normalized_landmark
-        scored.append((
+        scored.append(
             (
-                1 if bare_label else 0,
-                0 if heading.startswith(landmark.lower()) else 1,
-                -overlap,
-                abs(fact_index - index),
-            ),
-            fact,
-        ))
+                (
+                    1 if bare_label else 0,
+                    0 if heading.startswith(landmark.lower()) else 1,
+                    -overlap,
+                    abs(fact_index - index),
+                ),
+                fact,
+            )
+        )
     if scored:
         return min(scored, key=lambda item: item[0])[1]
     return facts[min(index, len(facts) - 1)]
@@ -1983,7 +2941,11 @@ def validate_flow_scope(
 
     def destination_for(operation: SemanticOperation) -> str | None:
         value = next(
-            (str(condition.expected) for condition in operation.postconditions if condition.kind == "url"),
+            (
+                str(condition.expected)
+                for condition in operation.postconditions
+                if condition.kind == "url"
+            ),
             str(operation.value or ""),
         )
         if not value:
@@ -1993,14 +2955,69 @@ def validate_flow_scope(
             return next((url for url in allowed if url.endswith(suffix)), None)
         return _canonical_url(context.url, value)
 
-    def is_persistent_primary_target(operation: SemanticOperation) -> bool:
+    def is_persistent_primary_target(operation: SemanticOperation, active_page_url: str) -> bool:
+        """Allow a global control only when it was observed on this page.
+
+        Discovery may see the same header on several routes, but a control
+        captured on the opening page is not proof that it is currently
+        interactable after a transition (embedded apps often replace the
+        header entirely).  Requiring page-local provenance prevents a
+        complete tour from dispatching a root-page action inside an app route.
+        """
         if operation.target is None:
             return False
+        if not any(page.evidence_refs for page in context.page_knowledge):
+            # Legacy/in-memory plans have no page-local evidence from which to
+            # distinguish a persistent header from a route-local control.
+            # Preserve their established navigation semantics; fresh
+            # discovery is subject to the stricter branch below.
+            return any(
+                (item in context.navigation or item.navigation_scope == "primary")
+                and item.selector == operation.target.selector
+                and item.name.casefold() == operation.target.name.casefold()
+                for item in [*context.navigation, *context.elements]
+            )
+        active = _canonical_url(context.url, active_page_url)
+        controls = [*context.navigation, *context.elements]
+        active_controls = [
+            item
+            for item in controls
+            if _canonical_url(context.url, item.source_url or context.url) == active
+            and (item in context.navigation or item.navigation_scope == "primary")
+        ]
+        active_page = next(
+            (
+                page
+                for page in context.page_knowledge
+                if _canonical_url(context.url, page.url) == active
+            ),
+            None,
+        )
+        # If discovery did not capture any controls for the active page (a
+        # common legacy snapshot shape), a persistent primary header remains a
+        # valid compatibility witness.  Once page-local controls are present,
+        # however, they are the authoritative state and a prior-page target is
+        # not assumed to survive an app/workspace transition.
+        if active_controls:
+            eligible = active_controls
+        elif active_page is not None and active_page.evidence_refs:
+            # A fully captured page with no local controls is an explicit
+            # proof that the prior-page control is not available here. Do not
+            # silently treat it as a persistent header.
+            eligible = []
+        else:
+            # Sparse legacy snapshots do not carry page records/controls for
+            # every route. Preserve their compatibility with a persistent
+            # primary header until fresh discovery supplies page-local proof.
+            eligible = [
+                item
+                for item in controls
+                if item in context.navigation or item.navigation_scope == "primary"
+            ]
         return any(
-            (item in context.navigation or item.navigation_scope == "primary")
-            and item.selector == operation.target.selector
+            item.selector == operation.target.selector
             and item.name.casefold() == operation.target.name.casefold()
-            for item in [*context.navigation, *context.elements]
+            for item in eligible
         )
 
     for operation in proposal.steps:
@@ -2013,7 +3030,9 @@ def validate_flow_scope(
                 continue
             if operation.target and operation.target.source_url:
                 source = _canonical_url(context.url, operation.target.source_url)
-                if source != active_page and not is_persistent_primary_target(operation):
+                if source != active_page and not is_persistent_primary_target(
+                    operation, active_page
+                ):
                     failures.append(
                         "WORKFLOW_PAGE_STATE_DISCONTINUITY:"
                         f"{operation.target.name}:{source}!={active_page}"
@@ -2042,8 +3061,7 @@ def validate_flow_scope(
                 )
         if operation.page_url and _canonical_url(context.url, operation.page_url) != active_page:
             failures.append(
-                "WORKFLOW_PAGE_STATE_DISCONTINUITY:"
-                f"operation:{operation.page_url}!={active_page}"
+                f"WORKFLOW_PAGE_STATE_DISCONTINUITY:operation:{operation.page_url}!={active_page}"
             )
     if not failures and context.page_knowledge:
         for required in candidate.page_urls[1:]:

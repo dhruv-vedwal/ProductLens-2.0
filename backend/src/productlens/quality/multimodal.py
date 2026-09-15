@@ -16,7 +16,11 @@ VisualReviewer = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 def build_review_packet(
-    *, video: Path, run_id: str, trace: dict[str, Any], storyboard: dict[str, Any] | None = None,
+    *,
+    video: Path,
+    run_id: str,
+    trace: dict[str, Any],
+    storyboard: dict[str, Any] | None = None,
     sample_seconds: list[float] | None = None,
 ) -> dict[str, Any]:
     """Create a non-secret packet that an optional visual model may inspect."""
@@ -29,12 +33,23 @@ def build_review_packet(
         "sample_seconds": [float(value) for value in (sample_seconds or [])],
         "event_count": len(events),
         "scene_count": len((storyboard or {}).get("scenes", [])),
-        "checks": ["frame_composition", "readability", "motion", "cursor_alignment", "caption_alignment", "story_coherence"],
+        "checks": [
+            "frame_composition",
+            "readability",
+            "motion",
+            "cursor_alignment",
+            "caption_alignment",
+            "story_coherence",
+        ],
     }
 
 
 def extract_review_frames(
-    *, video: Path, output_directory: Path, sample_seconds: list[float], width: int = 640,
+    *,
+    video: Path,
+    output_directory: Path,
+    sample_seconds: list[float],
+    width: int = 640,
 ) -> list[dict[str, Any]]:
     """Extract stable PNG evidence for human or provider-neutral review.
 
@@ -51,10 +66,24 @@ def extract_review_frames(
         target = output_directory / f"frame-{index:03d}-{second:.3f}s.png"
         completed = subprocess.run(
             [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{second:.3f}",
-                "-i", str(video), "-frames:v", "1", "-vf", f"scale={width}:-2", str(target),
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{second:.3f}",
+                "-i",
+                str(video),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={width}:-2",
+                str(target),
             ],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if completed.returncode == 0 and target.is_file() and target.stat().st_size:
             frames.append({"second": second, "path": str(target), "bytes": target.stat().st_size})
@@ -62,7 +91,8 @@ def extract_review_frames(
 
 
 def review_multimodal(
-    packet: dict[str, Any], reviewer: VisualReviewer | None = None,
+    packet: dict[str, Any],
+    reviewer: VisualReviewer | None = None,
 ) -> dict[str, Any]:
     """Run an external reviewer or an always-available deterministic review.
 
@@ -76,7 +106,9 @@ def review_multimodal(
     if not seconds:
         seconds = [2.0, 10.0, 30.0]
     review_root = video.parent / "review-frames"
-    frames = extract_review_frames(video=video, output_directory=review_root, sample_seconds=seconds)
+    frames = extract_review_frames(
+        video=video, output_directory=review_root, sample_seconds=seconds
+    )
     review_packet = {**packet, "frames": frames}
     if reviewer is None:
         failures = [] if frames else ["RENDERED_FRAME_EXTRACTION_FAILED"]
@@ -86,7 +118,11 @@ def review_multimodal(
             "hard_failures": failures,
             "warnings": ["SEMANTIC_VISUAL_REVIEW_REQUIRES_HUMAN_OR_CONFIGURED_MODEL"],
             "findings": [{"kind": "rendered_frame", **frame} for frame in frames],
-            "packet": {key: value for key, value in review_packet.items() if key not in {"video_path", "frames"}},
+            "packet": {
+                key: value
+                for key, value in review_packet.items()
+                if key not in {"video_path", "frames"}
+            },
         }
     result = reviewer(review_packet)
     if not isinstance(result, dict):

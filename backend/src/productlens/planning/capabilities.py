@@ -12,6 +12,7 @@ from productlens.contracts.models import (
     SemanticOperation,
     Target,
 )
+from productlens.planning.form_dependencies import FormDependencyError, order_form_fields
 
 
 class CapabilityCompilationError(ValueError):
@@ -31,7 +32,11 @@ def _field_target(field: FormField, source_url: str) -> Target:
     # A selector emitted by an SPA mount (for example ``#\\:r30\\:``) cannot
     # be trusted in a fresh production context. Labels remain the primary
     # identity; retain only stable attribute/id selectors as bounded hints.
-    selector = field.selector if field.selector.startswith(("#", "[")) and not _is_transient_selector(field.selector) else None
+    selector = (
+        field.selector
+        if field.selector.startswith(("#", "[")) and not _is_transient_selector(field.selector)
+        else None
+    )
     return Target(
         name=field.name,
         label=field.name,
@@ -50,15 +55,30 @@ def _operation_for(field: FormField, source_url: str) -> SemanticOperation:
     # controls as visible form evidence; a later capability probe can compile
     # an explicit choice when the group semantics are known.
     if control in {"radio", "checkbox", "switch", "hidden"}:
-        raise CapabilityCompilationError(f"Form control has no deterministic editable value: {field.name}")
+        raise CapabilityCompilationError(
+            f"Form control has no deterministic editable value: {field.name}"
+        )
     if name in {"type", "id"} and control in {"input", "string", "text"}:
-        raise CapabilityCompilationError(f"Form control is structural metadata, not an editable field: {field.name}")
+        raise CapabilityCompilationError(
+            f"Form control is structural metadata, not an editable field: {field.name}"
+        )
     if control in {"select", "combobox"}:
-        options = [item for item in field.options if item.strip() and item.strip().casefold() not in {
-            "select", "select an option", "choose", "choose an option",
-        }]
+        options = [
+            item
+            for item in field.options
+            if item.strip()
+            and item.strip().casefold()
+            not in {
+                "select",
+                "select an option",
+                "choose",
+                "choose an option",
+            }
+        ]
         if not options:
-            raise CapabilityCompilationError(f"Selectable field has no safe observed option: {field.name}")
+            raise CapabilityCompilationError(
+                f"Selectable field has no safe observed option: {field.name}"
+            )
         value = options[0]
         kind = OperationKind.SELECT_OPTION
     elif "email" in control or "email" in name:
@@ -120,8 +140,12 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
             "Creation capability has non-optional selectable fields without safe observed choices: "
             + ", ".join(unresolved_choices)
         )
-    if capability.submit_target is None or (require_outcome and (not capability.verified or capability.outcome_target is None)):
-        raise CapabilityCompilationError("Creation capability lacks independently verified outcome evidence")
+    if capability.submit_target is None or (
+        require_outcome and (not capability.verified or capability.outcome_target is None)
+    ):
+        raise CapabilityCompilationError(
+            "Creation capability lacks independently verified outcome evidence"
+        )
     required_fields = [field for field in capability.form_schema.fields if field.required]
     # When the UI does not expose native requiredness, use the minimal form
     # surface that is not explicitly optional. This includes visible business
@@ -138,6 +162,10 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
     # compile; optional controls with no safe observed value are simply not
     # part of the minimal, safe rehearsal.
     field_operations: list[SemanticOperation] = []
+    try:
+        candidate_fields = order_form_fields(candidate_fields)
+    except FormDependencyError as error:
+        raise CapabilityCompilationError(str(error)) from error
     for field in candidate_fields[:8]:
         try:
             field_operations.append(_operation_for(field, capability.source_url))
@@ -158,10 +186,13 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
         # empty-state transition once; required unresolved controls still fail
         # above, and production remains forbidden until an outcome witness is
         # persisted.
-        postconditions=[Postcondition(
-            kind="visible", expected=True,
-            target=field_operations[0].target if field_operations else capability.submit_target,
-        )],
+        postconditions=[
+            Postcondition(
+                kind="visible",
+                expected=True,
+                target=field_operations[0].target if field_operations else capability.submit_target,
+            )
+        ],
         story_phase="demonstrate",
         page_url=capability.source_url,
         evidence_refs=capability.evidence_refs,
@@ -175,22 +206,32 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
         # detail route. Preserve that proof as a route postcondition rather
         # than pretending the target is still visible on the source page.
         if outcome.source_url and outcome.source_url != capability.source_url:
-            outcome_postconditions.append(Postcondition(
-                kind="url", expected=outcome.source_url, target=outcome,
-            ))
+            outcome_postconditions.append(
+                Postcondition(
+                    kind="url",
+                    expected=outcome.source_url,
+                    target=outcome,
+                )
+            )
         else:
-            outcome_postconditions.append(Postcondition(
-                kind="visible", expected=True, target=outcome,
-            ))
-    operations.append(SemanticOperation(
-        kind=OperationKind.SUBMIT,
-        intent=f"Create and verify the {capability.purpose} record",
-        target=capability.submit_target,
-        postconditions=outcome_postconditions,
-        story_phase="verify",
-        page_url=capability.source_url,
-        evidence_refs=[*capability.evidence_refs, *capability.outcome_evidence],
-    ))
+            outcome_postconditions.append(
+                Postcondition(
+                    kind="visible",
+                    expected=True,
+                    target=outcome,
+                )
+            )
+    operations.append(
+        SemanticOperation(
+            kind=OperationKind.SUBMIT,
+            intent=f"Create and verify the {capability.purpose} record",
+            target=capability.submit_target,
+            postconditions=outcome_postconditions,
+            story_phase="verify",
+            page_url=capability.source_url,
+            evidence_refs=[*capability.evidence_refs, *capability.outcome_evidence],
+        )
+    )
     return operations
 
 
@@ -214,7 +255,11 @@ def compile_read_only_form_inspection(capability: ActionCapability) -> list[Sema
     if capability.entry_target is None:
         raise CapabilityCompilationError("Form capability has no visible entry target")
     field_operations: list[SemanticOperation] = []
-    for field in capability.form_schema.fields[:8]:
+    try:
+        fields = order_form_fields(capability.form_schema.fields)
+    except FormDependencyError as error:
+        raise CapabilityCompilationError(str(error)) from error
+    for field in fields[:8]:
         try:
             field_operations.append(_operation_for(field, capability.source_url))
         except CapabilityCompilationError:
@@ -228,10 +273,15 @@ def compile_read_only_form_inspection(capability: ActionCapability) -> list[Sema
         kind=OperationKind.OPEN_MODAL,
         intent=f"Open the observed {capability.purpose} form to explain its setup fields",
         target=capability.entry_target,
-        postconditions=[Postcondition(
-            kind="visible", expected=True, target=field_operations[0].target,
-        )],
-        story_phase="demonstrate", page_url=capability.source_url,
+        postconditions=[
+            Postcondition(
+                kind="visible",
+                expected=True,
+                target=field_operations[0].target,
+            )
+        ],
+        story_phase="demonstrate",
+        page_url=capability.source_url,
         evidence_refs=capability.evidence_refs,
     )
     return [opening, *field_operations]

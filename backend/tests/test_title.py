@@ -14,6 +14,9 @@ def test_title_keeps_visible_destinations_not_execution_purposes():
 
 
 def test_title_uses_the_objective_without_site_specific_special_cases():
-    assert concise_demo_title(
-        "Create a full walkthrough of every safe primary tab and the project collection."
-    ) == "Create a full walkthrough of every safe"
+    assert (
+        concise_demo_title(
+            "Create a full walkthrough of every safe primary tab and the project collection."
+        )
+        == "Create a full walkthrough of every safe"
+    )

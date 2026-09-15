@@ -69,7 +69,9 @@ def audit(runtime_root: Path) -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-root", type=Path, default=Path("src/productlens"))
-    parser.add_argument("--output", type=Path, default=Path("artifacts/audits/project-generality.json"))
+    parser.add_argument(
+        "--output", type=Path, default=Path("artifacts/audits/project-generality.json")
+    )
     args = parser.parse_args()
     report = audit(args.runtime_root)
     args.output.parent.mkdir(parents=True, exist_ok=True)

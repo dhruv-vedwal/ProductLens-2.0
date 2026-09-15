@@ -143,11 +143,17 @@ async def run(
             else captions
         )
         report = inspect_video(output, execution_verified=result.outcome_verified)
-        presentation_props = json.loads((artifacts.presentation / "remotion-props.json").read_text(encoding="utf-8"))
+        presentation_props = json.loads(
+            (artifacts.presentation / "remotion-props.json").read_text(encoding="utf-8")
+        )
         presentation_report = inspect_presentation(result, presentation_props)
         report = attach_presentation_qa(report, presentation_report)
         synchronization = inspect_synchronization(
-            result, script, rendered_captions, narration_requested=False, narration_created=narration is not None,
+            result,
+            script,
+            rendered_captions,
+            narration_requested=False,
+            narration_created=narration is not None,
             explained_intervals=secure_transition_intervals(presentation_props),
         )
         # Fixture gates intentionally exercise browser primitives on short
@@ -158,7 +164,9 @@ async def run(
         if "CAPTION_READING_DWELL_TOO_SHORT" in synchronization.get("hard_failures", []):
             synchronization["hard_failures"].remove("CAPTION_READING_DWELL_TOO_SHORT")
             synchronization.setdefault("warnings", []).append("FIXTURE_SHORT_SOURCE_CAPTURE")
-            synchronization["synchronization_score"] = 1.0 if not synchronization["hard_failures"] else 0.0
+            synchronization["synchronization_score"] = (
+                1.0 if not synchronization["hard_failures"] else 0.0
+            )
         artifacts.write_json("qa/video-report.json", report)
         artifacts.write_json("qa/presentation-report.json", presentation_report)
         artifacts.write_json("qa/synchronization-report.json", synchronization)
@@ -167,7 +175,11 @@ async def run(
         # Fixture gates verify browser primitives rather than a persisted
         # DemoPlan.  Keep their artifact shape complete without pretending a
         # fixture trace has URL-workflow coverage semantics.
-        coverage = {"coverage_score": 1.0, "hard_failures": [], "warnings": ["FIXTURE_COVERAGE_SCOPE_NOT_APPLICABLE"]}
+        coverage = {
+            "coverage_score": 1.0,
+            "hard_failures": [],
+            "warnings": ["FIXTURE_COVERAGE_SCOPE_NOT_APPLICABLE"],
+        }
         artifacts.write_json("qa/coverage-report.json", coverage)
         delivery = delivery_report(
             artifacts=artifacts.required_delivery_artifacts(),
@@ -183,7 +195,8 @@ async def run(
         artifacts.write_json("qa/delivery-report.json", delivery)
         if not delivery["deliverable"]:
             artifacts.write_json(
-                "qa/repair-decision.json", classify_repair(delivery["hard_failures"]).model_dump(mode="json")
+                "qa/repair-decision.json",
+                classify_repair(delivery["hard_failures"]).model_dump(mode="json"),
             )
             raise RuntimeError(f"Delivery QA rejected render: {delivery['hard_failures']}")
     return result

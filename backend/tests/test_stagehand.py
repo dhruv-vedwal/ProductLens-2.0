@@ -44,7 +44,8 @@ async def test_stagehand_timeout_terminates_the_observation_process(monkeypatch,
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     monkeypatch.setattr(asyncio, "wait_for", timed_wait_for)
     provider = StagehandProvider(
-        bridge=bridge, browserbase_api_key="test-reference",
+        bridge=bridge,
+        browserbase_api_key="test-reference",
     )
 
     with pytest.raises(ProviderError, match="failed to start"):

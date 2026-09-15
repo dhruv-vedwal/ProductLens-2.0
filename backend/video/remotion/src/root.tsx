@@ -1,10 +1,10 @@
 import React from 'react';
-import { AbsoluteFill, Audio, Composition, Easing, interpolate, OffthreadVideo, Sequence, staticFile, useCurrentFrame } from 'remotion';
+import { AbsoluteFill, Audio, Composition, Easing, interpolate, Sequence, staticFile, useCurrentFrame, Video } from 'remotion';
 
 export type Beat = { eventId?: string; start: number; end: number; clickFrame?: number; intent: string; kind: string; x: number; y: number; width: number; height: number; zoom: number };
 export type Caption = { start: number; end: number; text: string };
 export type Scene = { event_id: string; show_cursor: boolean; caption_safe_zone: string; story_phase?: string; page_stage?: string; required_content_groups?: string[]; action_class?: string; cursor?: { visible: boolean; hover_seconds: number; click_ripple: boolean }; scroll?: { mode: string; settle_seconds: number } };
-export type CursorPath = { event_id: string; source: { x: number; y: number }; destination: { x: number; y: number }; waypoints?: { x: number; y: number }[]; travel_seconds: number; hover_seconds: number; settle_seconds?: number; easing?: string; cursor_style?: string; click: boolean };
+export type CursorPath = { event_id: string; source: { x: number; y: number }; destination: { x: number; y: number }; waypoints?: { x: number; y: number }[]; travel_seconds: number; hover_seconds: number; settle_seconds?: number; easing?: string; cursor_style?: string; click: boolean; drag?: boolean };
 export type Redaction = { eventId: string; start: number; end: number; mode: 'target-mask' | 'secure-full-frame'; x?: number; y?: number; width?: number; height?: number; label: string };
 export type DemoProps = { title: string; subtitle: string; outroTitle?: string; outroSubtitle?: string; screenVideo: string; sourceWidth: number; sourceHeight: number; screenFrames: number; frameRate?: number; playbackRate?: number; beats: Beat[]; cursorPaths?: CursorPath[]; narration?: string | null; captions?: Caption[]; scenes?: Scene[]; redactions?: Redaction[] };
 
@@ -35,16 +35,20 @@ const BrowserMotion: React.FC<{ video: string; sourceWidth: number; sourceHeight
   const moveEnd = (beat?.clickFrame ?? frame) - hoverFrames;
   const moveStart = Math.max(beat?.start ?? 0, moveEnd - travelFrames);
   const cursorProgress = interpolate(frame, [moveStart, Math.max(moveStart + 1, moveEnd)], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) });
-  // A bounded quadratic path feels human while its final point remains the
-  // captured target centre. Existing props without a waypoint retain a
-  // straight path for backwards-compatible renders.
-  const waypoint = cursorPath?.waypoints?.[0];
-  const curve = cursorPath && waypoint ? (t: number, axis: 'x' | 'y') => {
-    const start = cursorPath.source[axis], control = waypoint[axis], end = cursorPath.destination[axis];
-    return (1 - t) * (1 - t) * start + 2 * (1 - t) * t * control + t * t * end;
-  } : undefined;
-  const x = curve ? curve(cursorProgress, 'x') : cursorPath ? interpolate(cursorProgress, [0, 1], [cursorPath.source.x, cursorPath.destination.x]) : fallbackX;
-  const y = curve ? curve(cursorProgress, 'y') : cursorPath ? interpolate(cursorProgress, [0, 1], [cursorPath.source.y, cursorPath.destination.y]) : fallbackY;
+  // Follow every observed waypoint. A single quadratic bend is retained for
+  // legacy paths, while pointer/drag gestures can now preserve a multi-point
+  // browser path without teleporting through intermediate targets.
+  const pathPoint = (t: number, axis: 'x' | 'y') => {
+    if (!cursorPath) return axis === 'x' ? fallbackX : fallbackY;
+    const points = [cursorPath.source, ...(cursorPath.waypoints ?? []), cursorPath.destination];
+    if (points.length <= 2) return interpolate(t, [0, 1], [points[0][axis], points[1][axis]]);
+    const scaled = Math.min(points.length - 1, Math.max(0, t * (points.length - 1)));
+    const segment = Math.min(points.length - 2, Math.floor(scaled));
+    const local = scaled - segment;
+    return interpolate(local, [0, 1], [points[segment][axis], points[segment + 1][axis]]);
+  };
+  const x = cursorPath ? pathPoint(cursorProgress, 'x') : fallbackX;
+  const y = cursorPath ? pathPoint(cursorProgress, 'y') : fallbackY;
   const captionTime = frame / frameRate;
   const activeCaptionIndex = captions.findIndex(item => captionTime >= item.start && captionTime < item.end);
   const fadingCaptionIndex = activeCaptionIndex === -1
@@ -127,7 +131,7 @@ const BrowserMotion: React.FC<{ video: string; sourceWidth: number; sourceHeight
   const activeRedactions = redactions.filter(item => frame >= item.start && frame < item.end);
   return <AbsoluteFill style={{ background: 'radial-gradient(circle at 50% -10%, #243250 0%, #101827 43%, #080b12 100%)', overflow: 'hidden', fontFamily: 'Inter,Arial,sans-serif' }}>
     <div aria-hidden style={{ position: 'absolute', left: videoLeft - 2, top: videoTop - 2, width: sourceWidth * sourceScale + 4, height: sourceHeight * sourceScale + 4, borderRadius: 16, background: '#0a0e17', border: '1px solid rgba(255,255,255,.22)', boxShadow: '0 26px 62px rgba(0,0,0,.42)', overflow: 'hidden' }} />
-    {video ? <div aria-label="browser-frame-viewport" style={{ position: 'absolute', zIndex: 1, left: videoLeft, top: videoTop, width: frameWidth, height: frameHeight, borderRadius: 16, overflow: 'hidden' }}><OffthreadVideo src={staticFile(video)} playbackRate={playbackRate} style={{ position: 'absolute', left: 0, top: 0, width: frameWidth, height: frameHeight, objectFit: 'fill', transform: `translate(${translateX}px, ${translateY}px) scale(${zoom})`, transformOrigin: '0 0' }} /></div> : null}
+    {video ? <div aria-label="browser-frame-viewport" style={{ position: 'absolute', zIndex: 1, left: videoLeft, top: videoTop, width: frameWidth, height: frameHeight, borderRadius: 16, overflow: 'hidden' }}><Video src={staticFile(video)} playbackRate={playbackRate} style={{ position: 'absolute', left: 0, top: 0, width: frameWidth, height: frameHeight, objectFit: 'fill', transform: `translate(${translateX}px, ${translateY}px) scale(${zoom})`, transformOrigin: '0 0' }} /></div> : null}
     {activeRedactions.map(item => item.mode === 'secure-full-frame'
       ? <AbsoluteFill key={item.eventId} aria-label={item.label} style={{ zIndex: 8, background: 'linear-gradient(135deg, #0c1526, #132947)', color: '#e8f4ff', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ textAlign: 'center' }}><div style={{ fontSize: 44, marginBottom: 12 }}>⌁</div><div style={{ fontSize: 28, fontWeight: 700 }}>{item.label}</div><div style={{ marginTop: 9, color: '#b9d8ee', fontSize: 18 }}>Credentials are never shown in the demo.</div></div></AbsoluteFill>
       : <div key={item.eventId} aria-label={item.label} style={{ position: 'absolute', zIndex: 8, left: videoLeft + (item.x ?? 0) * sourceScale * zoom + translateX, top: videoTop + (item.y ?? 0) * sourceScale * zoom + translateY, width: (item.width ?? 0) * sourceScale * zoom, height: (item.height ?? 0) * sourceScale * zoom, borderRadius: 5, background: 'rgba(255,255,255,.985)', color: '#4b5563', border: '1px solid rgba(71,85,105,.28)', display: 'flex', alignItems: 'center', paddingLeft: 14, boxSizing: 'border-box', fontSize: Math.max(13, 17 * sourceScale * zoom), fontWeight: 600, letterSpacing: .2, overflow: 'hidden', pointerEvents: 'none' }}><span>••••••••</span></div>)}

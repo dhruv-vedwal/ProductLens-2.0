@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import hashlib
+import json
+from contextlib import suppress
 from pathlib import Path
 from time import perf_counter
 
@@ -13,8 +15,8 @@ from productlens.contracts.models import (
     DemoPlan,
     DemoTrace,
     DiscoveryBudget,
-    ProductKnowledge,
     PresentationPlan,
+    ProductKnowledge,
 )
 from productlens.narration.audio import audio_duration_seconds
 from productlens.narration.script import (
@@ -40,6 +42,7 @@ from productlens.quality.presentation import attach_presentation_qa, inspect_pre
 from productlens.quality.synchronization import inspect_synchronization, secure_transition_intervals
 from productlens.quality.video import inspect_video
 from productlens.services.generation import UrlGenerationService
+from productlens.services.stage_contracts import stage_lifecycle
 from productlens.video.render import render_remotion
 
 logger = get_logger("productlens.jobs")
@@ -64,7 +67,9 @@ def _product_knowledge_for_context(context, *, project_id: str | None = None) ->
         "url": context.url,
         "title": getattr(context, "title", ""),
         "routes": sorted(getattr(context, "relevant_routes", [])),
-        "pages": sorted(getattr(page, "url", "") for page in getattr(context, "page_knowledge", [])),
+        "pages": sorted(
+            getattr(page, "url", "") for page in getattr(context, "page_knowledge", [])
+        ),
         "sections": sorted(
             section
             for page in getattr(context, "page_knowledge", [])
@@ -142,6 +147,20 @@ class DemoJobService:
         for checkpoint, status in mapping.get(stage, ()):
             self.repository.update_stage_job(run_id, checkpoint, status=status)
 
+    async def _heartbeat_stage(self, run_id: str, stage: str) -> None:
+        """Keep a long provider/render stage visibly alive for recovery tooling."""
+        while True:
+            await asyncio.sleep(15)
+            try:
+                self.repository.heartbeat_stage_job(run_id, stage)
+            except Exception as error:  # noqa: BLE001 - heartbeat is advisory
+                logger.warning(
+                    "demo_job_heartbeat_failed",
+                    run_id=run_id,
+                    stage=stage,
+                    error_type=type(error).__name__,
+                )
+
     async def run_fixture_stage(self, run_id: str, stage: str, *, gate: int, render: bool) -> None:
         """Execute exactly one persisted fixture stage.
 
@@ -153,35 +172,44 @@ class DemoJobService:
         artifacts = RunArtifacts(self.artifact_root, run_id)
         run = self.repository.get_run(run_id)
         request = self.repository.get_request(run["request_id"])
-        lifecycle = {
-            "DISCOVERY": RunStage.DISCOVERING,
-            "PLANNING": RunStage.PLAN_VALIDATED,
-            "EXECUTION": RunStage.PRODUCTION_EXECUTION,
-            "NARRATION": RunStage.PRESENTATION_PLANNED,
-            "RENDER": RunStage.RENDERING,
-            "VIDEO_QA": RunStage.VIDEO_QA,
-        }[stage]
+        lifecycle = stage_lifecycle(stage)
         self.repository.update_run(run_id, stage=lifecycle, status="RUNNING")
         self._checkpoint_stage(run_id, lifecycle)
 
         if stage == "DISCOVERY":
-            artifacts.write_json("discovery/fixture-context.json", {"gate": gate, "objective": request["objective"]})
+            artifacts.write_json(
+                "discovery/fixture-context.json", {"gate": gate, "objective": request["objective"]}
+            )
         elif stage == "PLANNING":
             plan = self.planner.plan(request["objective"])
-            self.repository.replace_json_artifact("demo_plans", run_id, plan.model_dump(mode="json"))
-            self.repository.connection.execute("DELETE FROM workflow_steps WHERE run_id=?", (run_id,))
+            self.repository.replace_json_artifact(
+                "demo_plans", run_id, plan.model_dump(mode="json")
+            )
+            self.repository.connection.execute(
+                "DELETE FROM workflow_steps WHERE run_id=?", (run_id,)
+            )
             self.repository.connection.commit()
-            self.repository.save_workflow_steps(run_id, [step.model_dump(mode="json") for step in plan.workflow_steps])
+            self.repository.save_workflow_steps(
+                run_id, [step.model_dump(mode="json") for step in plan.workflow_steps]
+            )
             artifacts.write_json("plan.json", plan.model_dump(mode="json"))
         elif stage == "EXECUTION":
-            trace = await run_fixture_gate(gate, self.artifact_root, render_final=False, run_id=run_id)
-            self.repository.replace_interaction_events(run_id, [event.model_dump(mode="json") for event in trace.events])
+            trace = await run_fixture_gate(
+                gate, self.artifact_root, render_final=False, run_id=run_id
+            )
+            self.repository.replace_interaction_events(
+                run_id, [event.model_dump(mode="json") for event in trace.events]
+            )
             presentation_path = artifacts.presentation / "presentation-plan.json"
             if not presentation_path.exists():
                 presentation = build_presentation_plan(trace)
-                artifacts.write_json("presentation/presentation-plan.json", presentation.model_dump(mode="json"))
+                artifacts.write_json(
+                    "presentation/presentation-plan.json", presentation.model_dump(mode="json")
+                )
             self.repository.replace_json_artifact(
-                "presentation_plans", run_id, json.loads(presentation_path.read_text(encoding="utf-8"))
+                "presentation_plans",
+                run_id,
+                json.loads(presentation_path.read_text(encoding="utf-8")),
             )
         elif stage == "NARRATION":
             trace = self._load_trace(artifacts)
@@ -203,7 +231,10 @@ class DemoJobService:
             artifacts.write_json("presentation/narration-script.json", payload)
             if narration:
                 self.repository.save_audio_asset(
-                    run_id, narration["audio_path"], duration_seconds=audio_duration_seconds(Path(narration["audio_path"])), provider="elevenlabs"
+                    run_id,
+                    narration["audio_path"],
+                    duration_seconds=audio_duration_seconds(Path(narration["audio_path"])),
+                    provider="elevenlabs",
                 )
         elif stage == "RENDER":
             if not render:
@@ -213,24 +244,47 @@ class DemoJobService:
                 return
             trace = self._load_trace(artifacts)
             presentation = PresentationPlan.model_validate(
-                json.loads((artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8"))
+                json.loads(
+                    (artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8")
+                )
             )
-            captions = json.loads((artifacts.presentation / "captions.json").read_text(encoding="utf-8"))
+            captions = json.loads(
+                (artifacts.presentation / "captions.json").read_text(encoding="utf-8")
+            )
             narration_path = artifacts.root / "audio" / "narration.mp3"
-            output = render_remotion(trace, presentation, artifacts, narration_path=narration_path if narration_path.exists() else None, captions=captions)
+            output = render_remotion(
+                trace,
+                presentation,
+                artifacts,
+                narration_path=narration_path if narration_path.exists() else None,
+                captions=captions,
+            )
             self.repository.save_location(run_id, "final_video", str(output))
         elif stage == "VIDEO_QA":
             trace = self._load_trace(artifacts)
-            plan = DemoPlan.model_validate(json.loads((artifacts.root / "plan.json").read_text(encoding="utf-8")))
-            script_payload = json.loads((artifacts.presentation / "narration-script.json").read_text(encoding="utf-8"))
-            captions = json.loads((artifacts.presentation / "rendered-captions.json").read_text(encoding="utf-8"))
-            video = inspect_video(artifacts.root / "final" / "demo.mp4", execution_verified=trace.outcome_verified)
-            presentation_props = json.loads((artifacts.presentation / "remotion-props.json").read_text(encoding="utf-8"))
+            plan = DemoPlan.model_validate(
+                json.loads((artifacts.root / "plan.json").read_text(encoding="utf-8"))
+            )
+            script_payload = json.loads(
+                (artifacts.presentation / "narration-script.json").read_text(encoding="utf-8")
+            )
+            captions = json.loads(
+                (artifacts.presentation / "rendered-captions.json").read_text(encoding="utf-8")
+            )
+            video = inspect_video(
+                artifacts.root / "final" / "demo.mp4", execution_verified=trace.outcome_verified
+            )
+            presentation_props = json.loads(
+                (artifacts.presentation / "remotion-props.json").read_text(encoding="utf-8")
+            )
             presentation = inspect_presentation(trace, presentation_props)
             video = attach_presentation_qa(video, presentation)
             synchronization = inspect_synchronization(
-                trace, script_payload["script"], captions,
-                narration_requested=False, narration_created=False,
+                trace,
+                script_payload["script"],
+                captions,
+                narration_requested=False,
+                narration_created=False,
                 explained_intervals=secure_transition_intervals(presentation_props),
             )
             coverage = inspect_coverage(plan, trace)
@@ -246,7 +300,9 @@ class DemoJobService:
                     "workflow_score": coverage["coverage_score"],
                     "hard_failures": coverage["hard_failures"],
                 },
-                story=story, video=video, synchronization=synchronization,
+                story=story,
+                video=video,
+                synchronization=synchronization,
             )
             artifacts.write_json("qa/delivery-report.json", report)
             self.repository.replace_json_artifact("quality_reports", run_id, report)
@@ -288,6 +344,7 @@ class DemoJobService:
             )
         if self.repository.claim_stage_job(run_id, stage) is None:
             return
+        heartbeat = asyncio.create_task(self._heartbeat_stage(run_id, stage))
         try:
             await self._run_url_stage_impl(run_id, stage, payload=payload)
         except Exception as error:
@@ -298,10 +355,17 @@ class DemoJobService:
             error_code = f"{stage}_{type(error).__name__.upper()}"
             self.repository.fail_active_stage_jobs(run_id, error_code)
             self.repository.update_run(
-                run_id, stage=stage, status="FAILED", error_code=error_code,
+                run_id,
+                stage=stage,
+                status="FAILED",
+                error_code=error_code,
             )
             logger.error("demo_job_stage_failed", stage=stage, error_type=type(error).__name__)
             raise
+        finally:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
 
     async def _run_url_stage_impl(self, run_id: str, stage: str, *, payload: dict) -> None:
         """Execute one URL-generation stage from persisted artifacts only."""
@@ -310,14 +374,7 @@ class DemoJobService:
         artifacts = RunArtifacts(self.artifact_root, run_id)
         run = self.repository.get_run(run_id)
         request = self.repository.get_request(run["request_id"])
-        lifecycle = {
-            "DISCOVERY": RunStage.DISCOVERING,
-            "PLANNING": RunStage.PLAN_VALIDATED,
-            "EXECUTION": RunStage.PRODUCTION_EXECUTION,
-            "NARRATION": RunStage.PRESENTATION_PLANNED,
-            "RENDER": RunStage.RENDERING,
-            "VIDEO_QA": RunStage.VIDEO_QA,
-        }[stage]
+        lifecycle = stage_lifecycle(stage)
         # ``run_url_stage`` is shared by broker workers and supervised direct
         # runs.  Do not rely on API enqueueing to have created its ledger.
         self.repository.ensure_stage_jobs(run_id)
@@ -332,17 +389,24 @@ class DemoJobService:
         if stage == "DISCOVERY":
             cached = self.repository.fresh_knowledge(request["url"])
             context = await self.url_generator.discover_stage(
-                run_id=run_id, url=request["url"], objective=request["objective"], artifact_root=self.artifact_root,
+                run_id=run_id,
+                url=request["url"],
+                objective=request["objective"],
+                artifact_root=self.artifact_root,
                 budget=DiscoveryBudget(max_pages=int(payload["max_pages"])),
                 cloud_discovery=bool(payload["cloud_discovery"]),
                 known_routes=(cached or {}).get("evidence", {}).get("relevant_routes", []),
                 known_actions=(cached or {}).get("evidence", {}).get("successful_actions", []),
-                known_product_fingerprint=(cached or {}).get("evidence", {}).get("product_fingerprint"),
+                known_product_fingerprint=(cached or {})
+                .get("evidence", {})
+                .get("product_fingerprint"),
                 # Cloud discovery uses Stagehand automatically whenever its
                 # provider is configured. It is not a caller-controlled mode.
                 explore_visible_routes=True,
                 credential_reference=payload.get("credential_reference"),
-                allow_isolated_record_creation=bool(payload.get("allow_isolated_record_creation", False)),
+                allow_isolated_record_creation=bool(
+                    payload.get("allow_isolated_record_creation", False)
+                ),
             )
             knowledge = _product_knowledge_for_context(
                 context, project_id=request.get("project_id")
@@ -362,9 +426,14 @@ class DemoJobService:
             # be reused from SQLite while the run itself had no inspectable
             # ProductKnowledge artifact.
             artifacts.write_json("discovery/product-knowledge.json", knowledge_payload)
-            self.repository.upsert_knowledge(
-                request["url"], knowledge_payload, context.confidence
+            artifacts.write_json(
+                "discovery/capability-resolutions.json",
+                [
+                    item.model_dump(mode="json")
+                    for item in getattr(context, "capability_resolutions", [])
+                ],
             )
+            self.repository.upsert_knowledge(request["url"], knowledge_payload, context.confidence)
             self.repository.upsert_page_knowledge(
                 request["url"],
                 [page.model_dump(mode="json") for page in context.page_knowledge],
@@ -380,21 +449,27 @@ class DemoJobService:
             session_path = artifacts.root / "discovery" / "browserbase-session.json"
             if session_path.exists():
                 session = json.loads(session_path.read_text(encoding="utf-8"))
-                self.repository.save_browser_session(run_id, session["provider"], session["session_id"], "CLOSED")
+                self.repository.save_browser_session(
+                    run_id, session["provider"], session["session_id"], "CLOSED"
+                )
         elif stage == "PLANNING":
             if bool(payload.get("allow_isolated_record_creation", False)):
                 # Rehearsal owns one authorised mutation in a fresh,
                 # non-recorded context. Planning subsequently reloads its
                 # persisted outcome witness; production never improvises it.
                 await self.url_generator.rehearsal_stage(
-                    run_id=run_id, url=request["url"], objective=request["objective"],
+                    run_id=run_id,
+                    url=request["url"],
+                    objective=request["objective"],
                     artifact_root=self.artifact_root,
                     credential_reference=payload.get("credential_reference"),
                     cloud_rehearsal=bool(payload.get("cloud_discovery", False)),
                     allow_isolated_record_creation=True,
                 )
             plan = await self.url_generator.plan_stage(
-                run_id=run_id, objective=request["objective"], artifact_root=self.artifact_root,
+                run_id=run_id,
+                objective=request["objective"],
+                artifact_root=self.artifact_root,
                 allow_external_side_effects=(
                     bool(payload["allow_external_side_effects"])
                     or bool(payload.get("allow_isolated_record_creation", False))
@@ -402,19 +477,34 @@ class DemoJobService:
                 audience=str(payload.get("audience", "product prospect")),
                 target_duration_seconds=int(payload.get("target_duration_seconds", 120)),
             )
-            self.repository.replace_json_artifact("demo_plans", run_id, plan.model_dump(mode="json"))
-            self.repository.connection.execute("DELETE FROM workflow_steps WHERE run_id=?", (run_id,))
+            self.repository.replace_json_artifact(
+                "demo_plans", run_id, plan.model_dump(mode="json")
+            )
+            self.repository.connection.execute(
+                "DELETE FROM workflow_steps WHERE run_id=?", (run_id,)
+            )
             self.repository.connection.commit()
-            self.repository.save_workflow_steps(run_id, [item.model_dump(mode="json") for item in plan.workflow_steps])
+            self.repository.save_workflow_steps(
+                run_id, [item.model_dump(mode="json") for item in plan.workflow_steps]
+            )
             self.repository.save_synthetic_dataset(run_id, plan.synthetic_data_plan)
         elif stage == "EXECUTION":
             trace = await self.url_generator.execute_stage(
-                run_id=run_id, url=request["url"], objective=request["objective"], artifact_root=self.artifact_root,
+                run_id=run_id,
+                url=request["url"],
+                objective=request["objective"],
+                artifact_root=self.artifact_root,
                 credential_reference=payload.get("credential_reference"),
-                cloud_production=bool(payload.get("cloud_production", payload.get("cloud_discovery", False))),
+                cloud_production=bool(
+                    payload.get("cloud_production", payload.get("cloud_discovery", False))
+                ),
             )
-            self.repository.replace_interaction_events(run_id, [item.model_dump(mode="json") for item in trace.events])
-            self.repository.record_successful_actions(request["url"], [item.model_dump(mode="json") for item in trace.events])
+            self.repository.replace_interaction_events(
+                run_id, [item.model_dump(mode="json") for item in trace.events]
+            )
+            self.repository.record_successful_actions(
+                request["url"], [item.model_dump(mode="json") for item in trace.events]
+            )
             production_session = artifacts.execution / "browserbase-session.json"
             if production_session.exists():
                 session = json.loads(production_session.read_text(encoding="utf-8"))
@@ -422,8 +512,11 @@ class DemoJobService:
                     run_id, session["provider"], session["session_id"], "CLOSED"
                 )
             self.repository.replace_json_artifact(
-                "presentation_plans", run_id,
-                json.loads((artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8")),
+                "presentation_plans",
+                run_id,
+                json.loads(
+                    (artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8")
+                ),
             )
             self._checkpoint_stage(run_id, RunStage.TRACE_READY)
         elif stage == "NARRATION":
@@ -436,19 +529,25 @@ class DemoJobService:
                 refresh_editorial=bool(payload.get("refresh_editorial", False)),
             )
             self.repository.replace_json_artifact(
-                "narration_scripts", run_id,
+                "narration_scripts",
+                run_id,
                 {
                     "schema_version": narration.get("schema_version", 1),
                     "mode": narration["mode"],
                     "timing_owner": narration.get("timing_owner", "scene"),
-                    "audience": narration.get("audience", request.get("audience", "product prospect")),
+                    "audience": narration.get(
+                        "audience", request.get("audience", "product prospect")
+                    ),
                     "audience_profile": narration.get("audience_profile", {}),
                     "script": narration["script"],
                 },
             )
             if narration["audio_path"]:
                 self.repository.save_audio_asset(
-                    run_id, narration["audio_path"], duration_seconds=audio_duration_seconds(Path(narration["audio_path"])), provider="elevenlabs"
+                    run_id,
+                    narration["audio_path"],
+                    duration_seconds=audio_duration_seconds(Path(narration["audio_path"])),
+                    provider="elevenlabs",
                 )
             self._checkpoint_stage(run_id, RunStage.NARRATION_READY)
         elif stage == "RENDER":
@@ -457,13 +556,17 @@ class DemoJobService:
                 self.repository.update_stage_job(run_id, "VIDEO_QA", status="SKIPPED")
                 self.repository.update_run(run_id, stage=RunStage.COMPLETE, status="COMPLETE")
                 return
-            output = self.url_generator.render_stage(run_id=run_id, artifact_root=self.artifact_root)
+            output = self.url_generator.render_stage(
+                run_id=run_id, artifact_root=self.artifact_root
+            )
             self.repository.save_location(run_id, "final_video", str(output))
             self.repository.save_video_render(
                 run_id,
                 str(output),
                 status="COMPLETE",
-                metadata=json.loads((artifacts.root / "render" / "status.json").read_text(encoding="utf-8")),
+                metadata=json.loads(
+                    (artifacts.root / "render" / "status.json").read_text(encoding="utf-8")
+                ),
             )
             self._checkpoint_stage(run_id, RunStage.RENDERED)
         elif stage == "VIDEO_QA":
@@ -490,13 +593,19 @@ class DemoJobService:
             started = perf_counter()
             await self._run_fixture(run_id, gate, render=render)
             self.repository.record_provider_call(
-                run_id=run_id, provider="playwright", operation="fixture_generation", status="COMPLETE",
+                run_id=run_id,
+                provider="playwright",
+                operation="fixture_generation",
+                status="COMPLETE",
                 duration_ms=int((perf_counter() - started) * 1000),
             )
             logger.info("demo_job_completed", gate=gate, status="COMPLETE")
         except Exception as error:
             self.repository.record_provider_call(
-                run_id=run_id, provider="playwright", operation="fixture_generation", status="FAILED",
+                run_id=run_id,
+                provider="playwright",
+                operation="fixture_generation",
+                status="FAILED",
                 error_code=type(error).__name__,
             )
             logger.exception("demo_job_failed", gate=gate, error_code=type(error).__name__)
@@ -509,7 +618,9 @@ class DemoJobService:
         run = self.repository.get_run(run_id)
         request = self.repository.get_request(run["request_id"])
         bind_run_context(
-            request_id=request["request_id"], project_id=request.get("project_id"), attempt_id=attempt
+            request_id=request["request_id"],
+            project_id=request.get("project_id"),
+            attempt_id=attempt,
         )
         self.repository.update_run(run_id, stage=RunStage.FEASIBILITY_CHECK, status="RUNNING")
         self.repository.update_run(run_id, stage=RunStage.DISCOVERING, status="RUNNING")
@@ -569,7 +680,9 @@ class DemoJobService:
                 # Replay into MP4. Keep the diagnostic CDP WebM separately;
                 # never register it as the deliverable browser recording.
                 "browser_recording": artifact_dir / "execution" / "browser-recording.mp4",
-                "browser_recording_diagnostic": artifact_dir / "execution" / "browser-recording.webm",
+                "browser_recording_diagnostic": artifact_dir
+                / "execution"
+                / "browser-recording.webm",
                 "playwright_trace": artifact_dir / "execution" / "playwright-trace.zip",
                 "final_video": artifact_dir / "final" / "demo.mp4",
             }.items():
@@ -661,13 +774,19 @@ class DemoJobService:
                 allow_isolated_record_creation=allow_isolated_record_creation,
             )
             self.repository.record_provider_call(
-                run_id=run_id, provider="playwright", operation="url_generation", status="COMPLETE",
+                run_id=run_id,
+                provider="playwright",
+                operation="url_generation",
+                status="COMPLETE",
                 duration_ms=int((perf_counter() - started) * 1000),
             )
             logger.info("demo_job_completed", status="COMPLETE")
         except Exception as error:
             self.repository.record_provider_call(
-                run_id=run_id, provider="playwright", operation="url_generation", status="FAILED",
+                run_id=run_id,
+                provider="playwright",
+                operation="url_generation",
+                status="FAILED",
                 error_code=type(error).__name__,
             )
             logger.exception("demo_job_failed", error_code=type(error).__name__)
@@ -739,7 +858,9 @@ class DemoJobService:
                 if "AUTH_REQUIRED" in str(error)
                 else "URL_GENERATION_FAILURE"
             )
-            self.repository.update_run(run_id, stage=RunStage.FAILED, status="FAILED", error_code=code)
+            self.repository.update_run(
+                run_id, stage=RunStage.FAILED, status="FAILED", error_code=code
+            )
             self.repository.fail_active_stage_jobs(run_id, code)
             for session_path in (
                 artifacts.root / "execution" / "browserbase-session.json",
@@ -757,7 +878,10 @@ class DemoJobService:
         audio = artifact_dir / "audio" / "narration.mp3"
         if audio.exists():
             self.repository.save_audio_asset(
-                run_id, str(audio), duration_seconds=audio_duration_seconds(audio), provider="elevenlabs"
+                run_id,
+                str(audio),
+                duration_seconds=audio_duration_seconds(audio),
+                provider="elevenlabs",
             )
         final_video = artifact_dir / "final" / "demo.mp4"
         report = artifact_dir / "qa" / "delivery-report.json"

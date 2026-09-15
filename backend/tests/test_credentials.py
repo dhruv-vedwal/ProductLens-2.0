@@ -1,7 +1,19 @@
 import pytest
-from playwright.async_api import Error as PlaywrightError
 
 from productlens.credentials.service import CredentialError, EnvironmentCredentialService
+from productlens.observability.logging import redact_prompt_text
+
+
+def test_provider_prompt_redaction_keeps_objective_shape_without_secrets():
+    prompt = (
+        "Show the account workflow for admin@example.test; password=super-secret-value "
+        "and token sk-1234567890abcdef are private."
+    )
+    redacted = redact_prompt_text(prompt)
+    assert "admin@example.test" not in redacted
+    assert "super-secret-value" not in redacted
+    assert "sk-1234567890abcdef" not in redacted
+    assert "account workflow" in redacted
 
 
 def test_credential_service_resolves_only_opaque_reference(monkeypatch):
@@ -17,10 +29,12 @@ def test_credential_service_resolves_only_opaque_reference(monkeypatch):
 @pytest.mark.asyncio
 async def test_authentication_fails_cleanly_when_login_needs_a_reference():
     class PasswordLocator:
-        async def count(self): return 1
+        async def count(self):
+            return 1
 
     class Page:
-        def locator(self, _): return PasswordLocator()
+        def locator(self, _):
+            return PasswordLocator()
 
     with pytest.raises(CredentialError, match="AUTH_REQUIRED"):
         await EnvironmentCredentialService().authenticate_if_required(Page(), None)
@@ -35,11 +49,20 @@ async def test_authentication_clears_existing_values_then_types_sequentially(mon
         def __init__(self):
             self.actions = []
 
-        async def count(self): return 1
-        async def click(self): self.actions.append("click")
-        async def press(self, value): self.actions.append(("press", value))
-        async def press_sequentially(self, value, *, delay): self.actions.append(("type", value, delay))
-        async def wait_for(self, **_kwargs): return None
+        async def count(self):
+            return 1
+
+        async def click(self):
+            self.actions.append("click")
+
+        async def press(self, value):
+            self.actions.append(("press", value))
+
+        async def press_sequentially(self, value, *, delay):
+            self.actions.append(("type", value, delay))
+
+        async def wait_for(self, **_kwargs):
+            return None
 
     username, password, submit = Locator(), Locator(), Locator()
 
@@ -51,8 +74,11 @@ async def test_authentication_clears_existing_values_then_types_sequentially(mon
                 return submit
             return username
 
-        async def wait_for_timeout(self, _milliseconds): return None
-        async def wait_for_function(self, *_args, **_kwargs): return None
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+        async def wait_for_function(self, *_args, **_kwargs):
+            return None
 
     assert await EnvironmentCredentialService().authenticate_if_required(
         Page(), "secret://productlens/demo"

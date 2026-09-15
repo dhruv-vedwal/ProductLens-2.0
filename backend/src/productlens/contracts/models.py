@@ -36,14 +36,25 @@ class AudienceProfile(BaseModel):
     """Structured viewer context shared by planning and editorial layers."""
 
     type: Literal[
-        "general_user", "sales", "recruiter", "founder", "prospect",
-        "support", "onboarding", "internal", "developer", "administrator",
-        "end_user", "buyer",
+        "general_user",
+        "sales",
+        "recruiter",
+        "founder",
+        "prospect",
+        "support",
+        "onboarding",
+        "internal",
+        "developer",
+        "administrator",
+        "end_user",
+        "buyer",
     ] = "prospect"
     priorities: list[str] = Field(default_factory=list, max_length=12)
     vocabulary: Literal["plain", "technical", "executive"] = "plain"
     depth: Literal["overview", "standard", "deep"] = "standard"
-    narration_style: Literal["conversational", "concise", "technical", "persuasive"] = "conversational"
+    narration_style: Literal["conversational", "concise", "technical", "persuasive"] = (
+        "conversational"
+    )
     workflow_preferences: list[str] = Field(default_factory=list, max_length=12)
 
 
@@ -83,6 +94,14 @@ class OperationKind(StrEnum):
     READ_VALUE = "ReadValue"
     VERIFY_STATE = "VerifyState"
     CREATE_RECORD = "CreateRecord"
+    # Universal interaction vocabulary for unfamiliar interfaces.  These are
+    # browser gestures, not product/domain actions; their semantic targets and
+    # parameters are discovered at runtime from evidence.
+    KEY_PRESS = "KeyPress"
+    HOVER = "Hover"
+    POINTER_SEQUENCE = "PointerSequence"
+    DRAG = "Drag"
+    UPLOAD = "Upload"
 
 
 class Target(BaseModel):
@@ -99,7 +118,7 @@ class Target(BaseModel):
 
 
 class Postcondition(BaseModel):
-    kind: Literal["url", "visible", "value", "test_state", "text"]
+    kind: Literal["url", "visible", "value", "test_state", "text", "changed"]
     expected: Any
     target: Target | None = None
     timeout_ms: int = Field(default=5_000, ge=1)
@@ -118,12 +137,16 @@ class SemanticOperation(BaseModel):
     # them with the semantic action prevents the later presentation layer from
     # having to guess whether an observed scroll was context, explanation or
     # proof of an outcome.
-    story_phase: Literal["establish", "explore", "explain", "demonstrate", "verify", "transition"] | None = None
+    story_phase: (
+        Literal["establish", "explore", "explain", "demonstrate", "verify", "transition"] | None
+    ) = None
     # A single verified visual beat can satisfy adjacent editorial duties
     # (for example, explore and explain the same readable card). This keeps
     # page completeness explicit without forcing a cloud browser to replay an
     # identical scroll merely to create a second trace event.
-    page_contract_phases: list[Literal["establish", "explore", "explain", "demonstrate", "verify", "transition"]] = Field(default_factory=list)
+    page_contract_phases: list[
+        Literal["establish", "explore", "explain", "demonstrate", "verify", "transition"]
+    ] = Field(default_factory=list)
     page_url: str | None = None
     evidence_refs: list[str] = Field(default_factory=list)
     # A page chapter is only complete once every selected visible content group
@@ -131,6 +154,107 @@ class SemanticOperation(BaseModel):
     # the trace so the director never has to infer coverage from route names.
     required_content_groups: list[str] = Field(default_factory=list)
     covered_content_groups: list[str] = Field(default_factory=list)
+    # Explicit policy is attached only when a runtime ActionIntent supplies
+    # one.  ``unspecified`` preserves compatibility with older validated plans
+    # whose operation kind is still checked by the planning safety policy.
+    side_effect_policy: Literal["unspecified", "read_only", "authorized_mutation", "blocked"] = (
+        "unspecified"
+    )
+
+
+class ActionIntent(BaseModel):
+    """Provider-neutral runtime gesture proposed from live UI evidence.
+
+    ``gesture`` is deliberately a small browser vocabulary.  It does not
+    encode a CRM, canvas, workflow-builder, or any other product's semantics;
+    the model supplies the observed target and expected state for this run.
+    """
+
+    schema_version: int = Field(default=1, ge=1)
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    goal: str = Field(min_length=3, max_length=240)
+    gesture: Literal[
+        "observe",
+        "click",
+        "type",
+        "key",
+        "scroll",
+        "hover",
+        "pointer_sequence",
+        "drag",
+        "upload",
+        "select",
+        "submit",
+        "wait",
+        "verify",
+    ]
+    target: Target | None = None
+    destination: Target | None = None
+    value: Any = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    expected_state: list[Postcondition] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=24)
+    side_effect_policy: Literal["read_only", "authorized_mutation", "blocked"] = "read_only"
+
+    @model_validator(mode="after")
+    def validate_gesture(self) -> ActionIntent:
+        page_key = self.gesture == "key" and self.parameters.get("scope") == "page"
+        if (
+            self.gesture
+            in {"click", "type", "key", "scroll", "hover", "drag", "upload", "select", "submit"}
+            and self.target is None
+            and not page_key
+        ):
+            raise ValueError(f"{self.gesture} gestures require a grounded target")
+        if self.gesture == "drag" and self.destination is None:
+            raise ValueError("drag gestures require a grounded destination")
+        if self.gesture == "pointer_sequence" and not self.parameters.get("points"):
+            raise ValueError("pointer_sequence gestures require observed points")
+        if self.gesture == "submit" and not self.expected_state:
+            raise ValueError("submit gestures require an evidence-backed expected state")
+        if self.gesture == "submit" and self.side_effect_policy != "authorized_mutation":
+            raise ValueError("submit gestures require explicit mutation authorization")
+        if self.side_effect_policy == "blocked" and self.gesture not in {
+            "observe",
+            "wait",
+            "verify",
+        }:
+            raise ValueError("blocked side-effect policy cannot dispatch an interaction")
+        return self
+
+    def to_operation(self) -> SemanticOperation:
+        """Compile a gesture into the universal executor contract."""
+        kind = {
+            "observe": OperationKind.READ_VALUE,
+            "click": OperationKind.CLICK,
+            "type": OperationKind.FILL_TEXT,
+            "key": OperationKind.KEY_PRESS,
+            "scroll": OperationKind.SCROLL_TO,
+            "hover": OperationKind.HOVER,
+            "pointer_sequence": OperationKind.POINTER_SEQUENCE,
+            "drag": OperationKind.DRAG,
+            "upload": OperationKind.UPLOAD,
+            "select": OperationKind.SELECT_OPTION,
+            "submit": OperationKind.SUBMIT,
+            "wait": OperationKind.WAIT_FOR_STATE,
+            "verify": OperationKind.VERIFY_STATE,
+        }[self.gesture]
+        value = self.value
+        if self.gesture == "drag":
+            value = {**self.parameters, "destination": self.destination.model_dump(mode="json")}
+        elif self.parameters:
+            value = {**self.parameters, **({"value": self.value} if self.value is not None else {})}
+        return SemanticOperation(
+            id=self.id,
+            kind=kind,
+            intent=self.goal,
+            target=self.target,
+            value=value,
+            postconditions=list(self.expected_state),
+            critical=self.side_effect_policy != "read_only",
+            side_effect_policy=self.side_effect_policy,
+            evidence_refs=list(self.evidence_refs),
+        )
 
 
 class WorkflowStep(BaseModel):
@@ -150,7 +274,22 @@ class WorkflowStep(BaseModel):
     allowed_retries: int = Field(default=1, ge=0, le=3)
     completion_criteria: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
-    page_phase: Literal["establish", "explore", "explain", "demonstrate", "verify", "transition"] | None = None
+    page_phase: (
+        Literal["establish", "explore", "explain", "demonstrate", "verify", "transition"] | None
+    ) = None
+
+
+class ReplanDecision(BaseModel):
+    """Auditable replacement for the currently failing workflow suffix."""
+
+    reason: str = Field(min_length=3, max_length=500)
+    replacement_steps: list[WorkflowStep] = Field(min_length=1, max_length=24)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=24)
+    preserve_story: bool = True
+    # The engine fills this in when persisting the decision.  A dispatched
+    # operation must never appear in its replacement list.
+    failed_operation_id: str | None = None
+    dispatched: bool = False
 
 
 class DemoPlan(BaseModel):
@@ -176,8 +315,14 @@ class DemoPlan(BaseModel):
 
     @model_validator(mode="after")
     def validate_duration_envelope(self) -> DemoPlan:
-        if not self.minimum_duration_seconds <= self.target_duration_seconds <= self.maximum_duration_seconds:
-            raise ValueError("target_duration_seconds must fall within the approved duration envelope")
+        if (
+            not self.minimum_duration_seconds
+            <= self.target_duration_seconds
+            <= self.maximum_duration_seconds
+        ):
+            raise ValueError(
+                "target_duration_seconds must fall within the approved duration envelope"
+            )
         return self
 
 
@@ -215,7 +360,9 @@ class EditorialScene(BaseModel):
     required_dwell_seconds: float = Field(ge=1.0, le=20.0)
     completion_criteria: list[str] = Field(min_length=1)
     caption_safe_zone: Literal["bottom", "top"] = "bottom"
-    story_phase: Literal["context", "enter", "explain", "demonstrate", "verify", "transition", "close"] = "explain"
+    story_phase: Literal[
+        "context", "enter", "explain", "demonstrate", "verify", "transition", "close"
+    ] = "explain"
     page_url: str | None = None
     visible_proof: list[str] = Field(default_factory=list)
     action_classification: Literal["essential", "transitional", "dead_time"] = "essential"
@@ -257,10 +404,13 @@ class NarrationSegment(BaseModel):
     end_seconds: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
-    def valid_interval(self) -> "NarrationSegment":
-        if self.start_seconds is not None and self.end_seconds is not None:
-            if self.end_seconds <= self.start_seconds:
-                raise ValueError("narration segment end must be after its start")
+    def valid_interval(self) -> NarrationSegment:
+        if (
+            self.start_seconds is not None
+            and self.end_seconds is not None
+            and self.end_seconds <= self.start_seconds
+        ):
+            raise ValueError("narration segment end must be after its start")
         return self
 
 
@@ -307,12 +457,16 @@ class InteractionEvent(BaseModel):
     # renderer needs the former; dwell and postcondition QA use the latter.
     action_at: datetime | None = None
     target: Target | None = None
+    postconditions: list[Postcondition] = Field(default_factory=list, max_length=24)
     target_rect: Rect | None = None
     viewport: Viewport | None = None
     scroll: dict[str, float] = Field(default_factory=dict)
     page_url: str | None = None
     before: dict[str, Any] = Field(default_factory=dict)
     after: dict[str, Any] = Field(default_factory=dict)
+    # Provider-neutral before/after comparison. This is an audit witness,
+    # never an instruction to replay an action.
+    state_delta: dict[str, Any] = Field(default_factory=dict)
     side_effects: list[str] = Field(default_factory=list)
     # A compact audit trail for a bounded semantic re-ground.  This is deliberately
     # evidence, rather than an instruction to replay an operation indefinitely.
@@ -320,7 +474,9 @@ class InteractionEvent(BaseModel):
     screenshot_path: str | None = None
     success: bool
     duration_ms: int = Field(ge=0)
-    page_contract_phases: list[Literal["establish", "explore", "explain", "demonstrate", "verify", "transition"]] = Field(default_factory=list)
+    page_contract_phases: list[
+        Literal["establish", "explore", "explain", "demonstrate", "verify", "transition"]
+    ] = Field(default_factory=list)
     required_content_groups: list[str] = Field(default_factory=list)
     covered_content_groups: list[str] = Field(default_factory=list)
     # Ordered scroll witnesses prove that a presentation scroll was a real
@@ -350,6 +506,17 @@ class DemoTrace(BaseModel):
     dom_snapshot_refs: list[str] = Field(default_factory=list)
     accessibility_snapshot_refs: list[str] = Field(default_factory=list)
     errors: list[dict[str, Any]] = Field(default_factory=list)
+    # Runtime plan changes are evidence, not hidden control flow.  Each entry
+    # records the failed step, whether its side effect was dispatched, and the
+    # replacement steps selected from the newly observed state.
+    replan_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    # Capability decisions are copied from discovery/planning so recovery and
+    # QA can explain which evidence-grounded interaction contract was active
+    # during production, without re-querying a provider or guessing later.
+    capability_resolutions: list[CapabilityResolution] = Field(default_factory=list, max_length=160)
+    state_snapshots: list[StateSnapshot] = Field(default_factory=list, max_length=600)
+    action_attempts: list[ActionAttempt] = Field(default_factory=list, max_length=600)
+    verification_results: list[VerificationResult] = Field(default_factory=list, max_length=600)
 
 
 class CameraDecision(BaseModel):
@@ -383,8 +550,20 @@ class QualityReport(BaseModel):
 
 
 class RepairDecision(BaseModel):
-    category: Literal["discovery", "workflow", "presentation", "execution", "narration", "video_qa", "provider", "internal", "none"]
-    action: Literal["re_render", "targeted_reexecution", "regenerate_narration", "provider_retry", "fail"]
+    category: Literal[
+        "discovery",
+        "workflow",
+        "presentation",
+        "execution",
+        "narration",
+        "video_qa",
+        "provider",
+        "internal",
+        "none",
+    ]
+    action: Literal[
+        "re_render", "targeted_reexecution", "regenerate_narration", "provider_retry", "fail"
+    ]
     reasons: list[str] = Field(default_factory=list)
     retry_from_stage: str | None = None
     retry_boundary: str | None = None
@@ -428,6 +607,134 @@ class ObservedElement(BaseModel):
     source_url: str | None = None
     actionable: bool = True
     navigation_scope: Literal["primary", "footer", "secondary", "unknown"] = "unknown"
+    # Interaction affordances observed from native/ARIA state. Keeping these
+    # as evidence avoids guessing drag/drop semantics from a product name or
+    # a hardcoded route recipe.
+    draggable: bool = False
+    dropzone: bool = False
+    shadow_host: bool = False
+
+
+class CapabilityEvidence(BaseModel):
+    """One non-secret observation supporting a runtime capability."""
+
+    id: str = Field(min_length=1, max_length=240)
+    kind: Literal["dom", "accessibility", "screenshot", "text", "geometry", "state", "network"]
+    source_url: str | None = None
+    summary: str = Field(min_length=1, max_length=420)
+    confidence: float = Field(default=0.5, ge=0, le=1)
+
+
+class RuntimeCapability(BaseModel):
+    """A product-neutral capability discovered in the current UI state.
+
+    This is deliberately not a website recipe.  It describes what the
+    observed surface can do and which generic interaction strategies may be
+    attempted; the semantic meaning is supplied by the current objective and
+    evidence, never by an application name or route.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    kind: Literal[
+        "navigate",
+        "inspect",
+        "form",
+        "modal",
+        "detail",
+        "table",
+        "drag_drop",
+        "pointer",
+        "canvas",
+        "graph",
+        "keyboard",
+        "upload",
+        "rich_text",
+        "virtualized_table",
+        "iframe",
+        "shadow_dom",
+    ]
+    purpose: str = Field(min_length=1, max_length=300)
+    source_url: str
+    targets: list[Target] = Field(default_factory=list, max_length=24)
+    strategies: list[
+        Literal[
+            "dom",
+            "accessibility",
+            "stagehand",
+            "playwright",
+            "keyboard",
+            "pointer",
+            "visual_grounding",
+            "screenshot_verification",
+        ]
+    ] = Field(default_factory=list, max_length=12)
+    evidence: list[CapabilityEvidence] = Field(default_factory=list, max_length=32)
+    expected_outcomes: list[str] = Field(default_factory=list, max_length=16)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    reversible: bool = True
+    verified: bool = False
+
+
+class CapabilityResolution(BaseModel):
+    """Auditable resolution of an intent against one observed UI state."""
+
+    schema_version: int = Field(default=1, ge=1)
+    intent: str = Field(min_length=3, max_length=300)
+    required_capabilities: list[str] = Field(default_factory=list, max_length=16)
+    candidates: list[RuntimeCapability] = Field(default_factory=list, max_length=48)
+    selected_capability_id: str | None = None
+    selected_strategy: str | None = None
+    unresolved: list[str] = Field(default_factory=list, max_length=16)
+    rationale: list[str] = Field(default_factory=list, max_length=24)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    source_url: str | None = None
+
+
+class StateSnapshot(BaseModel):
+    """A redacted observation of the browser state at one evidence boundary."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    url: str
+    title: str = ""
+    visible_text_hash: str | None = None
+    dom_hash: str | None = None
+    accessibility_hash: str | None = None
+    screenshot_ref: str | None = None
+    viewport: Viewport | None = None
+    scroll: dict[str, float] = Field(default_factory=dict)
+    loading: bool = False
+    focused_target: Target | None = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+
+
+class VerificationResult(BaseModel):
+    """Explicit postcondition verdict for one dispatched or read-only intent."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    intent_id: str
+    status: Literal["passed", "failed", "inconclusive", "skipped"]
+    expected: list[Postcondition] = Field(default_factory=list, max_length=24)
+    observed_state_id: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    reason: str = Field(default="", max_length=500)
+    checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ActionAttempt(BaseModel):
+    """Durable action lifecycle record, including retries and verification."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    intent: ActionIntent
+    dispatched: bool = False
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    completed_at: datetime | None = None
+    before_state_id: str | None = None
+    after_state_id: str | None = None
+    verification: VerificationResult | None = None
+    retry_of: str | None = None
+    error: str | None = Field(default=None, max_length=500)
 
 
 class ProductContext(BaseModel):
@@ -455,6 +762,7 @@ class ProductContext(BaseModel):
     # exploration. They remain dictionaries here to preserve resumability of
     # older discovery artifacts; new writers use ``ActionCapability`` below.
     capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    capability_resolutions: list[CapabilityResolution] = Field(default_factory=list, max_length=80)
     # Discovery records only safe read-only navigation probes. A route visit is
     # never proof that an application workflow or side effect was executed.
     exploration_actions: list[str] = Field(default_factory=list)
@@ -481,6 +789,7 @@ class ProductKnowledge(BaseModel):
     workflow_knowledge: list[CandidateDemoFlow] = Field(default_factory=list)
     form_schemas: list[FormSchema] = Field(default_factory=list)
     capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    capability_resolutions: list[CapabilityResolution] = Field(default_factory=list, max_length=160)
     interaction_patterns: list[str] = Field(default_factory=list)
     known_blockers: list[str] = Field(default_factory=list)
     successful_actions: list[dict[str, Any]] = Field(default_factory=list)
@@ -492,7 +801,9 @@ class ScenePlan(BaseModel):
     """Typed boundary between a validated workflow and the journey director."""
 
     id: str
-    story_phase: Literal["context", "enter", "explain", "demonstrate", "verify", "transition", "close"]
+    story_phase: Literal[
+        "context", "enter", "explain", "demonstrate", "verify", "transition", "close"
+    ]
     page_url: str
     evidence_refs: list[str] = Field(min_length=1)
     operation_ids: list[str] = Field(default_factory=list)
@@ -529,8 +840,13 @@ class ProductRelationship(BaseModel):
     source: str = Field(min_length=1, max_length=160)
     target: str = Field(min_length=1, max_length=160)
     relation: Literal[
-        "context_for", "configures", "depends_on", "enables",
-        "reveals", "proves", "related_to",
+        "context_for",
+        "configures",
+        "depends_on",
+        "enables",
+        "reveals",
+        "proves",
+        "related_to",
     ] = "related_to"
     source_url: str | None = None
     target_url: str | None = None
@@ -543,8 +859,14 @@ class ObjectiveSpec(BaseModel):
     raw: str
     demo_type: Literal["full_walkthrough", "feature_walkthrough", "workflow_demo"] = "workflow_demo"
     video_type: Literal[
-        "sales_demo", "feature_walkthrough", "full_tour", "onboarding",
-        "training", "changelog", "support", "portfolio",
+        "sales_demo",
+        "feature_walkthrough",
+        "full_tour",
+        "onboarding",
+        "training",
+        "changelog",
+        "support",
+        "portfolio",
     ] = "feature_walkthrough"
     audience: str = "product prospect"
     audience_profile: AudienceProfile = Field(default_factory=AudienceProfile)
@@ -606,6 +928,9 @@ class PageKnowledge(BaseModel):
     form_schemas: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
     screenshot_evidence: str | None = None
+    dom_evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    accessibility_evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    geometry_evidence_refs: list[str] = Field(default_factory=list, max_length=32)
     fingerprint: str
     inspected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -679,6 +1004,11 @@ class FormField(BaseModel):
     control_type: str
     required: bool = False
     options: list[str] = Field(default_factory=list)
+    # Relationships are discovered from live control state (for example a
+    # dependent select enabled after another field changes), never inferred
+    # from a product name or route.
+    depends_on: list[str] = Field(default_factory=list, max_length=8)
+    validation_messages: list[str] = Field(default_factory=list, max_length=8)
     confidence: float = Field(default=0.5, ge=0, le=1)
 
 
@@ -738,3 +1068,6 @@ class WorkflowProposal(BaseModel):
 # declarations stay grouped by architectural boundary above.
 ProductContext.model_rebuild()
 ProductKnowledge.model_rebuild()
+StateSnapshot.model_rebuild()
+VerificationResult.model_rebuild()
+ActionAttempt.model_rebuild()

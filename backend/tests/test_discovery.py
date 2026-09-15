@@ -15,17 +15,19 @@ from productlens.contracts.models import (
 )
 from productlens.discovery.live import (
     LiveDiscovery,
+    _bounded_page_navigation,
     _canonical_route,
     _derive_product_relationships,
-    adaptive_exploration_budget,
     _focused_relationship_evidence_complete,
     _objective_spec,
     _page_knowledge,
-    _relationship_page_roles,
     _relationship_child_controls,
+    _relationship_page_roles,
     _relationship_supporting_routes,
     _restore_missing_page_landmarks,
+    _route_depth,
     _route_objective_score,
+    adaptive_exploration_budget,
 )
 from productlens.providers.stagehand import StagehandObservation, StagehandPageAnalysis
 
@@ -55,11 +57,28 @@ def test_duration_words_do_not_break_full_walkthrough_detection():
     assert objective.demo_type == "full_walkthrough"
 
 
+def test_route_depth_treats_mounted_spa_base_as_one_primary_section():
+    assert _route_depth("https://example.test/todomvc/") == 1
+    assert _route_depth("https://example.test/todomvc/tasks") == 2
+
+
 def test_focused_editorial_scope_is_not_mistaken_for_primary_entity():
     objective = _objective_spec(
         "Create a focused, evidence-grounded feature walkthrough of the observed public product experience."
     )
     assert objective.primary_entity is None
+    assert objective.requested_features == []
+
+
+def test_page_knowledge_retains_sentence_facts_from_visible_text_when_dom_blocks_are_sparse():
+    context = ProductContext(
+        url="https://example.test/forms",
+        title="Forms",
+        application_type="demo",
+        visible_text="Forms\nComplete the profile fields to review the submitted result.",
+    )
+    page = _page_knowledge(context)
+    assert "Complete the profile fields to review the submitted result." in page.visible_facts
 
 
 def test_complete_every_primary_section_is_full_walkthrough_intent():
@@ -87,9 +106,14 @@ def test_full_tour_completeness_clause_is_not_a_fake_feature_entity():
 
 def test_objective_spec_classifies_generic_video_intent_without_making_mode_the_feature():
     assert _objective_spec("Create a sales demo of invoice export").video_type == "sales_demo"
-    assert _objective_spec("Create a training walkthrough of the task board").video_type == "training"
+    assert (
+        _objective_spec("Create a training walkthrough of the task board").video_type == "training"
+    )
     assert _objective_spec("Create a changelog video for the new release").video_type == "changelog"
-    assert _objective_spec("Give a concise product overview for a product prospect").primary_entity is None
+    assert (
+        _objective_spec("Give a concise product overview for a product prospect").primary_entity
+        is None
+    )
 
 
 def test_objective_spec_does_not_privilege_a_known_application_label():
@@ -103,15 +127,20 @@ def test_relationship_graph_grounds_requested_context_to_distinct_pages():
     )
     pages = [
         PageKnowledge(
-            url="https://example.test/settings/invoice-config", title="Invoice Configuration",
-            purpose="Invoice Configuration", visible_sections=["Rules"],
+            url="https://example.test/settings/invoice-config",
+            title="Invoice Configuration",
+            purpose="Invoice Configuration",
+            visible_sections=["Rules"],
             visible_facts=["Approval thresholds determine who reviews invoices"],
             fingerprint="config",
         ),
         PageKnowledge(
-            url="https://example.test/invoices", title="Invoices",
-            purpose="Invoice approval", visible_sections=["Approval queue"],
-            visible_facts=["Review and approve pending invoices"], fingerprint="invoices",
+            url="https://example.test/invoices",
+            title="Invoices",
+            purpose="Invoice approval",
+            visible_sections=["Approval queue"],
+            visible_facts=["Review and approve pending invoices"],
+            fingerprint="invoices",
         ),
     ]
     relationships = _derive_product_relationships(pages, objective)
@@ -152,20 +181,28 @@ def test_focused_relationship_completion_requires_the_actual_context_detail_page
         "Create a walkthrough of Invoice Management in the context of Invoice Configuration"
     )
     operational = ProductContext(
-        url="https://example.test/invoices", title="Invoices", application_type="web_application",
+        url="https://example.test/invoices",
+        title="Invoices",
+        application_type="web_application",
         visible_text="Invoice Management shows current invoices and their state.",
     )
     settings_directory = ProductContext(
-        url="https://example.test/settings", title="Settings", application_type="web_application",
+        url="https://example.test/settings",
+        title="Settings",
+        application_type="web_application",
         visible_text="Settings lists Invoice Configuration alongside unrelated account modules.",
     )
     detail = ProductContext(
-        url="https://example.test/settings/invoice-config", title="Settings", application_type="web_application",
+        url="https://example.test/settings/invoice-config",
+        title="Settings",
+        application_type="web_application",
         visible_text="Invoice Configuration defines matching and approval rules for Invoice Management.",
     )
 
     assert not _focused_relationship_evidence_complete([operational, settings_directory], objective)
-    assert _focused_relationship_evidence_complete([operational, settings_directory, detail], objective)
+    assert _focused_relationship_evidence_complete(
+        [operational, settings_directory, detail], objective
+    )
 
 
 def test_relationship_context_is_persisted_as_supporting_evidence_not_a_production_chapter():
@@ -173,21 +210,32 @@ def test_relationship_context_is_persisted_as_supporting_evidence_not_a_producti
         "Create a walkthrough of Invoice Management in the context of Invoice Configuration"
     )
     workspace = PageKnowledge(
-        url="https://example.test/invoices", title="Invoices", purpose="Invoice Management",
-        visible_sections=["Invoice queue"], visible_facts=["Review and progress customer invoices."],
+        url="https://example.test/invoices",
+        title="Invoices",
+        purpose="Invoice Management",
+        visible_sections=["Invoice queue"],
+        visible_facts=["Review and progress customer invoices."],
         fingerprint="invoices",
     )
     settings = PageKnowledge(
-        url="https://example.test/settings", title="Settings", purpose="Settings",
-        visible_sections=["Invoice Configuration"], fingerprint="settings",
+        url="https://example.test/settings",
+        title="Settings",
+        purpose="Settings",
+        visible_sections=["Invoice Configuration"],
+        fingerprint="settings",
     )
     configuration = PageKnowledge(
-        url="https://example.test/settings/invoice-configuration", title="Invoice Configuration",
-        purpose="Invoice Configuration", visible_sections=["Approval rules"],
-        visible_facts=["Invoice configuration defines invoice routing."], fingerprint="config",
+        url="https://example.test/settings/invoice-configuration",
+        title="Invoice Configuration",
+        purpose="Invoice Configuration",
+        visible_sections=["Approval rules"],
+        visible_facts=["Invoice configuration defines invoice routing."],
+        fingerprint="config",
     )
 
-    operational, supporting = _relationship_page_roles([workspace, settings, configuration], objective)
+    operational, supporting = _relationship_page_roles(
+        [workspace, settings, configuration], objective
+    )
 
     assert [page.url for page in operational] == [workspace.url]
     assert [page.url for page in supporting] == [configuration.url]
@@ -198,13 +246,20 @@ def test_explicitly_probed_in_page_configuration_is_valid_supporting_evidence():
         "Create a walkthrough of Invoice Management in the context of Invoice Configuration"
     )
     workspace = PageKnowledge(
-        url="https://example.test/invoices", title="Invoices", purpose="Invoice Management",
-        visible_sections=["Invoice queue"], fingerprint="invoices",
+        url="https://example.test/invoices",
+        title="Invoices",
+        purpose="Invoice Management",
+        visible_sections=["Invoice queue"],
+        fingerprint="invoices",
     )
     opened_panel = PageKnowledge(
-        url="https://example.test/settings", title="Settings", purpose="Invoice Configuration",
-        visible_sections=["Approval rules"], visible_facts=["Invoice Configuration routes invoices."],
-        evidence_refs=["visible_relationship_control:Invoice Configuration"], fingerprint="config-panel",
+        url="https://example.test/settings",
+        title="Settings",
+        purpose="Invoice Configuration",
+        visible_sections=["Approval rules"],
+        visible_facts=["Invoice Configuration routes invoices."],
+        evidence_refs=["visible_relationship_control:Invoice Configuration"],
+        fingerprint="config-panel",
     )
 
     operational, supporting = _relationship_page_roles([workspace, opened_panel], objective)
@@ -218,19 +273,31 @@ def test_abbreviated_route_and_short_workspace_label_keep_context_out_of_product
         "Create a walkthrough of Order Management in the context of Order Configuration"
     )
     workspace = PageKnowledge(
-        url="https://example.test/orders-v2", title="Orders", purpose="Orders",
-        visible_sections=["Orders"], fingerprint="orders",
+        url="https://example.test/orders-v2",
+        title="Orders",
+        purpose="Orders",
+        visible_sections=["Orders"],
+        fingerprint="orders",
     )
     settings = PageKnowledge(
-        url="https://example.test/settings", title="Settings", purpose="Settings",
-        visible_sections=["Order Configuration"], fingerprint="settings",
+        url="https://example.test/settings",
+        title="Settings",
+        purpose="Settings",
+        visible_sections=["Order Configuration"],
+        fingerprint="settings",
     )
     configuration = PageKnowledge(
-        url="https://example.test/settings/order-config", title="Configuration", purpose="Configuration",
-        visible_sections=["Rules"], visible_facts=["Order configuration defines routing."], fingerprint="config",
+        url="https://example.test/settings/order-config",
+        title="Configuration",
+        purpose="Configuration",
+        visible_sections=["Rules"],
+        visible_facts=["Order configuration defines routing."],
+        fingerprint="config",
     )
 
-    operational, supporting = _relationship_page_roles([workspace, settings, configuration], objective)
+    operational, supporting = _relationship_page_roles(
+        [workspace, settings, configuration], objective
+    )
 
     assert [page.url for page in operational] == [workspace.url]
     assert [page.url for page in supporting] == [configuration.url]
@@ -273,33 +340,63 @@ def test_configuration_relationship_prioritises_generic_settings_entry_then_visi
     )
     root = "https://example.test/dashboard"
     root_navigation = [
-        ObservedElement(tag="a", name="Analytics", selector="a", href="/analytics", source_url=root),
+        ObservedElement(
+            tag="a", name="Analytics", selector="a", href="/analytics", source_url=root
+        ),
         ObservedElement(tag="a", name="Settings", selector="a", href="/settings", source_url=root),
         ObservedElement(tag="a", name="Invoices", selector="a", href="/invoices", source_url=root),
     ]
 
-    assert _route_objective_score("https://example.test/settings", root_navigation, objective) > _route_objective_score(
-        "https://example.test/analytics", root_navigation, objective
-    )
-    assert _route_objective_score("https://example.test/settings", root_navigation, objective) > _route_objective_score(
-        "https://example.test/invoice-templates", root_navigation, objective
-    )
+    assert _route_objective_score(
+        "https://example.test/settings", root_navigation, objective
+    ) > _route_objective_score("https://example.test/analytics", root_navigation, objective)
+    assert _route_objective_score(
+        "https://example.test/settings", root_navigation, objective
+    ) > _route_objective_score("https://example.test/invoice-templates", root_navigation, objective)
     settings = ProductContext(
-        url="https://example.test/settings", title="Settings", application_type="web application",
+        url="https://example.test/settings",
+        title="Settings",
+        application_type="web application",
         navigation=[
-            ObservedElement(tag="a", name="Invoice Configuration", selector="a", href="/settings/invoices", source_url="https://example.test/settings"),
-            ObservedElement(tag="a", name="Profile", selector="a", href="/settings/profile", source_url="https://example.test/settings"),
-        ], confidence=1,
+            ObservedElement(
+                tag="a",
+                name="Invoice Configuration",
+                selector="a",
+                href="/settings/invoices",
+                source_url="https://example.test/settings",
+            ),
+            ObservedElement(
+                tag="a",
+                name="Profile",
+                selector="a",
+                href="/settings/profile",
+                source_url="https://example.test/settings",
+            ),
+        ],
+        confidence=1,
     )
 
-    assert _relationship_supporting_routes(settings, objective) == ["https://example.test/settings/invoices"]
-    settings_button = settings.model_copy(update={
-        "elements": [
-            ObservedElement(tag="button", name="Invoice Configuration", selector="button", source_url=settings.url),
-            ObservedElement(tag="button", name="Profile", selector="button", source_url=settings.url),
-        ]
-    })
-    assert [item.name for item in _relationship_child_controls(settings_button, objective)] == ["Invoice Configuration"]
+    assert _relationship_supporting_routes(settings, objective) == [
+        "https://example.test/settings/invoices"
+    ]
+    settings_button = settings.model_copy(
+        update={
+            "elements": [
+                ObservedElement(
+                    tag="button",
+                    name="Invoice Configuration",
+                    selector="button",
+                    source_url=settings.url,
+                ),
+                ObservedElement(
+                    tag="button", name="Profile", selector="button", source_url=settings.url
+                ),
+            ]
+        }
+    )
+    assert [item.name for item in _relationship_child_controls(settings_button, objective)] == [
+        "Invoice Configuration"
+    ]
 
 
 def test_feature_surface_precedes_supporting_settings_and_unobserved_sibling_routes():
@@ -310,26 +407,49 @@ def test_feature_surface_precedes_supporting_settings_and_unobserved_sibling_rou
     navigation = [
         ObservedElement(tag="a", name="Settings", selector="a", href="/settings", source_url=root),
         ObservedElement(tag="a", name="Leads V3", selector="a", href="/leads-v3", source_url=root),
-        ObservedElement(tag="a", name="Lead Templates", selector="a", href="/lead-templates", source_url=root),
+        ObservedElement(
+            tag="a", name="Lead Templates", selector="a", href="/lead-templates", source_url=root
+        ),
     ]
 
     lead_score = _route_objective_score("https://example.test/leads-v3", navigation, objective)
     settings_score = _route_objective_score("https://example.test/settings", navigation, objective)
-    sibling_score = _route_objective_score("https://example.test/lead-templates", navigation, objective)
+    sibling_score = _route_objective_score(
+        "https://example.test/lead-templates", navigation, objective
+    )
 
     assert lead_score > settings_score > sibling_score
 
 
 def test_page_knowledge_retains_non_secret_screenshot_evidence_reference():
     context = ProductContext(
-        url="https://example.test/", title="Example", application_type="dashboard",
+        url="https://example.test/",
+        title="Example",
+        application_type="dashboard",
         elements=[ObservedElement(tag="h1", name="Overview", selector="h1")],
-        evidence=["current DOM", "screenshot:discovery/screenshots/abc.png"], confidence=1,
+        evidence=["current DOM", "screenshot:discovery/screenshots/abc.png"],
+        confidence=1,
     )
 
     page = _page_knowledge(context)
 
     assert page.screenshot_evidence == "discovery/screenshots/abc.png"
+
+
+def test_page_knowledge_exposes_typed_dom_accessibility_and_geometry_evidence():
+    context = ProductContext(
+        url="https://example.test/editor",
+        title="Editor",
+        application_type="web_application",
+        visible_text="Editor",
+        elements=[
+            ObservedElement(tag="canvas", name="Drawing surface", selector="canvas"),
+            ObservedElement(tag="div", name="Shadow host", selector="#host", shadow_host=True),
+        ],
+    )
+    page = _page_knowledge(context)
+    assert page.dom_evidence_refs and page.accessibility_evidence_refs
+    assert any(item.startswith("geometry:") for item in page.geometry_evidence_refs)
 
 
 @pytest.mark.asyncio
@@ -343,16 +463,25 @@ async def test_stagehand_semantic_analysis_is_re_grounded_before_it_enriches_pag
             <button id='new'>Create invoice</button></main>
         """)
         current = ProductContext(
-            url=page.url, title="Workspace", application_type="web_application",
+            url=page.url,
+            title="Workspace",
+            application_type="web_application",
             visible_text="Workspace overview Active invoices Create invoice",
-            page_knowledge=[PageKnowledge(
-                url=page.url, title="Workspace", purpose="Workspace overview",
-                visible_sections=["Workspace overview"], actionable_controls=["Create invoice"],
-                fingerprint="fixture",
-            )],
+            page_knowledge=[
+                PageKnowledge(
+                    url=page.url,
+                    title="Workspace",
+                    purpose="Workspace overview",
+                    visible_sections=["Workspace overview"],
+                    actionable_controls=["Create invoice"],
+                    fingerprint="fixture",
+                )
+            ],
         )
         observation = StagehandObservation(
-            candidates=[], metrics={}, observed_url=page.url,
+            candidates=[],
+            metrics={},
+            observed_url=page.url,
             analysis=StagehandPageAnalysis(
                 visible_sections=["Active invoices", "invented KPI dashboard"],
                 meaningful_controls=["Create invoice", "Delete all invoices"],
@@ -367,7 +496,10 @@ async def test_stagehand_semantic_analysis_is_re_grounded_before_it_enriches_pag
         assert "invented KPI dashboard" not in knowledge.visible_sections
         assert "Create invoice" in knowledge.actionable_controls
         assert "Delete all invoices" not in knowledge.actionable_controls
-        assert any(item.startswith("stagehand-grounded-section:Active invoices") for item in knowledge.evidence_refs)
+        assert any(
+            item.startswith("stagehand-grounded-section:Active invoices")
+            for item in knowledge.evidence_refs
+        )
         await browser.close()
 
 
@@ -484,7 +616,19 @@ async def test_choice_probe_uses_unique_nearest_visible_field_context_when_acces
 
 def test_discovery_canonical_route_does_not_reinspect_transport_or_trailing_slash_variants():
     assert _canonical_route("http://Example.Test/") == _canonical_route("https://example.test")
-    assert _canonical_route("https://example.test/overview/?ignored=1#section") == "https://example.test/overview"
+    assert (
+        _canonical_route("https://example.test/overview/?ignored=1#section")
+        == "https://example.test/overview"
+    )
+
+
+def test_discovery_canonical_route_collapses_default_documents():
+    assert _canonical_route("https://example.test/") == _canonical_route(
+        "https://example.test/index.html"
+    )
+    assert _canonical_route("https://example.test/overview") == _canonical_route(
+        "https://example.test/overview/index.htm"
+    )
 
 
 def test_full_walkthrough_adapts_budget_to_visible_primary_sections():
@@ -493,6 +637,14 @@ def test_full_walkthrough_adapts_budget_to_visible_primary_sections():
     expanded = adaptive_exploration_budget(budget, objective, primary_route_count=8)
     assert expanded.max_pages == 9
     assert expanded.max_actions >= 36
+    assert expanded.max_time_seconds >= 180
+
+
+def test_full_walkthrough_gets_page_local_time_even_when_page_count_fits_default():
+    budget = DiscoveryBudget(max_pages=6, max_actions=24, max_model_calls=3, max_time_seconds=60)
+    objective = ObjectiveSpec(raw="complete walkthrough", demo_type="full_walkthrough")
+    expanded = adaptive_exploration_budget(budget, objective, primary_route_count=3)
+    assert expanded.max_pages == 6
     assert expanded.max_time_seconds >= 180
 
 
@@ -505,16 +657,58 @@ def test_narrow_objective_never_expands_discovery_budget():
 def test_discovery_does_not_replay_the_opening_url_after_collecting_evidence():
     source = Path("src/productlens/discovery/live.py").read_text(encoding="utf-8")
 
-    assert "page.goto(entry_url, wait_until=\"domcontentloaded\")" not in source
+    assert 'page.goto(entry_url, wait_until="domcontentloaded")' not in source
 
 
 def test_discovery_restores_role_grounded_page_landmarks_when_dense_dom_truncates_them():
     page = PageKnowledge(
-        url="https://example.test/reports", title="Reports", purpose="Reports",
-        scroll_landmarks=["Monthly report", "Export history"], fingerprint="reports",
+        url="https://example.test/reports",
+        title="Reports",
+        purpose="Reports",
+        scroll_landmarks=["Monthly report", "Export history"],
+        fingerprint="reports",
     )
     restored = _restore_missing_page_landmarks([], [page])
 
     assert [item.name for item in restored] == ["Monthly report", "Export history"]
     assert all(item.role == "heading" and item.source_url == page.url for item in restored)
     assert all(item.selector.startswith("observed-heading:") for item in restored)
+
+
+def test_navigation_evidence_keeps_controls_from_each_inspected_page():
+    """A dense page must not evict a later page's visible transition control."""
+    opening = "https://example.test/"
+    later = "https://example.test/section"
+    elements = [
+        ObservedElement(
+            tag="a",
+            name=f"Opening link {index}",
+            selector=f"a-opening-{index}",
+            href=f"/opening-{index}",
+            source_url=opening,
+        )
+        for index in range(40)
+    ]
+    elements.extend(
+        [
+            ObservedElement(
+                tag="a",
+                name="Next section",
+                selector="a-next",
+                href="/next",
+                source_url=later,
+            ),
+            ObservedElement(
+                tag="a",
+                name="Section home",
+                selector="a-home",
+                href="/",
+                source_url=later,
+            ),
+        ]
+    )
+
+    retained = _bounded_page_navigation(elements, per_page=3, maximum=20)
+
+    assert {item.source_url for item in retained} == {opening, later}
+    assert "Next section" in {item.name for item in retained}

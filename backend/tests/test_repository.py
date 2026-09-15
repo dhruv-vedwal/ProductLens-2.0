@@ -23,6 +23,9 @@ def test_request_is_idempotent_and_knowledge_versions(tmp_path: Path):
         repository.connection.execute("SELECT version FROM product_knowledge").fetchone()["version"]
         == 2
     )
+    versions = repository.knowledge_versions("example.test", limit=10)
+    assert [item["version"] for item in versions] == [2, 1]
+    assert all(item["fingerprint"] for item in versions)
 
 
 def test_repository_persists_run_evidence(tmp_path: Path):
@@ -39,9 +42,9 @@ def test_repository_persists_run_evidence(tmp_path: Path):
         == 1
     )
     assert (
-        repository.connection.execute("SELECT COUNT(*) AS count FROM interaction_events").fetchone()[
-            "count"
-        ]
+        repository.connection.execute(
+            "SELECT COUNT(*) AS count FROM interaction_events"
+        ).fetchone()["count"]
         == 1
     )
     assert (
@@ -84,15 +87,18 @@ def test_generic_run_document_ledger_mirrors_architectural_artifacts(tmp_path: P
     assert set(persisted) == set(documents)
     assert documents["objective"]["payload"] == evidence["objective.json"]
     assert documents["demo_trace"]["source_path"] == "execution/trace.json"
-    assert documents["objective_understanding"]["payload"] == evidence[
-        "discovery/objective-understanding.json"
-    ]
-    assert documents["actual_flow_storyboard"]["payload"] == evidence[
-        "presentation/actual-flow-storyboard.json"
-    ]
-    assert documents["demo_trace"]["sha256"] == hashlib.sha256(
-        (root / "execution/trace.json").read_bytes()
-    ).hexdigest()
+    assert (
+        documents["objective_understanding"]["payload"]
+        == evidence["discovery/objective-understanding.json"]
+    )
+    assert (
+        documents["actual_flow_storyboard"]["payload"]
+        == evidence["presentation/actual-flow-storyboard.json"]
+    )
+    assert (
+        documents["demo_trace"]["sha256"]
+        == hashlib.sha256((root / "execution/trace.json").read_bytes()).hexdigest()
+    )
 
     (root / "objective.json").write_text(json.dumps({"demo_type": "feature"}), encoding="utf-8")
     repository.persist_run_documents(run["id"], root)
@@ -103,7 +109,11 @@ def test_generic_run_document_ledger_mirrors_architectural_artifacts(tmp_path: P
 
 def test_understanding_preview_is_persisted_and_reused(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
-    payload = {"status": "READY", "url": "https://example.test/", "suggested_prompt": "Show reports"}
+    payload = {
+        "status": "READY",
+        "url": "https://example.test/",
+        "suggested_prompt": "Show reports",
+    }
     repository.save_understanding_preview("https://EXAMPLE.test", "show reports", payload)
     cached = repository.fresh_understanding_preview("https://example.test/", "show reports")
     assert cached == payload
@@ -167,14 +177,21 @@ def test_targeted_retry_inherits_only_predecessor_evidence(tmp_path: Path):
     repository.enqueue_job(parent["id"], "url", {"render": True})
     repository.save_json_artifact("demo_plans", parent["id"], {"objective": "Show a workflow"})
     repository.save_interaction_events(parent["id"], [{"intent": "Open dashboard"}])
-    repository.update_run(parent["id"], stage="FAILED", status="FAILED", error_code="PRESENTATION_FAILURE")
+    repository.update_run(
+        parent["id"], stage="FAILED", status="FAILED", error_code="PRESENTATION_FAILURE"
+    )
     retry = repository.create_retry_run(parent["id"], str(tmp_path))
     repository.enqueue_job(retry["id"], "url", {"render": True})
     repository.prepare_targeted_retry(retry["id"], "RENDER")
     repository.copy_run_evidence(parent["id"], retry["id"], through_stage="RENDER")
 
     assert [item["status"] for item in repository.stage_jobs(retry["id"])] == [
-        "COMPLETE", "COMPLETE", "COMPLETE", "COMPLETE", "QUEUED", "QUEUED"
+        "COMPLETE",
+        "COMPLETE",
+        "COMPLETE",
+        "COMPLETE",
+        "QUEUED",
+        "QUEUED",
     ]
     details = repository.run_details(retry["id"])
     assert details["plans"] == [{"objective": "Show a workflow"}]
@@ -201,7 +218,8 @@ def test_expired_worker_lease_requeues_only_the_running_stage(tmp_path: Path):
     assert repository.claim_job(job["id"])
     assert repository.claim_stage_job(run["id"], "DISCOVERY")
     repository.connection.execute(
-        "UPDATE generation_jobs SET claimed_at=? WHERE id=?", ("2000-01-01T00:00:00+00:00", job["id"])
+        "UPDATE generation_jobs SET claimed_at=? WHERE id=?",
+        ("2000-01-01T00:00:00+00:00", job["id"]),
     )
     repository.connection.commit()
 
@@ -231,6 +249,17 @@ def test_stage_claim_is_ordered_idempotent_and_can_resume(tmp_path: Path):
     assert repository.claim_next_stage_job()["stage"] == "EXECUTION"
 
 
+def test_stage_heartbeat_refreshes_long_running_lease(tmp_path: Path):
+    repository = RunRepository(tmp_path / "productlens.sqlite3")
+    request = repository.create_request("heartbeat-request", "https://example.test", "Inspect")
+    run = repository.create_run(request["id"], str(tmp_path))
+    repository.ensure_stage_jobs(run["id"])
+    assert repository.claim_stage_job(run["id"], "DISCOVERY")
+    assert repository.stage_job(run["id"], "DISCOVERY")["heartbeat_at"]
+    repository.heartbeat_stage_job(run["id"], "DISCOVERY")
+    assert repository.stage_job(run["id"], "DISCOVERY")["heartbeat_at"]
+
+
 def test_requests_are_scoped_to_a_studio_project(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
     project = repository.create_project("Launch demos")
@@ -246,7 +275,9 @@ def test_form_and_synthetic_evidence_are_retained_with_the_run(tmp_path: Path):
     request = repository.create_request("evidence-request", "https://example.test", "Create lead")
     run = repository.create_run(request["id"], str(tmp_path))
     repository.save_form_schema(run["id"], {"fields": [{"name": "Email"}]})
-    repository.save_synthetic_dataset(run["id"], {"generated_values": {"Email": "ada@example.test"}})
+    repository.save_synthetic_dataset(
+        run["id"], {"generated_values": {"Email": "ada@example.test"}}
+    )
     details = repository.run_details(run["id"])
     assert details["form_schemas"] == [{"fields": [{"name": "Email"}]}]
     assert details["synthetic_datasets"][0]["generated_values"]["Email"] == "ada@example.test"
@@ -256,16 +287,31 @@ def test_delivery_assets_and_provider_telemetry_are_retained_without_secrets(tmp
     repository = RunRepository(tmp_path / "productlens.sqlite3")
     request = repository.create_request("delivery-request", "https://example.test", "Create lead")
     run = repository.create_run(request["id"], str(tmp_path))
-    repository.save_audio_asset(run["id"], "runs/audio.mp3", duration_seconds=12.4, provider="elevenlabs")
-    repository.save_video_render(run["id"], "runs/demo.mp4", status="COMPLETE", metadata={"overall_score": 1})
+    repository.save_audio_asset(
+        run["id"], "runs/audio.mp3", duration_seconds=12.4, provider="elevenlabs"
+    )
+    repository.save_video_render(
+        run["id"], "runs/demo.mp4", status="COMPLETE", metadata={"overall_score": 1}
+    )
     repository.record_provider_call(
-        run_id=run["id"], provider="playwright", operation="execution", status="COMPLETE", duration_ms=50
+        run_id=run["id"],
+        provider="playwright",
+        operation="execution",
+        status="COMPLETE",
+        duration_ms=50,
     )
     details = repository.run_details(run["id"])
     assert details["audio_assets"][0]["provider"] == "elevenlabs"
     assert details["video_renders"][0]["metadata"]["overall_score"] == 1
     assert details["provider_calls"] == [
-        {"provider": "playwright", "operation": "execution", "status": "COMPLETE", "duration_ms": 50, "error_code": None, "created_at": details["provider_calls"][0]["created_at"]}
+        {
+            "provider": "playwright",
+            "operation": "execution",
+            "status": "COMPLETE",
+            "duration_ms": 50,
+            "error_code": None,
+            "created_at": details["provider_calls"][0]["created_at"],
+        }
     ]
 
 
@@ -274,8 +320,12 @@ def test_provider_call_metadata_records_model_and_cost_class_without_exposing_ke
     request = repository.create_request("provider-metadata", "https://example.test", "Inspect")
     run = repository.create_run(request["id"], str(tmp_path))
     repository.record_provider_call(
-        run_id=run["id"], provider="openrouter", operation="planning", status="COMPLETE",
-        model="configured-model", cost_class="structured",
+        run_id=run["id"],
+        provider="openrouter",
+        operation="planning",
+        status="COMPLETE",
+        model="configured-model",
+        cost_class="structured",
     )
     row = repository.connection.execute(
         "SELECT model, cost_class FROM provider_calls WHERE run_id=?", (run["id"],)
@@ -306,7 +356,11 @@ def test_product_knowledge_uses_canonical_url_keys(tmp_path: Path):
 def test_page_knowledge_is_persisted_with_its_product_version(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
     repository.upsert_knowledge("https://example.test", {"title": "Example"}, 0.8)
-    repository.upsert_page_knowledge("https://example.test", [{"url": "https://example.test/timeline", "purpose": "Career"}], confidence=0.8)
+    repository.upsert_page_knowledge(
+        "https://example.test",
+        [{"url": "https://example.test/timeline", "purpose": "Career"}],
+        confidence=0.8,
+    )
     row = repository.connection.execute("SELECT url, evidence_json FROM page_knowledge").fetchone()
     assert row["url"] == "https://example.test/timeline"
     assert __import__("json").loads(row["evidence_json"])["purpose"] == "Career"
@@ -314,12 +368,24 @@ def test_page_knowledge_is_persisted_with_its_product_version(tmp_path: Path):
 
 def test_successful_action_knowledge_is_non_secret_and_survives_discovery_refresh(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
-    repository.upsert_knowledge("https://example.test", {"relevant_routes": ["https://example.test/leads"]}, 0.9)
-    repository.record_successful_actions("https://example.test", [{
-        "kind": "Click", "intent": "Open lead", "success": True,
-        "target": {"name": "Leads", "selector": "#leads"}, "value": "must-not-be-cached",
-    }])
-    repository.upsert_knowledge("https://example.test", {"relevant_routes": ["https://example.test/leads"]}, 0.9)
+    repository.upsert_knowledge(
+        "https://example.test", {"relevant_routes": ["https://example.test/leads"]}, 0.9
+    )
+    repository.record_successful_actions(
+        "https://example.test",
+        [
+            {
+                "kind": "Click",
+                "intent": "Open lead",
+                "success": True,
+                "target": {"name": "Leads", "selector": "#leads"},
+                "value": "must-not-be-cached",
+            }
+        ],
+    )
+    repository.upsert_knowledge(
+        "https://example.test", {"relevant_routes": ["https://example.test/leads"]}, 0.9
+    )
     cached = repository.fresh_knowledge("https://example.test")
     action = cached["evidence"]["successful_actions"][0]
     assert action["target"] == {"name": "Leads", "selector": "#leads"}
@@ -371,13 +437,16 @@ def test_resume_only_requeues_recoverable_root_job(tmp_path: Path):
     request = repository.create_request("resume-run", "https://example.test", "Show product")
     run = repository.create_run(request["id"], str(tmp_path))
     job = repository.enqueue_job(run["id"], "url", {"render": True})
-    repository.connection.execute("UPDATE generation_jobs SET status='RETRYING' WHERE id=?", (job["id"],))
+    repository.connection.execute(
+        "UPDATE generation_jobs SET status='RETRYING' WHERE id=?", (job["id"],)
+    )
     repository.update_run(run["id"], stage="RETRYING", status="RETRYING")
     resumed = repository.resume_run(run["id"])
     assert resumed["status"] == "QUEUED"
     assert repository.get_run(run["id"])["status"] == "QUEUED"
     repository.update_run(run["id"], stage="FAILED", status="FAILED")
     import pytest
+
     with pytest.raises(ValueError, match="queued or recoverable"):
         repository.resume_run(run["id"])
 
@@ -396,7 +465,9 @@ def test_retention_deletes_only_empty_terminal_runs_and_invalidation_removes_pag
     assert repository.get_run(retained["id"])["id"] == retained["id"]
 
     repository.upsert_knowledge("https://example.test", {"title": "Example"}, 0.9)
-    repository.upsert_page_knowledge("https://example.test", [{"url": "https://example.test/today"}], confidence=0.9)
+    repository.upsert_page_knowledge(
+        "https://example.test", [{"url": "https://example.test/today"}], confidence=0.9
+    )
     assert repository.invalidate_knowledge("https://example.test") is True
     assert repository.fresh_knowledge("https://example.test") is None
     assert repository.connection.execute("SELECT 1 FROM page_knowledge").fetchone() is None
@@ -404,7 +475,9 @@ def test_retention_deletes_only_empty_terminal_runs_and_invalidation_removes_pag
 
 def test_retention_refuses_unregistered_filesystem_evidence(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
-    request = repository.create_request("retention-unregistered", "https://example.test", "Show product")
+    request = repository.create_request(
+        "retention-unregistered", "https://example.test", "Show product"
+    )
     run = repository.create_run(request["id"], str(tmp_path))
     repository.update_run(run["id"], stage="FAILED", status="FAILED")
     run_root = tmp_path / "runs" / run["id"]

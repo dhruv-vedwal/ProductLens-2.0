@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -12,6 +13,7 @@ from pydantic import BaseModel
 
 from productlens.observability.logging import get_logger, safe_url
 from productlens.providers.errors import ProviderError
+from productlens.providers.limits import provider_limit
 
 Schema = TypeVar("Schema", bound=BaseModel)
 logger = get_logger("productlens.providers.openrouter")
@@ -24,8 +26,13 @@ class OpenRouterProvider:
 
     def __init__(self, api_key: str, model: str, *, max_tokens: int = 3_600):
         self.api_key, self.model, self.max_tokens = api_key, model, max_tokens
+        self._request_limit = asyncio.Semaphore(provider_limit("openrouter"))
 
     async def structured(self, prompt: str, schema: type[Schema]) -> Schema:
+        async with self._request_limit:
+            return await self._structured_unbounded(prompt, schema)
+
+    async def _structured_unbounded(self, prompt: str, schema: type[Schema]) -> Schema:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -105,33 +112,40 @@ class OpenRouterVisualReviewer:
 
     def __init__(self, api_key: str, model: str):
         self.api_key, self.model = api_key, model
+        self._request_limit = threading.BoundedSemaphore(provider_limit("openrouter"))
 
     def __call__(self, packet: dict[str, Any]) -> dict[str, Any]:
         frames = packet.get("frames") if isinstance(packet.get("frames"), list) else []
-        content: list[dict[str, Any]] = [{
-            "type": "text",
-            "text": (
-                "You are a strict product-demo video reviewer. Inspect the supplied rendered frames against this "
-                "checklist: full readable product frame, no crop or blank state, caption readability and relevance, "
-                "cursor/target plausibility, purposeful zoom, and coherent scene progression. Return JSON only with "
-                "{hard_failures:string[],warnings:string[],findings:object[]}. Report only visible evidence; do not "
-                "infer hidden content or repeat webpage text. "
-                f"Run metadata: {json.dumps({key: packet.get(key) for key in ('run_id', 'sample_seconds', 'event_count', 'scene_count')})}"
-            ),
-        }]
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "You are a strict product-demo video reviewer. Inspect the supplied rendered frames against this "
+                    "checklist: full readable product frame, no crop or blank state, caption readability and relevance, "
+                    "cursor/target plausibility, purposeful zoom, and coherent scene progression. Return JSON only with "
+                    "{hard_failures:string[],warnings:string[],findings:object[]}. Report only visible evidence; do not "
+                    "infer hidden content or repeat webpage text. "
+                    f"Run metadata: {json.dumps({key: packet.get(key) for key in ('run_id', 'sample_seconds', 'event_count', 'scene_count')})}"
+                ),
+            }
+        ]
         for frame in frames[:8]:
             path = Path(str(frame.get("path", ""))) if isinstance(frame, dict) else Path()
             if not path.is_file() or path.stat().st_size == 0:
                 continue
             encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{encoded}"},
-            })
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                }
+            )
         if len(content) == 1:
             return {
-                "provider": "openrouter", "hard_failures": ["MULTIMODAL_REVIEW_FRAMES_UNAVAILABLE"],
-                "warnings": [], "findings": [],
+                "provider": "openrouter",
+                "hard_failures": ["MULTIMODAL_REVIEW_FRAMES_UNAVAILABLE"],
+                "warnings": [],
+                "findings": [],
             }
         payload: dict[str, Any] = {
             "model": self.model,
@@ -141,13 +155,18 @@ class OpenRouterVisualReviewer:
             "max_tokens": 900,
         }
         try:
-            with httpx.Client(timeout=httpx.Timeout(50.0, connect=10.0)) as client:
+            with (
+                self._request_limit,
+                httpx.Client(timeout=httpx.Timeout(50.0, connect=10.0)) as client,
+            ):
                 response = client.post(
                     self.endpoint,
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
-                        "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost:3000"),
+                        "HTTP-Referer": os.getenv(
+                            "OPENROUTER_HTTP_REFERER", "http://localhost:3000"
+                        ),
                         "X-OpenRouter-Title": os.getenv("OPENROUTER_APP_TITLE", "ProductLens 2.0"),
                     },
                     json=payload,
@@ -163,12 +182,16 @@ class OpenRouterVisualReviewer:
                 raise TypeError("visual review did not return an object")
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             return {
-                "provider": "openrouter", "hard_failures": [],
-                "warnings": [f"MULTIMODAL_REVIEW_UNAVAILABLE:{type(error).__name__}"], "findings": [],
+                "provider": "openrouter",
+                "hard_failures": [],
+                "warnings": [f"MULTIMODAL_REVIEW_UNAVAILABLE:{type(error).__name__}"],
+                "findings": [],
             }
         return {
             "provider": f"openrouter:{self.model}",
-            "hard_failures": [str(item) for item in result.get("hard_failures", []) if str(item).strip()],
+            "hard_failures": [
+                str(item) for item in result.get("hard_failures", []) if str(item).strip()
+            ],
             "warnings": [str(item) for item in result.get("warnings", []) if str(item).strip()],
             "findings": result.get("findings", []),
         }

@@ -108,10 +108,15 @@ class ObjectiveParsingProvider:
     async def structured(self, prompt: str, schema):
         assert "Interpret this demo request" in prompt
         return ObjectiveSpec(
-            raw="different text", demo_type="workflow_demo", audience="sales engineers",
-            depth="thorough", requested_features=["invoice", "reporting"],
-            primary_entity="invoice workflow", must_show=["invoice", "invented claim"],
-            exclusions=["billing"], success_criteria=["invoice outcome is visible"],
+            raw="different text",
+            demo_type="workflow_demo",
+            audience="sales engineers",
+            depth="thorough",
+            requested_features=["invoice", "reporting"],
+            primary_entity="invoice workflow",
+            must_show=["invoice", "invented claim"],
+            exclusions=["billing"],
+            success_criteria=["invoice outcome is visible"],
         )
 
 
@@ -122,9 +127,7 @@ class DefaultModeObjectiveProvider:
 
 @pytest.mark.asyncio
 async def test_model_default_cannot_downgrade_explicit_full_tour():
-    service = UrlGenerationService(
-        ProductionPlanningService(DefaultModeObjectiveProvider())
-    )
+    service = UrlGenerationService(ProductionPlanningService(DefaultModeObjectiveProvider()))
     parsed, _ = await service._understand_objective(
         "Create a complete, evidence-grounded walkthrough of every safe primary section"
     )
@@ -138,44 +141,66 @@ async def test_verified_rehearsal_is_reused_and_legacy_row_witness_is_migrated(t
     run_id = "reused-rehearsal"
     source = "https://example.test/leads"
     capability = ActionCapability(
-        kind="form", purpose="New lead", source_url=source,
+        kind="form",
+        purpose="New lead",
+        source_url=source,
         entry_target=Target(name="New lead", selector="#new-lead", source_url=source),
-        form_schema=FormSchema(source_url=source, fields=[
-            FormField(name="Phone", selector="#phone", control_type="phone", required=True),
-        ]),
+        form_schema=FormSchema(
+            source_url=source,
+            fields=[
+                FormField(name="Phone", selector="#phone", control_type="phone", required=True),
+            ],
+        ),
         submit_target=Target(name="Create lead", selector="#create", source_url=source),
     )
     _, dataset = hydrate_operations(compile_rehearsal_operations(capability), product_key=source)
     generated_phone = dataset["Phone"]
-    capability = capability.model_copy(update={
-        "verified": True,
-        "outcome_target": Target(
-            name=f"Riya Kapoor {generated_phone} Fresh Open",
-            text=f"Riya Kapoor {generated_phone} Fresh Open", source_url=source,
-        ),
-        "outcome_evidence": [f"rehearsal-visible-outcome:Riya Kapoor {generated_phone}"],
-    })
+    capability = capability.model_copy(
+        update={
+            "verified": True,
+            "outcome_target": Target(
+                name=f"Riya Kapoor {generated_phone} Fresh Open",
+                text=f"Riya Kapoor {generated_phone} Fresh Open",
+                source_url=source,
+            ),
+            "outcome_evidence": [f"rehearsal-visible-outcome:Riya Kapoor {generated_phone}"],
+        }
+    )
     context = ProductContext(
-        url=source, title="Example", application_type="dashboard",
+        url=source,
+        title="Example",
+        application_type="dashboard",
         objective=ObjectiveSpec(
-            raw="Create an isolated lead-management record", primary_entity="lead management",
-            permitted_mutations=["create_isolated_record"], safe_action_policy="authorized_side_effects",
+            raw="Create an isolated lead-management record",
+            primary_entity="lead management",
+            permitted_mutations=["create_isolated_record"],
+            safe_action_policy="authorized_side_effects",
         ),
-        page_knowledge=[PageKnowledge(url=source, title="Leads", purpose="Lead management", fingerprint="leads")],
+        page_knowledge=[
+            PageKnowledge(url=source, title="Leads", purpose="Lead management", fingerprint="leads")
+        ],
         capabilities=[capability.model_dump(mode="json")],
     )
     artifacts = RunArtifacts(tmp_path, run_id)
     artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
-    artifacts.write_json("discovery/rehearsal-attempt.json", {
-        "capability_id": capability.id, "status": "outcome_verified", "recording": "disabled",
-    })
+    artifacts.write_json(
+        "discovery/rehearsal-attempt.json",
+        {
+            "capability_id": capability.id,
+            "status": "outcome_verified",
+            "recording": "disabled",
+        },
+    )
     # This stage returns before opening Playwright. A bare instance makes any
     # accidental browser/dependency use fail instead of creating a record.
     service = UrlGenerationService.__new__(UrlGenerationService)
 
     recovered = await service.rehearsal_stage(
-        run_id=run_id, url=source, objective=context.objective.raw,
-        artifact_root=tmp_path, cloud_rehearsal=True,
+        run_id=run_id,
+        url=source,
+        objective=context.objective.raw,
+        artifact_root=tmp_path,
+        cloud_rehearsal=True,
     )
 
     migrated = ActionCapability.model_validate(recovered.capabilities[0])
@@ -200,7 +225,12 @@ async def test_direct_run_delegates_to_the_durable_stages(tmp_path: Path):
 
         async def execute_stage(self, **kwargs):
             calls.append("execution")
-            return DemoTrace(run_id="delegated", objective="test", started_at=datetime.now(UTC), outcome_verified=True)
+            return DemoTrace(
+                run_id="delegated",
+                objective="test",
+                started_at=datetime.now(UTC),
+                outcome_verified=True,
+            )
 
         async def narration_stage(self, **kwargs):
             calls.append("narration")
@@ -215,8 +245,11 @@ async def test_direct_run_delegates_to_the_durable_stages(tmp_path: Path):
 
     service = StagedOnlyService(ProductionPlanningService(EvidenceAwarePlanner()))
     trace = await service.run(
-        run_id="delegated", url="https://example.test", objective="Show settings",
-        artifact_root=tmp_path, render=True,
+        run_id="delegated",
+        url="https://example.test",
+        objective="Show settings",
+        artifact_root=tmp_path,
+        render=True,
     )
     assert trace.outcome_verified
     assert calls == ["discovery", "planning", "execution", "narration", "render", "qa"]
@@ -230,7 +263,9 @@ async def test_provider_fallback_rejects_context_without_page_local_evidence():
         application_type="dashboard",
         elements=[
             ObservedElement(tag="a", role="link", name="Today", selector="a", href="/"),
-            ObservedElement(tag="a", role="link", name="Open Week 1", selector="a", href="/weeks/01"),
+            ObservedElement(
+                tag="a", role="link", name="Open Week 1", selector="a", href="/weeks/01"
+            ),
             ObservedElement(tag="a", role="link", name="Progress", selector="a", href="/progress"),
         ],
         relevant_routes=["https://example.test/weeks/01", "https://example.test/progress"],
@@ -292,18 +327,28 @@ async def test_url_stages_execute_from_persisted_evidence_without_rendering(tmp_
     service = UrlGenerationService(ProductionPlanningService(EvidenceAwarePlanner()))
     url = file_url("gate5-discovery", "hub.html")
     context = await service.discover_stage(
-        run_id="staged-url", url=url, objective="Invite a new teammate", artifact_root=tmp_path,
+        run_id="staged-url",
+        url=url,
+        objective="Invite a new teammate",
+        artifact_root=tmp_path,
         explore_visible_routes=True,
     )
     assert context.relevant_routes
     plan = await service.plan_stage(
-        run_id="staged-url", objective="Invite a new teammate", artifact_root=tmp_path,
-        allow_external_side_effects=True, audience="admins", target_duration_seconds=90,
+        run_id="staged-url",
+        objective="Invite a new teammate",
+        artifact_root=tmp_path,
+        allow_external_side_effects=True,
+        audience="admins",
+        target_duration_seconds=90,
     )
     assert plan.workflow_steps
     assert plan.selected_workflow == "Users", plan.risk_flags
     trace = await service.execute_stage(
-        run_id="staged-url", url=url, objective="Invite a new teammate", artifact_root=tmp_path,
+        run_id="staged-url",
+        url=url,
+        objective="Invite a new teammate",
+        artifact_root=tmp_path,
     )
     narration = await service.narration_stage(run_id="staged-url", artifact_root=tmp_path)
     assert trace.outcome_verified
@@ -315,7 +360,9 @@ async def test_url_stages_execute_from_persisted_evidence_without_rendering(tmp_
 
 
 @pytest.mark.integration
-async def test_url_generation_rejects_a_short_render_that_cannot_satisfy_its_storyboard(tmp_path: Path):
+async def test_url_generation_rejects_a_short_render_that_cannot_satisfy_its_storyboard(
+    tmp_path: Path,
+):
     service = UrlGenerationService(ProductionPlanningService(EvidenceAwarePlanner()))
 
     # This integration case owns the delivery boundary, not Chromium's full
@@ -329,9 +376,24 @@ async def test_url_generation_rejects_a_short_render_that_cannot_satisfy_its_sto
         output = Path(next(argument for argument in command if str(argument).endswith(".mp4")))
         subprocess.run(
             [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30",
-                "-t", "1", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", str(output),
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=1920x1080:r=30",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                str(output),
             ],
             check=True,
             capture_output=True,
@@ -339,6 +401,7 @@ async def test_url_generation_rejects_a_short_render_that_cannot_satisfy_its_sto
         )
 
     from productlens.video import render as render_module
+
     original_segment_renderer = render_module._run_remotion_segment
     render_module._run_remotion_segment = render_intentionally_short_candidate
     with pytest.raises(RuntimeError, match="Delivery QA rejected render"):
@@ -365,9 +428,13 @@ async def test_url_generation_rejects_a_short_render_that_cannot_satisfy_its_sto
     assert (tmp_path / "runs" / "url-run" / "execution" / "trace.json").exists()
     final_video = tmp_path / "runs" / "url-run" / "final" / "demo.mp4"
     assert final_video.is_file() and final_video.stat().st_size >= 10_000
-    delivery = json.loads((tmp_path / "runs" / "url-run" / "qa" / "delivery-report.json").read_text())
+    delivery = json.loads(
+        (tmp_path / "runs" / "url-run" / "qa" / "delivery-report.json").read_text()
+    )
     assert not delivery["deliverable"]
-    assert {"RENDER_TOO_SHORT", "EDITORIAL_DURATION_BELOW_STORYBOARD_MINIMUM"}.issubset(delivery["hard_failures"])
+    assert {"RENDER_TOO_SHORT", "EDITORIAL_DURATION_BELOW_STORYBOARD_MINIMUM"}.issubset(
+        delivery["hard_failures"]
+    )
     narration = json.loads(
         (tmp_path / "runs" / "url-run" / "presentation" / "narration-script.json").read_text()
     )

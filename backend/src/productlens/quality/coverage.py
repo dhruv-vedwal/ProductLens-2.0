@@ -7,10 +7,17 @@ from productlens.contracts.models import DemoPlan, DemoTrace
 
 def _words(value: str) -> set[str]:
     aliases = {
-        "sent": "send", "sending": "send", "created": "create", "invited": "invite",
-        "explained": "explain", "explaining": "explain",
+        "sent": "send",
+        "sending": "send",
+        "created": "create",
+        "invited": "invite",
+        "explained": "explain",
+        "explaining": "explain",
     }
-    return {aliases.get(word, word.rstrip("s")) for word in __import__("re").findall(r"[a-z0-9]{3,}", value.lower())}
+    return {
+        aliases.get(word, word.rstrip("s"))
+        for word in __import__("re").findall(r"[a-z0-9]{3,}", value.lower())
+    }
 
 
 def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
@@ -41,13 +48,9 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
     # recorded video still ends on the pre-submit modal.
     outcome_visual_failures: list[str] = []
     page_state_screenshots = {
-        (
-            state.get("event_id") if isinstance(state, dict) else state.event_id
-        )
+        (state.get("event_id") if isinstance(state, dict) else state.event_id)
         for state in trace.page_states
-        if (
-            state.get("screenshot") if isinstance(state, dict) else state.screenshot
-        )
+        if (state.get("screenshot") if isinstance(state, dict) else state.screenshot)
     }
     for event in successful:
         operation = operations_by_id.get(event.operation_id)
@@ -57,7 +60,11 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
             condition.kind == "visible" and condition.target is not None
             for condition in operation.postconditions
         )
-        if requires_visible_result and not event.screenshot_path and event.id not in page_state_screenshots:
+        if (
+            requires_visible_result
+            and not event.screenshot_path
+            and event.id not in page_state_screenshots
+        ):
             outcome_visual_failures.append("VISIBLE_MUTATION_OUTCOME_NOT_CAPTURED")
             break
     # Page-complete planners express an outcome as a chapter contract rather
@@ -76,11 +83,19 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
         if key in seen_pages:
             continue
         seen_pages.add(key)
-        page_contracts.append([
-            candidate for candidate in plan.workflow_steps
+        contract_steps = [
+            candidate
+            for candidate in plan.workflow_steps
             if ((candidate.operation.page_url or "").rstrip("/") or "/") == key
-            and candidate.operation.story_phase in {"establish", "explore", "explain", "demonstrate", "verify"}
-        ])
+            and candidate.operation.story_phase
+            in {"establish", "explore", "explain", "demonstrate", "verify"}
+        ]
+        # A synthetic opening Navigate may carry the root page URL but no
+        # editorial phase. It is not a page chapter and must not consume the
+        # first expected-outcome slot; otherwise the actual first chapter can
+        # be reported missing even when every scene executed successfully.
+        if contract_steps:
+            page_contracts.append(contract_steps)
     covered = []
     for outcome_index, outcome in enumerate(plan.expected_outcomes):
         # Sparse pages can be represented by one evidence-backed state hold
@@ -90,7 +105,8 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
         # than requiring one exact editorial sentence, so a valid wording
         # change cannot turn a complete trace into a false coverage failure.
         requested_phases = {
-            phase for phase in ("establish", "explore", "explain", "demonstrate", "verify")
+            phase
+            for phase in ("establish", "explore", "explain", "demonstrate", "verify")
             if phase in outcome.casefold()
         }
         if requested_phases and outcome_index < len(page_contracts):
@@ -109,10 +125,14 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
                 covered.append(outcome)
                 continue
         if (
-            "visible content established, explored, explained, demonstrated, and verified" in outcome.lower()
+            "visible content established, explored, explained, demonstrated, and verified"
+            in outcome.lower()
             and outcome_index < len(page_contracts)
             and page_contracts[outcome_index]
-            and all(step.operation.id in successful_operation_ids for step in page_contracts[outcome_index])
+            and all(
+                step.operation.id in successful_operation_ids
+                for step in page_contracts[outcome_index]
+            )
         ):
             covered.append(outcome)
             continue
@@ -124,18 +144,27 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
         outcome_words = _words(outcome)
         if {"field", "explain"} <= outcome_words:
             form_operations = [
-                step.operation for step in plan.workflow_steps
-                if step.operation.kind.value in {
-                    "FillText", "FillEmail", "FillPhone", "SelectOption",
-                    "SelectDate", "SelectDateRange", "Check", "Uncheck",
+                step.operation
+                for step in plan.workflow_steps
+                if step.operation.kind.value
+                in {
+                    "FillText",
+                    "FillEmail",
+                    "FillPhone",
+                    "SelectOption",
+                    "SelectDate",
+                    "SelectDateRange",
+                    "Check",
+                    "Uncheck",
                 }
             ]
             opened_form = any(
-                event.kind.value == "OpenModal" and event.success
-                for event in successful
+                event.kind.value == "OpenModal" and event.success for event in successful
             )
-            if form_operations and opened_form and all(
-                operation.id in successful_operation_ids for operation in form_operations
+            if (
+                form_operations
+                and opened_form
+                and all(operation.id in successful_operation_ids for operation in form_operations)
             ):
                 covered.append(outcome)
                 continue
@@ -148,13 +177,21 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
         # the non-structural subject words against one verified event.
         subject_words = outcome_words - {"opening", "page", "section", "explore", "tab"}
         if subject_words and any(
-            subject_words <= _words(" ".join(filter(None, [
-                event.intent,
-                event.target.name if event.target else "",
-                event.target.text if event.target and event.target.text else "",
-                str(event.after.get("text", "")),
-                str(event.page_url or ""),
-            ])))
+            subject_words
+            <= _words(
+                " ".join(
+                    filter(
+                        None,
+                        [
+                            event.intent,
+                            event.target.name if event.target else "",
+                            event.target.text if event.target and event.target.text else "",
+                            str(event.after.get("text", "")),
+                            str(event.page_url or ""),
+                        ],
+                    )
+                )
+            )
             for event in successful
         ):
             covered.append(outcome)
@@ -165,13 +202,16 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
         # the same proven transition.
         if any(
             event.kind.value in {"Submit", "Click", "ApplyFilter"}
-            and bool(outcome_words & _words(" ".join([event.intent, event.target.name if event.target else ""])))
+            and bool(
+                outcome_words
+                & _words(" ".join([event.intent, event.target.name if event.target else ""]))
+            )
             for event in successful
         ):
             covered.append(outcome)
     missing = [outcome for outcome in plan.expected_outcomes if outcome not in covered]
     failures = [
-        *( ["OBJECTIVE_COVERAGE_INCOMPLETE"] if missing else []),
+        *(["OBJECTIVE_COVERAGE_INCOMPLETE"] if missing else []),
         *outcome_visual_failures,
     ]
     return {

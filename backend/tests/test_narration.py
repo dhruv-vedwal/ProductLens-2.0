@@ -3,8 +3,8 @@ from datetime import UTC, datetime
 from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
 from productlens.narration.script import (
     captions_from_audio_duration,
-    captions_from_measured_segments,
     captions_from_duration,
+    captions_from_measured_segments,
     recommended_caption_duration,
     script_from_trace,
 )
@@ -37,8 +37,20 @@ def test_narration_is_grounded_in_trace_events():
 
 def test_collection_caption_is_a_viewer_journey_not_a_raw_scroll_command():
     trace = DemoTrace(
-        run_id="collection", objective="Demo", started_at=datetime.now(UTC),
-        events=[InteractionEvent(operation_id="one", kind=OperationKind.SCROLL_TO, intent="Reveal the project collection", before={}, after={}, success=True, duration_ms=1)],
+        run_id="collection",
+        objective="Demo",
+        started_at=datetime.now(UTC),
+        events=[
+            InteractionEvent(
+                operation_id="one",
+                kind=OperationKind.SCROLL_TO,
+                intent="Reveal the project collection",
+                before={},
+                after={},
+                success=True,
+                duration_ms=1,
+            )
+        ],
     )
     assert "visible information" in script_from_trace(trace)[0]["text"]
 
@@ -58,17 +70,35 @@ def test_measured_audio_segments_own_caption_timing():
 
 def test_script_adapts_editorial_lens_to_audience():
     trace = DemoTrace(
-        run_id="audience", objective="Demo", started_at=datetime.now(UTC),
-        events=[InteractionEvent(operation_id="one", kind=OperationKind.CLICK, intent="Open details", before={}, after={}, success=True, duration_ms=1)],
+        run_id="audience",
+        objective="Demo",
+        started_at=datetime.now(UTC),
+        events=[
+            InteractionEvent(
+                operation_id="one",
+                kind=OperationKind.CLICK,
+                intent="Open details",
+                before={},
+                after={},
+                success=True,
+                duration_ms=1,
+            )
+        ],
     )
     assert "engineering context" in script_from_trace(trace, audience="recruiter")[0]["text"]
-    assert "implementation-relevant" in script_from_trace(trace, audience="technical developer")[0]["text"]
+    assert (
+        "implementation-relevant"
+        in script_from_trace(trace, audience="technical developer")[0]["text"]
+    )
 
 
 def test_recommended_caption_duration_covers_longest_equal_slice():
     script = [
         {"event_id": "one", "text": "A short line."},
-        {"event_id": "two", "text": "This deliberately longer line needs enough time for silent reading."},
+        {
+            "event_id": "two",
+            "text": "This deliberately longer line needs enough time for silent reading.",
+        },
     ]
     duration = recommended_caption_duration(script)
     captions = captions_from_duration(script, duration)

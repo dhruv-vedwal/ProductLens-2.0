@@ -23,9 +23,7 @@ from productlens.workers.broker import configure_broker
 
 def run_migrations() -> None:
     """Apply Alembic revisions before application replicas become ready."""
-    completed = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"], check=False
-    )
+    completed = subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=False)
     if completed.returncode:
         raise RuntimeError(f"alembic upgrade head failed with exit code {completed.returncode}")
 
@@ -64,7 +62,11 @@ def deployment_readiness(settings: Settings | None = None) -> dict[str, dict[str
     broker: dict[str, Any]
     if settings.worker_mode == "dramatiq":
         if not settings.broker_url:
-            broker = {"ready": False, "provider": "RabbitmqBroker", "error": "PRODUCTLENS_BROKER_URL is required"}
+            broker = {
+                "ready": False,
+                "provider": "RabbitmqBroker",
+                "error": "PRODUCTLENS_BROKER_URL is required",
+            }
         else:
             broker = probe_broker(configure_broker(settings))
     else:
@@ -72,14 +74,24 @@ def deployment_readiness(settings: Settings | None = None) -> dict[str, dict[str
 
     if settings.artifact_storage == "local":
         settings.artifact_root.mkdir(parents=True, exist_ok=True)
-        storage: dict[str, Any] = {"ready": True, "provider": "LocalArtifactStorage", "root": str(settings.artifact_root)}
+        storage: dict[str, Any] = {
+            "ready": True,
+            "provider": "LocalArtifactStorage",
+            "root": str(settings.artifact_root),
+        }
     else:
         try:
-            storage = probe_object_storage(S3ArtifactStorage(
-                bucket=settings.s3_bucket or "", prefix=settings.s3_prefix,
-                endpoint_url=settings.s3_endpoint_url, region_name=settings.s3_region,
-            ))
-        except Exception as error:  # pragma: no cover - optional boto/network dependent  # noqa: BLE001
+            storage = probe_object_storage(
+                S3ArtifactStorage(
+                    bucket=settings.s3_bucket or "",
+                    prefix=settings.s3_prefix,
+                    endpoint_url=settings.s3_endpoint_url,
+                    region_name=settings.s3_region,
+                )
+            )
+        except (
+            Exception  # noqa: BLE001
+        ) as error:  # pragma: no cover - optional boto/network dependent
             storage = {"ready": False, "provider": "S3ArtifactStorage", "error": str(error)}
     return {"database": database, "broker": broker, "object_storage": storage}
 
@@ -87,7 +99,11 @@ def deployment_readiness(settings: Settings | None = None) -> dict[str, dict[str
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare and validate a ProductLens deployment")
     parser.add_argument("--skip-migrations", action="store_true")
-    parser.add_argument("--require-ready", action="store_true", help="return non-zero unless every configured dependency is ready")
+    parser.add_argument(
+        "--require-ready",
+        action="store_true",
+        help="return non-zero unless every configured dependency is ready",
+    )
     args = parser.parse_args()
     if not args.skip_migrations:
         run_migrations()

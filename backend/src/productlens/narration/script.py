@@ -3,6 +3,33 @@ from __future__ import annotations
 from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
 
 
+def bind_opening_to_first_event(
+    script: list[dict[str, object]], trace: DemoTrace
+) -> list[dict[str, object]]:
+    """Attach a presenter welcome to the first visible product evidence.
+
+    Editorial storyboard selection may omit a low-level opening ``verify``
+    beat from narrated scenes and bind the welcome to the first navigation.
+    That leaves an unexplained silent prelude in the rendered browser footage.
+    Rebind only the opening line to the first successful trace event; no
+    operation is replayed and the approved wording/evidence remain unchanged.
+    """
+    if not script or not script[0].get("opening"):
+        return script
+    first_event = next((event for event in trace.events if event.success), None)
+    if first_event is None or str(script[0].get("event_id", "")) == first_event.id:
+        return script
+    opening = {**script[0], "event_id": first_event.id}
+    # One event owns at most one caption. If storyboard selection already
+    # included that low-level event later, retain the presenter opening as the
+    # authoritative line and remove the duplicate rather than breaking the
+    # caption/trace identity contract.
+    return [
+        opening,
+        *[line for line in script[1:] if str(line.get("event_id", "")) != first_event.id],
+    ]
+
+
 def _sentence(intent: str) -> str:
     return intent.strip().rstrip(".")[:1].lower() + intent.strip().rstrip(".")[1:]
 
@@ -15,14 +42,30 @@ def _target_name(event: InteractionEvent) -> str:
 
 def _narrative_action(event: InteractionEvent) -> str:
     target = _target_name(event)
-    value = str(event.after.get("value") or event.before.get("value") or event.target.text if event.target and event.target.text else "").strip()
+    value = str(
+        event.after.get("value") or event.before.get("value") or event.target.text
+        if event.target and event.target.text
+        else ""
+    ).strip()
     if event.kind in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}:
         return f"move into {target}, establishing its visible context before examining the meaningful details"
     if event.kind in {OperationKind.WAIT_FOR_STATE, OperationKind.VERIFY_STATE}:
-        return f"start in {target}, establishing the current workspace before following the workflow"
-    if event.kind in {OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE, OperationKind.SEARCH}:
+        return (
+            f"start in {target}, establishing the current workspace before following the workflow"
+        )
+    if event.kind in {
+        OperationKind.FILL_TEXT,
+        OperationKind.FILL_EMAIL,
+        OperationKind.FILL_PHONE,
+        OperationKind.SEARCH,
+    }:
         return f"enter the required details in {target} so the next step has the right context"
-    if event.kind in {OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE, OperationKind.SELECT_DATE_RANGE, OperationKind.CHOOSE_RADIO}:
+    if event.kind in {
+        OperationKind.SELECT_OPTION,
+        OperationKind.SELECT_DATE,
+        OperationKind.SELECT_DATE_RANGE,
+        OperationKind.CHOOSE_RADIO,
+    }:
         choice = f" {value}" if value else ""
         return f"choose{choice} in {target} to set the intended option"
     if event.kind in {OperationKind.SUBMIT, OperationKind.CREATE_RECORD}:
@@ -31,10 +74,20 @@ def _narrative_action(event: InteractionEvent) -> str:
         return f"continue through {target}, pausing on the visible information needed to understand this part of the product"
     if event.kind in {OperationKind.OPEN_MODAL, OperationKind.CLICK, OperationKind.APPLY_FILTER}:
         return f"select {target} to reveal the next part of the product story"
+    if event.kind is OperationKind.HOVER:
+        return f"pause over {target} to reveal the contextual affordance"
+    if event.kind is OperationKind.KEY_PRESS:
+        return f"use the keyboard on {target} to advance the current interaction"
+    if event.kind in {OperationKind.DRAG, OperationKind.POINTER_SEQUENCE}:
+        return "move the observed control along its visible path to demonstrate the interaction"
+    if event.kind is OperationKind.UPLOAD:
+        return f"add the selected file through {target} so the product can process the supplied material"
     return _sentence(event.intent)
 
 
-def script_from_trace(trace: DemoTrace, *, audience: str = "product prospect") -> list[dict[str, object]]:
+def script_from_trace(
+    trace: DemoTrace, *, audience: str = "product prospect"
+) -> list[dict[str, object]]:
     """Create a concise, evidence-only narrative when a writer model is unavailable.
 
     Every sentence is anchored to one successful event.  This deliberately
@@ -91,7 +144,9 @@ def captions_from_audio_duration(
     return captions_from_duration(script, duration_seconds)
 
 
-def recommended_caption_duration(script: list[dict[str, object]], *, minimum_scene_seconds: float = 2.4) -> float:
+def recommended_caption_duration(
+    script: list[dict[str, object]], *, minimum_scene_seconds: float = 2.4
+) -> float:
     """Return a readable fallback track length for caption-only delivery.
 
     Caption timing is normally replaced by verified browser-event timestamps
@@ -124,7 +179,10 @@ def recommended_caption_duration(script: list[dict[str, object]], *, minimum_sce
 
 
 def captions_from_measured_segments(
-    script: list[dict[str, object]], durations_seconds: list[float], *, starts_seconds: list[float] | None = None
+    script: list[dict[str, object]],
+    durations_seconds: list[float],
+    *,
+    starts_seconds: list[float] | None = None,
 ) -> list[dict[str, object]]:
     """Create scene captions from actual synthesized segment durations.
 

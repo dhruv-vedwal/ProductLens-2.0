@@ -85,3 +85,27 @@ def clear_run_context() -> None:
 
 def safe_url(url: str) -> str:
     return re.sub(r"[?].*$", "", url)
+
+
+def redact_prompt_text(value: str) -> str:
+    """Remove credential-like values before arbitrary text reaches a model.
+
+    Run/request payloads intentionally keep the user's original objective for
+    auditability, but provider prompts are a separate trust boundary.  This
+    helper covers common pasted credentials and contact values without trying
+    to interpret the objective or altering the durable source text.
+    """
+    text = str(value or "")
+    text = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "[redacted-email]", text)
+    text = re.sub(r"\b(?:\+?\d[\d ()-]{7,}\d)\b", "[redacted-phone]", text)
+    text = re.sub(
+        r"(?im)\b(password|passcode|otp|token|secret|api[ _-]?key|access[ _-]?key)\b"
+        r"\s*(?:is|=|:)\s*[^,;\n]+",
+        r"\1: [redacted]",
+        text,
+    )
+    # Opaque secret references are safe to retain, while raw bearer/key
+    # strings are not.  Keep this deliberately conservative: only redact
+    # obvious provider-key prefixes and long high-entropy-looking tokens.
+    text = re.sub(r"\b(?:sk|bb|xi)-[A-Za-z0-9_-]{16,}\b", "[redacted-secret]", text)
+    return text

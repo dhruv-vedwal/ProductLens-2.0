@@ -22,7 +22,13 @@ def test_live_url_delivery_requires_discovery_and_editorial_lineage(tmp_path):
 
     required = RunArtifacts(tmp_path, "url-run").required_url_delivery_artifacts()
 
-    assert {"objective", "exploration_report", "page_knowledge", "storyboard", "coverage_qa"} <= set(required)
+    assert {
+        "objective",
+        "exploration_report",
+        "page_knowledge",
+        "storyboard",
+        "coverage_qa",
+    } <= set(required)
     assert not all(required.values())
 
 

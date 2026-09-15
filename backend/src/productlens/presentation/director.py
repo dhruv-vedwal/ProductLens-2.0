@@ -30,7 +30,44 @@ def build_presentation_plan(
         if isinstance(scene, dict) and scene.get("event_id")
     }
     for event in trace.events:
-        if not event.success or event.target_rect is None:
+        if not event.success:
+            continue
+        gesture = event.after.get("gesture") if isinstance(event.after, dict) else None
+        gesture_points = gesture.get("points") if isinstance(gesture, dict) else None
+        if (
+            event.kind is OperationKind.POINTER_SEQUENCE
+            and isinstance(gesture_points, list)
+            and len(gesture_points) >= 2
+        ):
+            event_width = event.viewport.width if event.viewport else viewport_width
+            event_height = event.viewport.height if event.viewport else viewport_height
+            points = [
+                {"x": float(point.get("x", 0)), "y": float(point.get("y", 0))}
+                for point in gesture_points
+                if isinstance(point, dict)
+            ]
+            if len(points) >= 2:
+                destination = points[-1]
+                cursor_events.append(event.id)
+                cursor_paths.append(
+                    {
+                        "event_id": event.id,
+                        "source": previous_point,
+                        "destination": destination,
+                        "waypoints": points[1:-1],
+                        "travel_seconds": round(
+                            min(1.4, max(0.28, float(gesture.get("duration_ms", 450)) / 1000)), 2
+                        ),
+                        "hover_seconds": 0.12,
+                        "settle_seconds": 0.08,
+                        "easing": "linear-observed-path",
+                        "cursor_style": "productlens-pointer-v1",
+                        "click": bool(gesture.get("press") or gesture.get("release")),
+                    }
+                )
+                previous_point = destination
+            continue
+        if event.target_rect is None:
             continue
         # Geometry is authoritative per event. Cloud and local captures may
         # use different viewport sizes, and comparing a 1920px trace against
@@ -48,12 +85,22 @@ def build_presentation_plan(
         # because an arbitrary target zoom can cut product chrome, sidebars,
         # and visual effects from a real walkthrough.
         form_interaction = event.kind in {
-            OperationKind.FILL_TEXT, OperationKind.FILL_EMAIL, OperationKind.FILL_PHONE,
-            OperationKind.SELECT_OPTION, OperationKind.SELECT_DATE, OperationKind.SELECT_DATE_RANGE,
-            OperationKind.CHOOSE_RADIO, OperationKind.CHECK, OperationKind.UNCHECK,
+            OperationKind.FILL_TEXT,
+            OperationKind.FILL_EMAIL,
+            OperationKind.FILL_PHONE,
+            OperationKind.SELECT_OPTION,
+            OperationKind.SELECT_DATE,
+            OperationKind.SELECT_DATE_RANGE,
+            OperationKind.CHOOSE_RADIO,
+            OperationKind.CHECK,
+            OperationKind.UNCHECK,
         }
         scene = scene_by_event.get(event.id)
-        scene_camera = scene.get("camera") if isinstance(scene, dict) and isinstance(scene.get("camera"), dict) else {}
+        scene_camera = (
+            scene.get("camera")
+            if isinstance(scene, dict) and isinstance(scene.get("camera"), dict)
+            else {}
+        )
         requested_zoom = scene_camera.get("zoom")
         try:
             requested_zoom = float(requested_zoom) if requested_zoom is not None else None
@@ -62,7 +109,9 @@ def build_presentation_plan(
         # Geometry captured from a responsive/other viewport must never drive
         # a camera move outside the recording's readable canvas.
         target_in_view = (
-            rect.x >= 0 and rect.y >= 0 and rect.x + rect.width <= event_width
+            rect.x >= 0
+            and rect.y >= 0
+            and rect.x + rect.width <= event_width
             and rect.y + rect.height <= event_height
         )
         # Non-form clicks receive focus only when the validated scene plan
@@ -77,20 +126,53 @@ def build_presentation_plan(
         center_x = (rect.x + rect.width / 2) / max(event_width, 1)
         center_y = (rect.y + rect.height / 2) / max(event_height, 1)
         edge_proximity = min(center_x, 1 - center_x, center_y, 1 - center_y)
-        # Keep the capture's full browser frame readable. Form controls get a
-        # restrained target focus, while ordinary content never exceeds the
-        # presentation QA ceiling. The scene request can lower this value but
-        # cannot push it beyond the safe bound.
-        max_safe_zoom = 1.16 if form_interaction else (1.12 if edge_proximity < 0.12 else 1.18)
-        if allow_camera_zoom and scene_allows_focus and target_in_view and requested_zoom is not None:
+        # Derive focus from the observed target instead of using one global
+        # zoom number. Small inputs need a readable height at 1080p, while a
+        # large content region should remain native. Edge targets receive a
+        # lower bound because a close reframe would hide their surrounding
+        # context. The renderer and QA layer share the 1.36 ceiling.
+        readable_width = 220.0 if form_interaction else 180.0
+        readable_height = 62.0 if form_interaction else 54.0
+        geometry_zoom = max(
+            readable_width / max(rect.width, 1.0),
+            readable_height / max(rect.height, 1.0),
+            1.0,
+        )
+        edge_cap = 1.18 if edge_proximity < 0.12 else 1.28 if edge_proximity < 0.2 else 1.36
+        max_safe_zoom = min(1.36, edge_cap, geometry_zoom)
+        if (
+            allow_camera_zoom
+            and scene_allows_focus
+            and target_in_view
+            and requested_zoom is not None
+        ):
             zoom = min(max_safe_zoom, max(1.0, requested_zoom))
             reason = "scene-requested target emphasis constrained by target-to-frame safety bounds"
         elif allow_camera_zoom and form_interaction and scene_allows_focus and target_in_view:
-            zoom, reason = min(1.14, max_safe_zoom), "form control receives a restrained target-local focus while surrounding context remains visible"
-        elif allow_camera_zoom and scene_camera.get("mode") == "target-focus" and target_in_view and (rect.width < 96 or rect.height < 30):
-            zoom, reason = min(1.20, max_safe_zoom), "small target receives restrained cinematic emphasis"
-        elif allow_camera_zoom and scene_camera.get("mode") == "target-focus" and target_in_view and small_target:
-            zoom, reason = min(1.14, max_safe_zoom), "compact target receives restrained cinematic emphasis"
+            zoom, reason = (
+                max_safe_zoom,
+                "form control receives geometry-derived target-local focus while surrounding context remains visible",
+            )
+        elif (
+            allow_camera_zoom
+            and scene_camera.get("mode") == "target-focus"
+            and target_in_view
+            and (rect.width < 96 or rect.height < 30)
+        ):
+            zoom, reason = (
+                max_safe_zoom,
+                "small target receives geometry-derived cinematic emphasis",
+            )
+        elif (
+            allow_camera_zoom
+            and scene_camera.get("mode") == "target-focus"
+            and target_in_view
+            and small_target
+        ):
+            zoom, reason = (
+                max_safe_zoom,
+                "compact target receives geometry-derived cinematic emphasis",
+            )
         else:
             zoom, reason = 1.0, "native browser scale; no scene-local focus justification"
         if off_center:
@@ -105,12 +187,49 @@ def build_presentation_plan(
             continue
         cursor_events.append(event.id)
         destination = {"x": rect.x + rect.width / 2, "y": rect.y + rect.height / 2}
-        distance = ((destination["x"] - previous_point["x"]) ** 2 + (destination["y"] - previous_point["y"]) ** 2) ** 0.5
+        if event.kind is OperationKind.DRAG and isinstance(gesture, dict):
+            source = gesture.get("source")
+            drag_destination = gesture.get("destination")
+            if isinstance(source, dict) and isinstance(drag_destination, dict):
+                source_point = {
+                    "x": float(source.get("x", destination["x"])),
+                    "y": float(source.get("y", destination["y"])),
+                }
+                destination = {
+                    "x": float(drag_destination.get("x", destination["x"])),
+                    "y": float(drag_destination.get("y", destination["y"])),
+                }
+                cursor_paths.append(
+                    {
+                        "event_id": event.id,
+                        "source": previous_point,
+                        "destination": destination,
+                        "waypoints": [source_point],
+                        "travel_seconds": round(
+                            min(1.5, max(0.3, float(gesture.get("duration_ms", 700)) / 1000)), 2
+                        ),
+                        "hover_seconds": 0.2,
+                        "settle_seconds": 0.12,
+                        "easing": "out-cubic-observed-drag",
+                        "cursor_style": "productlens-pointer-v1",
+                        "click": False,
+                        "drag": True,
+                    }
+                )
+                previous_point = destination
+                continue
+        distance = (
+            (destination["x"] - previous_point["x"]) ** 2
+            + (destination["y"] - previous_point["y"]) ** 2
+        ) ** 0.5
         # A slight perpendicular waypoint prevents cursor motion from looking
         # like a robotic straight-line teleport.  It is bounded to the browser
         # viewport and is only decorative: the final point remains the exact
         # geometry captured at action dispatch.
-        midpoint = {"x": (previous_point["x"] + destination["x"]) / 2, "y": (previous_point["y"] + destination["y"]) / 2}
+        midpoint = {
+            "x": (previous_point["x"] + destination["x"]) / 2,
+            "y": (previous_point["y"] + destination["y"]) / 2,
+        }
         dx, dy = destination["x"] - previous_point["x"], destination["y"] - previous_point["y"]
         length = max(distance, 1.0)
         bend = min(42.0, max(10.0, distance * 0.08))
@@ -118,19 +237,36 @@ def build_presentation_plan(
             "x": round(min(event_width, max(0.0, midpoint["x"] - dy / length * bend)), 2),
             "y": round(min(event_height, max(0.0, midpoint["y"] + dx / length * bend)), 2),
         }
-        cursor_paths.append({
-            "event_id": event.id,
-            "source": previous_point,
-            "destination": destination,
-            "travel_seconds": round(min(0.8, max(0.22, distance / 1300)), 2),
-            "hover_seconds": 0.25,
-            "settle_seconds": 0.18,
-            "waypoints": [waypoint],
-            "easing": "out-cubic",
-            "cursor_style": "productlens-pointer-v1",
-            "click": event.kind.value in {"Click", "OpenNavigationItem", "OpenModal", "CloseModal", "Submit", "ApplyFilter", "Check", "Uncheck", "ChooseRadio", "SelectOption"},
-        })
+        cursor_paths.append(
+            {
+                "event_id": event.id,
+                "source": previous_point,
+                "destination": destination,
+                "travel_seconds": round(min(0.8, max(0.22, distance / 1300)), 2),
+                "hover_seconds": 0.25,
+                "settle_seconds": 0.18,
+                "waypoints": [waypoint],
+                "easing": "out-cubic",
+                "cursor_style": "productlens-pointer-v1",
+                "click": event.kind.value
+                in {
+                    "Click",
+                    "OpenNavigationItem",
+                    "OpenModal",
+                    "CloseModal",
+                    "Submit",
+                    "ApplyFilter",
+                    "Check",
+                    "Uncheck",
+                    "ChooseRadio",
+                    "SelectOption",
+                },
+            }
+        )
         previous_point = destination
     return PresentationPlan(
-        trace_run_id=trace.run_id, camera=camera, cursor_event_ids=cursor_events, cursor_paths=cursor_paths
+        trace_run_id=trace.run_id,
+        camera=camera,
+        cursor_event_ids=cursor_events,
+        cursor_paths=cursor_paths,
     )

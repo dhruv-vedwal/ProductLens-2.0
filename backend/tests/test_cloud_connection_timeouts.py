@@ -12,7 +12,8 @@ from productlens.services.generation import UrlGenerationService
 def test_every_cloud_cdp_connection_has_a_native_playwright_timeout():
     source = Path("src/productlens/services/generation.py").read_text(encoding="utf-8")
     calls = [
-        node for node in ast.walk(ast.parse(source))
+        node
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "connect_over_cdp"
@@ -25,7 +26,8 @@ def test_cloud_discovery_bounds_viewport_navigation_and_authentication_before_ex
     source = Path("src/productlens/services/generation.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     bounded_calls = [
-        node for node in ast.walk(tree)
+        node
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "wait_for"
@@ -52,21 +54,55 @@ def test_cloud_discovery_bounds_cdp_and_provider_teardown_after_a_failure():
     assert "self.browserbase_provider.close_session" in bounded_source
 
 
+def test_cloud_replay_assembly_uses_the_configured_capture_deadline():
+    source = Path("src/productlens/services/generation.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "download_session_replay_video"
+    ]
+    assert calls
+    replay_keywords = [
+        keyword for call in calls for keyword in call.keywords if keyword.arg == "timeout_seconds"
+    ]
+    assert replay_keywords
+    # Successful captures use the configured lease deadline. Interrupted
+    # captures deliberately use a short cleanup bound so a failed run does
+    # not consume another full Browserbase lease while waiting for replay.
+    assert "cloud_capture_timeout_seconds" in source
+    assert "min(120, self.cloud_capture_timeout_seconds)" in source
+    assert any(
+        isinstance(node, ast.Name) and node.id == "replay_timeout_seconds"
+        for keyword in replay_keywords
+        for node in ast.walk(keyword.value)
+    )
+
+
 @pytest.mark.asyncio
 async def test_cloud_lease_guard_releases_session_outside_the_cdp_operation():
     class Provider:
-        released: list[str] = []
+        released: list[str]
+
+        def __init__(self) -> None:
+            self.released = []
 
         async def close_session(self, session_id: str) -> None:
             self.released.append(session_id)
 
     provider = Provider()
     service = UrlGenerationService(
-        ProductionPlanningService(None), browserbase_provider=provider,
+        ProductionPlanningService(None),
+        browserbase_provider=provider,
     )
 
     await service._release_cloud_session_after(
-        "session-1", seconds=0, reason="test", run_id="run-1",
+        "session-1",
+        seconds=0,
+        reason="test",
+        run_id="run-1",
     )
 
     assert provider.released == ["session-1"]

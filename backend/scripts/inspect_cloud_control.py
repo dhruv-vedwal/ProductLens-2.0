@@ -19,7 +19,9 @@ from productlens.providers.browserbase import BrowserbaseProvider
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Inspect a visible Browserbase control without interacting")
+    parser = argparse.ArgumentParser(
+        description="Inspect a visible Browserbase control without interacting"
+    )
     parser.add_argument("--url", required=True)
     parser.add_argument("--control", required=True)
     parser.add_argument("--credential-reference")
@@ -45,7 +47,9 @@ async def inspect(args: argparse.Namespace) -> dict[str, object]:
             page = context.pages[0] if context.pages else await context.new_page()
             await page.set_viewport_size({"width": 1440, "height": 900})
             await page.goto(args.url, wait_until="domcontentloaded")
-            authenticated = await credentials.authenticate_if_required(page, args.credential_reference)
+            authenticated = await credentials.authenticate_if_required(
+                page, args.credential_reference
+            )
             if authenticated and page.url.rstrip("/") != args.url.rstrip("/"):
                 await page.goto(args.url, wait_until="domcontentloaded")
             await page.wait_for_timeout(1_500)
@@ -78,14 +82,16 @@ async def inspect(args: argparse.Namespace) -> dict[str, object]:
                         }""",
                         {"x": box["x"] + box["width"] / 2, "y": box["y"] + box["height"] / 2},
                     )
-                items.append({
-                    "index": index,
-                    "visible": await target.is_visible(),
-                    "enabled": await target.is_enabled(),
-                    "box": box,
-                    "details": details,
-                    "covering_element": covering,
-                })
+                items.append(
+                    {
+                        "index": index,
+                        "visible": await target.is_visible(),
+                        "enabled": await target.is_enabled(),
+                        "box": box,
+                        "details": details,
+                        "covering_element": covering,
+                    }
+                )
             return {"url": page.url, "control": args.control, "count": len(items), "items": items}
         finally:
             if remote is not None:

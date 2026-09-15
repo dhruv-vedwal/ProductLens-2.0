@@ -25,8 +25,12 @@ def main() -> None:
     parser.add_argument("--artifact-root", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--target-duration-seconds", type=int)
-    parser.add_argument("--verify", action="store_true", help="Run provider-free delivery QA after rendering")
-    parser.add_argument("--verify-only", action="store_true", help="Run provider-free delivery QA without rendering")
+    parser.add_argument(
+        "--verify", action="store_true", help="Run provider-free delivery QA after rendering"
+    )
+    parser.add_argument(
+        "--verify-only", action="store_true", help="Run provider-free delivery QA without rendering"
+    )
     parser.add_argument(
         "--refresh-editorial",
         action="store_true",
@@ -64,15 +68,23 @@ def main() -> None:
     if args.verify_only and args.refresh_editorial:
         parser.error("--refresh-editorial cannot be used with --verify-only")
     if args.refresh_editorial_only and (
-        args.verify or args.verify_only or args.refresh_editorial or args.refresh_journey or args.materialize_captions
+        args.verify
+        or args.verify_only
+        or args.refresh_editorial
+        or args.refresh_journey
+        or args.materialize_captions
     ):
-        parser.error("--refresh-editorial-only cannot be combined with render or verification flags")
+        parser.error(
+            "--refresh-editorial-only cannot be combined with render or verification flags"
+        )
     if args.refresh_editorial or args.refresh_editorial_only or args.materialize_captions:
         from productlens.services.runtime import build_job_service
 
         _, job_service = build_job_service()
         if job_service.url_generator is None:
-            parser.error("An OpenRouter-configured generation service is required to refresh editorial copy")
+            parser.error(
+                "An OpenRouter-configured generation service is required to refresh editorial copy"
+            )
         asyncio.run(
             job_service.url_generator.narration_stage(
                 run_id=args.run_id,
@@ -91,7 +103,9 @@ def main() -> None:
         # intent are aligned with the final approved storyboard.
         storyboard_path = artifacts.presentation / "storyboard.json"
         storyboard = (
-            EditorialStoryboard.model_validate(json.loads(storyboard_path.read_text(encoding="utf-8")))
+            EditorialStoryboard.model_validate(
+                json.loads(storyboard_path.read_text(encoding="utf-8"))
+            )
             if storyboard_path.exists()
             else None
         )
@@ -99,9 +113,13 @@ def main() -> None:
         scene_report = inspect_scene_plan(trace, scenes)
         if scene_report["hard_failures"]:
             raise RuntimeError(f"Scene-plan repair rejected trace: {scene_report['hard_failures']}")
-        viewport = ViewportDecision.model_validate(json.loads(
-            (artifacts.root / "discovery" / "viewport-decision.json").read_text(encoding="utf-8")
-        ))
+        viewport = ViewportDecision.model_validate(
+            json.loads(
+                (artifacts.root / "discovery" / "viewport-decision.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        )
         presentation = build_presentation_plan(
             trace,
             viewport_width=viewport.viewport.width,
@@ -114,13 +132,17 @@ def main() -> None:
         if journey_report["hard_failures"]:
             raise RuntimeError(f"Journey repair rejected trace: {journey_report['hard_failures']}")
         artifacts.write_json("presentation/scene-plan.json", scenes)
-        artifacts.write_json("presentation/presentation-plan.json", presentation.model_dump(mode="json"))
+        artifacts.write_json(
+            "presentation/presentation-plan.json", presentation.model_dump(mode="json")
+        )
         artifacts.write_json("presentation/validated-scene-plan.json", journey)
         artifacts.write_json("presentation/cursor-plan.json", {"paths": presentation.cursor_paths})
         artifacts.write_json("qa/journey-report.json", journey_report)
     else:
         presentation = PresentationPlan.model_validate(
-            json.loads((artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8"))
+            json.loads(
+                (artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8")
+            )
         )
     # Always pass the validated scene contract to Remotion.  The old
     # trace-only path rendered with an empty ``scenes`` array, so captions
@@ -132,9 +154,13 @@ def main() -> None:
         scenes = json.loads(scenes_path.read_text(encoding="utf-8"))
     else:
         scene_plan_path = artifacts.presentation / "scene-plan.json"
-        scenes = json.loads(scene_plan_path.read_text(encoding="utf-8")) if scene_plan_path.exists() else build_scene_plan(trace)
+        scenes = (
+            json.loads(scene_plan_path.read_text(encoding="utf-8"))
+            if scene_plan_path.exists()
+            else build_scene_plan(trace)
+        )
     if not isinstance(scenes, list):
-        raise RuntimeError("validated scene plan must be a list")
+        raise TypeError("validated scene plan must be a list")
     storyboard_path = artifacts.presentation / "storyboard.json"
     storyboard = (
         EditorialStoryboard.model_validate(json.loads(storyboard_path.read_text(encoding="utf-8")))
@@ -159,7 +185,9 @@ def main() -> None:
                 plan_payload = loaded
                 break
     target_duration = args.target_duration_seconds
-    if target_duration is None and isinstance(plan_payload.get("target_duration_seconds"), (int, float)):
+    if target_duration is None and isinstance(
+        plan_payload.get("target_duration_seconds"), (int, float)
+    ):
         target_duration = int(plan_payload["target_duration_seconds"])
     maximum_duration = plan_payload.get("maximum_duration_seconds")
     if not isinstance(maximum_duration, (int, float)):
@@ -174,7 +202,9 @@ def main() -> None:
             captions=captions,
             scenes=scenes,
             target_duration_seconds=target_duration,
-            maximum_duration_seconds=(int(maximum_duration) if maximum_duration is not None else None),
+            maximum_duration_seconds=(
+                int(maximum_duration) if maximum_duration is not None else None
+            ),
             storyboard=storyboard,
         )
     if args.verify or args.verify_only:
@@ -182,7 +212,9 @@ def main() -> None:
         # It never opens a browser or calls a model/provider.
         from productlens.services.generation import UrlGenerationService
 
-        report = UrlGenerationService(None).qa_stage(run_id=args.run_id, artifact_root=artifact_root)
+        report = UrlGenerationService(None).qa_stage(
+            run_id=args.run_id, artifact_root=artifact_root
+        )
         if not report["deliverable"]:
             raise RuntimeError(f"Re-render delivery QA rejected output: {report['hard_failures']}")
         # Standalone repairs run outside the worker's stage loop. Persist the

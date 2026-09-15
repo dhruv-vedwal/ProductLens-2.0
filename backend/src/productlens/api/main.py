@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 from productlens.artifacts.store import RunArtifacts
@@ -32,11 +33,18 @@ settings = Settings.from_environment()
 repository, jobs = build_job_service(settings)
 for provider_type, name, configured, reference in (
     ("llm", "openrouter", bool(settings.openrouter_api_key), "env://OPENROUTER_API_KEY"),
-    ("tts", "elevenlabs", bool(settings.elevenlabs_api_key) and not settings.caption_only, "env://ELEVENLABS_API_KEY"),
+    (
+        "tts",
+        "elevenlabs",
+        bool(settings.elevenlabs_api_key) and not settings.caption_only,
+        "env://ELEVENLABS_API_KEY",
+    ),
     ("browser", "browserbase", bool(settings.browserbase_api_key), "env://BROWSERBASE_API_KEY"),
-    # Stagehand uses the same Browserbase key and Model Gateway by default;
-    # STAGEHAND_MODEL only overrides the selected gateway model.
-    ("browser", "stagehand", bool(settings.browserbase_api_key), "env://BROWSERBASE_API_KEY"),
+    # Stagehand uses the same Browserbase key in cloud mode and Model Gateway
+    # in both modes.  Its local browser mode does not require Browserbase, so
+    # advertise it whenever an LLM is configured; cloud readiness remains
+    # visible through the separate Browserbase provider row.
+    ("browser", "stagehand", bool(settings.openrouter_api_key), "env://OPENROUTER_API_KEY"),
 ):
     repository.upsert_provider_config(
         provider_type=provider_type,
@@ -52,11 +60,20 @@ preflight_service = PreflightService(
     repository=repository,
 )
 app = FastAPI(title="ProductLens 2.0 Generation Engine")
+
+
+def resolve_cloud_discovery(requested: bool | None, *, browserbase_configured: bool) -> bool:
+    """Resolve the capability-aware cloud default at the API boundary."""
+    return browserbase_configured if requested is None else requested
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000", "http://localhost:3001",
-        "http://127.0.0.1:3000", "http://127.0.0.1:3001",
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
     ],
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
@@ -89,13 +106,20 @@ class GenerationRequest(BaseModel):
     # Explicitly narrower than external side effects: permits a discovered
     # isolated demo record only after workflow/outcome validation.
     allow_isolated_record_creation: bool = False
-    cloud_discovery: bool = False
+    # ``None`` means capability-aware default: use the configured
+    # Browserbase+Stagehand exploration path, while keeping local development
+    # viable when no cloud browser credentials are present. An explicit false
+    # remains an opt-out for deterministic local fixture work.
+    cloud_discovery: bool | None = None
     max_pages: int = Field(default=6, ge=1, le=12)
     render: bool = True
     project_id: str | None = None
     credential_reference: str | None = None
     audience: str = Field(default="product prospect", min_length=2, max_length=120)
-    target_duration_seconds: int = Field(default=120, ge=30, le=300)
+    # The duration is an editorial target/minimum, not a renderer stretch
+    # instruction. Keep the API envelope aligned with ObjectiveSpec/DemoPlan
+    # so a legitimately detailed product story is not rejected at 5 minutes.
+    target_duration_seconds: int = Field(default=120, ge=30, le=600)
 
     @field_validator("credential_reference")
     @classmethod
@@ -153,8 +177,10 @@ class RetryRequest(BaseModel):
     render: bool | None = None
     credential_reference: str | None = None
     audience: str | None = Field(default=None, min_length=2, max_length=120)
-    target_duration_seconds: int | None = Field(default=None, ge=30, le=300)
-    retry_from_stage: Literal["PLANNING", "EXECUTION", "NARRATION", "RENDER", "VIDEO_QA"] | None = None
+    target_duration_seconds: int | None = Field(default=None, ge=30, le=600)
+    retry_from_stage: Literal["PLANNING", "EXECUTION", "NARRATION", "RENDER", "VIDEO_QA"] | None = (
+        None
+    )
 
     @field_validator("credential_reference")
     @classmethod
@@ -174,17 +200,25 @@ class KnowledgeInvalidationRequest(BaseModel):
 
 def public_user(user: dict) -> dict[str, str | None]:
     return {
-        "id": user["id"], "email": user["email"], "display_name": user.get("display_name"),
+        "id": user["id"],
+        "email": user["email"],
+        "display_name": user.get("display_name"),
         "theme_preference": user.get("theme_preference") or "system",
     }
 
 
 def current_user(authorization: str | None = Header(default=None)) -> dict:
     if not settings.auth_required:
-        return {"id": "local-studio", "email": "local@productlens.invalid", "display_name": "Local Studio"}
+        return {
+            "id": "local-studio",
+            "email": "local@productlens.invalid",
+            "display_name": "Local Studio",
+        }
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="sign in to access your ProductLens workspace")
-    claims = decode_access_token(authorization.removeprefix("Bearer ").strip(), settings.auth_secret)
+    claims = decode_access_token(
+        authorization.removeprefix("Bearer ").strip(), settings.auth_secret
+    )
     if not claims or not repository.active_session(claims["sid"], claims["sub"]):
         raise HTTPException(status_code=401, detail="your session has expired; sign in again")
     try:
@@ -198,10 +232,14 @@ def issue_session(user: dict) -> dict[str, object]:
     session = repository.create_session(user["id"], expires_at.isoformat())
     return {
         "access_token": create_access_token(
-            user_id=user["id"], session_id=session["id"], secret=settings.auth_secret,
+            user_id=user["id"],
+            session_id=session["id"],
+            secret=settings.auth_secret,
             ttl_seconds=settings.session_ttl_seconds,
         ),
-        "token_type": "bearer", "expires_at": expires_at.isoformat(), "user": public_user(user),
+        "token_type": "bearer",
+        "expires_at": expires_at.isoformat(),
+        "user": public_user(user),
     }
 
 
@@ -209,7 +247,9 @@ def issue_session(user: dict) -> dict[str, object]:
 def signup(payload: SignupRequest) -> dict[str, object]:
     try:
         user = repository.create_user(
-            email=payload.email, password_hash=hash_password(payload.password), display_name=payload.display_name
+            email=payload.email,
+            password_hash=hash_password(payload.password),
+            display_name=payload.display_name,
         )
         repository.ensure_user_project(user["id"])
         return issue_session(user)
@@ -231,16 +271,24 @@ def me(user: dict = Depends(current_user)) -> dict[str, str | None]:
 
 
 @app.post("/auth/logout", status_code=204)
-def logout(authorization: str | None = Header(default=None), user: dict = Depends(current_user)) -> None:
+def logout(
+    authorization: str | None = Header(default=None), user: dict = Depends(current_user)
+) -> None:
     if authorization:
-        claims = decode_access_token(authorization.removeprefix("Bearer ").strip(), settings.auth_secret)
+        claims = decode_access_token(
+            authorization.removeprefix("Bearer ").strip(), settings.auth_secret
+        )
         if claims:
             repository.revoke_session(claims["sid"], user["id"])
 
 
 @app.patch("/auth/preferences")
-def preferences(payload: PreferenceRequest, user: dict = Depends(current_user)) -> dict[str, str | None]:
-    return public_user(repository.update_user_preferences(user["id"], theme_preference=payload.theme_preference))
+def preferences(
+    payload: PreferenceRequest, user: dict = Depends(current_user)
+) -> dict[str, str | None]:
+    return public_user(
+        repository.update_user_preferences(user["id"], theme_preference=payload.theme_preference)
+    )
 
 
 @app.get("/health")
@@ -276,7 +324,9 @@ async def understanding_preview(
             force_refresh=payload.force_refresh,
         )
     except (ProviderError, RuntimeError, OSError, ValueError) as error:
-        raise HTTPException(status_code=502, detail=f"preflight understanding failed: {type(error).__name__}") from error
+        raise HTTPException(
+            status_code=502, detail=f"preflight understanding failed: {type(error).__name__}"
+        ) from error
 
 
 @app.get("/readiness")
@@ -316,13 +366,17 @@ def list_projects(user: dict = Depends(current_user)) -> list[dict]:
 @app.post("/projects")
 def create_project(payload: ProjectRequest, user: dict = Depends(current_user)) -> dict:
     try:
-        return repository.create_project(payload.name, owner_id=user["id"] if settings.auth_required else None)
+        return repository.create_project(
+            payload.name, owner_id=user["id"] if settings.auth_required else None
+        )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.patch("/projects/{project_id}")
-def rename_project(project_id: str, payload: ProjectRequest, user: dict = Depends(current_user)) -> dict:
+def rename_project(
+    project_id: str, payload: ProjectRequest, user: dict = Depends(current_user)
+) -> dict:
     try:
         if settings.auth_required:
             return repository.rename_project_for_user(project_id, user["id"], payload.name)
@@ -339,7 +393,11 @@ async def create_fixture_run(
     user: dict = Depends(current_user),
 ) -> dict[str, str]:
     try:
-        project_id = payload.project_id or (repository.ensure_user_project(user["id"])["id"] if settings.auth_required else repository.ensure_local_project()["id"])
+        project_id = payload.project_id or (
+            repository.ensure_user_project(user["id"])["id"]
+            if settings.auth_required
+            else repository.ensure_local_project()["id"]
+        )
         if settings.auth_required:
             repository.get_project_for_user(project_id, user["id"])
         request = repository.create_request(
@@ -368,7 +426,11 @@ async def create_generation_run(
             detail="OpenRouter structured planning is not configured; configure an active LLM provider first",
         )
     try:
-        project_id = payload.project_id or (repository.ensure_user_project(user["id"])["id"] if settings.auth_required else repository.ensure_local_project()["id"])
+        project_id = payload.project_id or (
+            repository.ensure_user_project(user["id"])["id"]
+            if settings.auth_required
+            else repository.ensure_local_project()["id"]
+        )
         if settings.auth_required:
             repository.get_project_for_user(project_id, user["id"])
         request = repository.create_request(
@@ -381,18 +443,29 @@ async def create_generation_run(
         raise HTTPException(status_code=404, detail="project not found") from error
     run, created = repository.create_idempotent_run(request["id"], str(settings.artifact_root))
     if created:
-        job = repository.enqueue_job(run["id"], "url", payload.model_dump(mode="json"))
+        job_payload = payload.model_dump(mode="json")
+        job_payload["cloud_discovery"] = resolve_cloud_discovery(
+            job_payload["cloud_discovery"],
+            browserbase_configured=bool(settings.browserbase_api_key),
+        )
+        job = repository.enqueue_job(run["id"], "url", job_payload)
         dispatch_generation_job(job["id"])
     return {"run_id": run["id"], "status": run["status"]}
 
 
 @app.post("/runs/{run_id}/retry")
 async def retry_generation_run(
-    run_id: str, payload: RetryRequest, user: dict = Depends(current_user),
+    run_id: str,
+    payload: RetryRequest,
+    user: dict = Depends(current_user),
 ) -> dict[str, str]:
     """Retry only a failed run, retaining its original evidence and lineage."""
     try:
-        previous = repository.get_run_for_user(run_id, user["id"]) if settings.auth_required else repository.get_run(run_id)
+        previous = (
+            repository.get_run_for_user(run_id, user["id"])
+            if settings.auth_required
+            else repository.get_run(run_id)
+        )
         request = repository.get_request(previous["request_id"])
         previous_job = repository.job_for_run(run_id)
         retry = repository.create_retry_run(run_id, str(settings.artifact_root))
@@ -419,7 +492,9 @@ async def retry_generation_run(
                 # fall back to the explicit full retry path instead.
                 retry_from_stage = None
     if retry_from_stage and request["url"].startswith("fixture://gate-"):
-        raise HTTPException(status_code=422, detail="targeted retry is currently available for URL runs only")
+        raise HTTPException(
+            status_code=422, detail="targeted retry is currently available for URL runs only"
+        )
     if request["url"].startswith("fixture://gate-"):
         gate = int(request["url"].rsplit("-", maxsplit=1)[1])
         job = repository.enqueue_job(
@@ -435,7 +510,9 @@ async def retry_generation_run(
         )
     else:
         if url_generator is None:
-            raise HTTPException(status_code=503, detail="OpenRouter structured planning is not configured")
+            raise HTTPException(
+                status_code=503, detail="OpenRouter structured planning is not configured"
+            )
         original = (previous_job or {}).get("payload", {})
         # Retain the prior run's non-secret intent/settings so the retry remains
         # comparable. Side effects are intentionally *not* inherited: a user
@@ -443,13 +520,18 @@ async def retry_generation_run(
         job_payload = {
             "allow_external_side_effects": payload.allow_external_side_effects,
             "allow_isolated_record_creation": payload.allow_isolated_record_creation,
-            "cloud_discovery": payload.cloud_discovery
-            if payload.cloud_discovery is not None
-            else bool(original.get("cloud_discovery", False)),
+            "cloud_discovery": resolve_cloud_discovery(
+                payload.cloud_discovery
+                if payload.cloud_discovery is not None
+                else original.get("cloud_discovery"),
+                browserbase_configured=bool(settings.browserbase_api_key),
+            ),
             "max_pages": payload.max_pages
             if payload.max_pages is not None
             else int(original.get("max_pages", 6)),
-            "render": payload.render if payload.render is not None else bool(original.get("render", True)),
+            "render": payload.render
+            if payload.render is not None
+            else bool(original.get("render", True)),
             "credential_reference": payload.credential_reference
             if payload.credential_reference is not None
             else original.get("credential_reference"),
@@ -477,7 +559,11 @@ async def retry_generation_run(
 
 def _owned_run_or_404(run_id: str, user: dict) -> dict:
     try:
-        return repository.get_run_for_user(run_id, user["id"]) if settings.auth_required else repository.get_run(run_id)
+        return (
+            repository.get_run_for_user(run_id, user["id"])
+            if settings.auth_required
+            else repository.get_run(run_id)
+        )
     except KeyError as error:
         raise HTTPException(status_code=404, detail="run not found") from error
 
@@ -486,7 +572,56 @@ def _owned_run_or_404(run_id: str, user: dict) -> dict:
 def get_run_stages(run_id: str, user: dict = Depends(current_user)) -> dict:
     """Inspect durable checkpoints before deciding whether retry or resume is safe."""
     run = _owned_run_or_404(run_id, user)
-    return {"run": run, "job": repository.job_for_run(run_id), "stages": repository.stage_jobs(run_id)}
+    return {
+        "run": run,
+        "job": repository.job_for_run(run_id),
+        "stages": repository.stage_jobs(run_id),
+    }
+
+
+@app.get("/runs/{run_id}/events")
+async def stream_run_events(
+    run_id: str, request: Request, user: dict = Depends(current_user)
+) -> StreamingResponse:
+    """Stream durable run/stage status without client polling.
+
+    The stream is a read-only projection of the database ledger. It contains
+    no provider payloads, credentials, or artifact contents, and terminates as
+    soon as the run reaches a terminal state or the client disconnects.
+    """
+    _owned_run_or_404(run_id, user)
+
+    async def events():
+        terminal = {"COMPLETE", "FAILED", "CANCELLED"}
+        last_payload: str | None = None
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                run = _owned_run_or_404(run_id, user)
+            except HTTPException:
+                return
+            payload = {
+                "run_id": run_id,
+                "status": run.get("status"),
+                "stage": run.get("stage"),
+                "error_code": run.get("error_code"),
+                "updated_at": run.get("updated_at"),
+                "stages": repository.stage_jobs(run_id),
+            }
+            encoded = json.dumps(payload, separators=(",", ":"), default=str)
+            if encoded != last_payload:
+                yield f"event: status\ndata: {encoded}\n\n"
+                last_payload = encoded
+            if str(run.get("status")) in terminal:
+                return
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/runs/{run_id}/resume")
@@ -528,7 +663,8 @@ def purge_empty_runs(payload: RetentionRequest, user: dict = Depends(current_use
     # User-specific retention avoids deleting another workspace's diagnostics.
     candidates = (
         repository.list_runs_for_user(user["id"], limit=100, offset=0)
-        if settings.auth_required else repository.list_runs(limit=100, offset=0)
+        if settings.auth_required
+        else repository.list_runs(limit=100, offset=0)
     )
     cutoff = datetime.now(UTC) - timedelta(seconds=payload.older_than_seconds)
     deleted: list[str] = []
@@ -544,7 +680,9 @@ def purge_empty_runs(payload: RetentionRequest, user: dict = Depends(current_use
 
 
 @app.post("/knowledge/invalidate")
-def invalidate_product_knowledge(payload: KnowledgeInvalidationRequest, user: dict = Depends(current_user)) -> dict:
+def invalidate_product_knowledge(
+    payload: KnowledgeInvalidationRequest, user: dict = Depends(current_user)
+) -> dict:
     product_key = str(payload.url)
     equivalent_keys = tuple(dict.fromkeys((product_key, product_key.rstrip("/"))))
     if settings.auth_required and not any(
@@ -557,10 +695,14 @@ def invalidate_product_knowledge(payload: KnowledgeInvalidationRequest, user: di
 
 @app.get("/runs")
 def list_runs(
-    limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0), user: dict = Depends(current_user)
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: dict = Depends(current_user),
 ) -> dict:
     return {
-        "items": repository.list_runs_for_user(user["id"], limit=limit, offset=offset) if settings.auth_required else repository.list_runs(limit=limit, offset=offset),
+        "items": repository.list_runs_for_user(user["id"], limit=limit, offset=offset)
+        if settings.auth_required
+        else repository.list_runs(limit=limit, offset=offset),
         "limit": limit,
         "offset": offset,
     }
@@ -569,7 +711,11 @@ def list_runs(
 @app.get("/runs/{run_id}")
 def get_run(run_id: str, user: dict = Depends(current_user)) -> dict:
     try:
-        return repository.get_run_for_user(run_id, user["id"]) if settings.auth_required else repository.get_run(run_id)
+        return (
+            repository.get_run_for_user(run_id, user["id"])
+            if settings.auth_required
+            else repository.get_run(run_id)
+        )
     except KeyError as error:
         raise HTTPException(status_code=404, detail="run not found") from error
 
@@ -587,7 +733,9 @@ def get_run_details(run_id: str, user: dict = Depends(current_user)) -> dict:
 @app.get("/runs/{run_id}/artifacts")
 def get_artifacts(run_id: str, user: dict = Depends(current_user)) -> list[dict[str, str]]:
     try:
-        repository.get_run_for_user(run_id, user["id"]) if settings.auth_required else repository.get_run(run_id)
+        repository.get_run_for_user(
+            run_id, user["id"]
+        ) if settings.auth_required else repository.get_run(run_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="run not found") from error
     return repository.locations(run_id)

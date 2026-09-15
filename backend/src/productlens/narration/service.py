@@ -21,7 +21,9 @@ class NarrationTimingError(RuntimeError):
 
 class NarrationService:
     @staticmethod
-    def _scene_offsets(trace: DemoTrace, script: list[dict[str, object]], durations: list[float]) -> list[float]:
+    def _scene_offsets(
+        trace: DemoTrace, script: list[dict[str, object]], durations: list[float]
+    ) -> list[float]:
         events = {event.id: event for event in trace.events if event.success}
         offsets: list[float] = []
         previous_end = 0.0
@@ -30,7 +32,10 @@ class NarrationService:
             if event is not None and trace.recording_started_at is not None:
                 desired = max(
                     0.0,
-                    ((event.action_at or event.occurred_at) - trace.recording_started_at).total_seconds() - 0.12,
+                    (
+                        (event.action_at or event.occurred_at) - trace.recording_started_at
+                    ).total_seconds()
+                    - 0.12,
                 )
             else:
                 desired = previous_end
@@ -38,13 +43,19 @@ class NarrationService:
             # overlap a previous scene's voice. Such a conflict must repair
             # narration/capture timing rather than silently compressing audio.
             if desired + 0.02 < previous_end:
-                raise NarrationTimingError("measured narration scenes overlap their verified browser events")
+                raise NarrationTimingError(
+                    "measured narration scenes overlap their verified browser events"
+                )
             offsets.append(desired)
             previous_end = desired + duration
         return offsets
 
     async def create(
-        self, trace: DemoTrace, provider: SpeechProvider, output: Path, voice: str | None = None,
+        self,
+        trace: DemoTrace,
+        provider: SpeechProvider,
+        output: Path,
+        voice: str | None = None,
         script: list[dict[str, object]] | None = None,
     ) -> dict:
         script = script or script_from_trace(trace)
@@ -80,7 +91,17 @@ class NarrationService:
                     "".join(f"[scene{index}]" for index in range(len(segment_paths)))
                     + f"amix=inputs={len(segment_paths)}:duration=longest:dropout_transition=0[mix]"
                 )
-                command.extend(("-filter_complex", ";".join(filters), "-map", "[mix]", "-c:a", "libmp3lame", str(output)))
+                command.extend(
+                    (
+                        "-filter_complex",
+                        ";".join(filters),
+                        "-map",
+                        "[mix]",
+                        "-c:a",
+                        "libmp3lame",
+                        str(output),
+                    )
+                )
                 completed = await asyncio.to_thread(
                     subprocess.run, command, capture_output=True, text=True, check=False
                 )

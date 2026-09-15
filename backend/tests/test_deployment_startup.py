@@ -47,8 +47,11 @@ def test_deployment_readiness_reports_local_dependencies_without_network(monkeyp
             pass
 
     class Engine:
-        def raw_connection(self): return Connection()
-        def dispose(self): pass
+        def raw_connection(self):
+            return Connection()
+
+        def dispose(self):
+            pass
 
     monkeypatch.setattr(startup, "create_engine", lambda *_args, **_kwargs: Engine())
     report = startup.deployment_readiness(settings)
@@ -63,5 +66,9 @@ def test_dramatiq_readiness_requires_explicit_broker_url(monkeypatch, tmp_path):
     monkeypatch.delenv("PRODUCTLENS_BROKER_URL", raising=False)
     monkeypatch.setenv("PRODUCTLENS_ARTIFACT_ROOT", str(tmp_path))
     settings = Settings.from_environment()
-    monkeypatch.setattr(startup, "create_engine", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(
+        startup,
+        "create_engine",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
     assert startup.deployment_readiness(settings)["broker"]["ready"] is False

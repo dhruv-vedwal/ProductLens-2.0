@@ -12,19 +12,18 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from playwright.async_api import async_playwright
 
 from productlens.contracts.models import DiscoveryBudget, ObjectiveSpec, UnderstandingPreview
 from productlens.discovery.live import LiveDiscovery, _objective_spec
+from productlens.observability.logging import redact_prompt_text
 from productlens.providers.errors import ProviderError
+from productlens.urls import canonical_product_url
 
 
 def canonical_url(value: str) -> str:
-    parsed = urlsplit(str(value).strip())
-    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)), doseq=True)
-    return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path.rstrip("/") or "/", query, ""))
+    return canonical_product_url(value)
 
 
 def _suggested_prompt(objective: ObjectiveSpec, *, areas: list[str]) -> str:
@@ -34,7 +33,11 @@ def _suggested_prompt(objective: ObjectiveSpec, *, areas: list[str]) -> str:
     if objective.raw.strip():
         base = objective.raw.strip().rstrip(".!?")
         context = ", ".join(areas[:3])
-        detail = f" Focus on the visible areas {context} and the resulting user value." if context else " Explain the purpose, key steps, and visible outcome."
+        detail = (
+            f" Focus on the visible areas {context} and the resulting user value."
+            if context
+            else " Explain the purpose, key steps, and visible outcome."
+        )
         return f"{base} for {audience}.{detail}"
     context = ", ".join(areas[:4])
     suffix = f" Prioritize the visible areas: {context}." if context else ""
@@ -76,16 +79,23 @@ class PreflightService:
             cached_payload = self.repository.fresh_understanding_preview(target, prompt)
             if cached_payload:
                 try:
-                    return UnderstandingPreview.model_validate(cached_payload).model_copy(update={"cached": True})
+                    return UnderstandingPreview.model_validate(cached_payload).model_copy(
+                        update={"cached": True}
+                    )
                 except (ValueError, TypeError):
                     pass
         if cache_path.is_file() and self._fresh(cache_path) and not force_refresh:
             try:
-                return UnderstandingPreview.model_validate(json.loads(cache_path.read_text(encoding="utf-8"))).model_copy(update={"cached": True})
+                return UnderstandingPreview.model_validate(
+                    json.loads(cache_path.read_text(encoding="utf-8"))
+                ).model_copy(update={"cached": True})
             except (OSError, ValueError, TypeError):
                 pass
 
-        objective_text = prompt.strip() or "Give a concise overview of the product and its most important visible areas."
+        objective_text = (
+            prompt.strip()
+            or "Give a concise overview of the product and its most important visible areas."
+        )
         if self.generator is not None:
             objective, _understanding = await self.generator._understand_objective(objective_text)
         else:
@@ -106,7 +116,12 @@ class PreflightService:
                     context = await self.discovery.discover(
                         context_page,
                         objective_text,
-                        DiscoveryBudget(max_time_seconds=45, max_pages=max(1, min(max_pages, 4)), max_actions=8, max_model_calls=1),
+                        DiscoveryBudget(
+                            max_time_seconds=45,
+                            max_pages=max(1, min(max_pages, 4)),
+                            max_actions=8,
+                            max_model_calls=1,
+                        ),
                         objective_spec=objective,
                         explore_visible_routes=False,
                         screenshot_directory=screenshot_dir,
@@ -120,7 +135,7 @@ class PreflightService:
                             else:
                                 observation = await self.stagehand_provider.observe(
                                     url=context_page.url,
-                                    instruction=f"Observe visible safe controls relevant to: {objective_text}",
+                                    instruction=f"Observe visible safe controls relevant to: {redact_prompt_text(objective_text)}",
                                     analysis_instruction="List only visible sections and safe read-only controls.",
                                     environment="LOCAL",
                                     cache_dir=artifact_dir / "stagehand-cache",
@@ -128,7 +143,11 @@ class PreflightService:
                                 context = await self.discovery.enrich_with_stagehand(
                                     context_page, context, observation
                                 )
-                            stagehand_note = observation.get("status") if isinstance(observation, dict) else "OBSERVED"
+                            stagehand_note = (
+                                observation.get("status")
+                                if isinstance(observation, dict)
+                                else "OBSERVED"
+                            )
                         except (ProviderError, RuntimeError, OSError) as error:
                             stagehand_note = f"UNAVAILABLE:{type(error).__name__}"
                 finally:
@@ -140,16 +159,23 @@ class PreflightService:
                 status=status,
                 url=target,
                 prompt=prompt,
-                suggested_prompt=prompt.strip() or "Describe the product's most important visible workflow.",
+                suggested_prompt=prompt.strip()
+                or "Describe the product's most important visible workflow.",
                 objective=objective,
-                assumptions=["The product could not be fully inspected during the bounded preflight."],
+                assumptions=[
+                    "The product could not be fully inspected during the bounded preflight."
+                ],
                 blockers=[type(error).__name__],
                 evidence_refs=["preflight:error"],
             )
             artifact_dir.mkdir(parents=True, exist_ok=True)
-            artifact_dir.joinpath("understanding.json").write_text(json.dumps(preview.model_dump(mode="json"), indent=2), encoding="utf-8")
+            artifact_dir.joinpath("understanding.json").write_text(
+                json.dumps(preview.model_dump(mode="json"), indent=2), encoding="utf-8"
+            )
             if self.repository is not None:
-                self.repository.save_understanding_preview(target, prompt, preview.model_dump(mode="json"))
+                self.repository.save_understanding_preview(
+                    target, prompt, preview.model_dump(mode="json")
+                )
             return preview
 
         assert context is not None
@@ -162,36 +188,54 @@ class PreflightService:
         product_fingerprint = hashlib.sha256(
             json.dumps(fingerprint_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()
-        areas = list(dict.fromkeys([
-            *[str(item) for page in context.page_knowledge for item in page.visible_sections],
-            *[str(item) for item in context.content_blocks],
-            *[str(item.name) for item in context.navigation if item.name],
-        ]))[:40]
+        areas = list(
+            dict.fromkeys(
+                [
+                    *[
+                        str(item)
+                        for page in context.page_knowledge
+                        for item in page.visible_sections
+                    ],
+                    *[str(item) for item in context.content_blocks],
+                    *[str(item.name) for item in context.navigation if item.name],
+                ]
+            )
+        )[:40]
         relationships = [
-            relation.model_dump(mode="json")
-            for relation in getattr(context, "relationships", [])
+            relation.model_dump(mode="json") for relation in getattr(context, "relationships", [])
         ]
         # Preserve explicit intent even when a bounded scan cannot match one
         # endpoint to a page; the low-confidence edge is useful to the client
         # as a transparent assumption rather than an invented route.
-        relationships.extend({
-            "source": relation.source,
-            "target": relation.target,
-            "relation": relation.relation,
-            "required": True,
-            "evidence_refs": ["objective_relationship"],
-            "confidence": 0.2,
-        } for relation in objective.supporting_relationships
+        relationships.extend(
+            {
+                "source": relation.source,
+                "target": relation.target,
+                "relation": relation.relation,
+                "required": True,
+                "evidence_refs": ["objective_relationship"],
+                "confidence": 0.2,
+            }
+            for relation in objective.supporting_relationships
             if not any(
                 item.get("source") == relation.source and item.get("target") == relation.target
                 for item in relationships
-            ))
+            )
+        )
         assumptions = []
         if stagehand_note and stagehand_note.startswith("UNAVAILABLE"):
-            assumptions.append("Semantic observation was unavailable; visible DOM evidence remains authoritative.")
+            assumptions.append(
+                "Semantic observation was unavailable; visible DOM evidence remains authoritative."
+            )
         if context.authentication_state == "unknown":
-            assumptions.append("Authentication state was not conclusively determined during the bounded scan.")
-        status = "AUTH_REQUIRED" if context.authentication_state == "login_required" else ("BLOCKED" if context.blockers else "READY")
+            assumptions.append(
+                "Authentication state was not conclusively determined during the bounded scan."
+            )
+        status = (
+            "AUTH_REQUIRED"
+            if context.authentication_state == "login_required"
+            else ("BLOCKED" if context.blockers else "READY")
+        )
         preview = UnderstandingPreview(
             status=status,
             url=target,
@@ -203,14 +247,20 @@ class PreflightService:
             product_fingerprint=product_fingerprint,
             knowledge_version=product_fingerprint[:16],
             relevant_areas=areas,
-            relationships=list({json.dumps(item, sort_keys=True): item for item in relationships}.values())[:40],
+            relationships=list(
+                {json.dumps(item, sort_keys=True): item for item in relationships}.values()
+            )[:40],
             assumptions=assumptions,
             blockers=list(context.blockers)[:20],
             evidence_refs=list(context.evidence)[:80] or ["preflight:visible-dom"],
             pages_inspected=[page.url for page in context.page_knowledge[:20]],
         )
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(preview.model_dump(mode="json"), indent=2), encoding="utf-8")
+        cache_path.write_text(
+            json.dumps(preview.model_dump(mode="json"), indent=2), encoding="utf-8"
+        )
         if self.repository is not None:
-            self.repository.save_understanding_preview(target, prompt, preview.model_dump(mode="json"))
+            self.repository.save_understanding_preview(
+                target, prompt, preview.model_dump(mode="json")
+            )
         return preview

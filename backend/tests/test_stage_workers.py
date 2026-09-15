@@ -4,7 +4,7 @@ import pytest
 
 from productlens.persistence.repository import RunRepository
 from productlens.providers.errors import ProviderError
-from productlens.workers.local import next_pending_stage
+from productlens.workers.local import next_pending_stage, worker_concurrency
 from productlens.workers.selected import run_selected_job
 from productlens.workers.tasks import execute_generation_stage
 
@@ -63,6 +63,37 @@ async def test_url_stage_worker_uses_the_same_durable_claim_boundary(tmp_path: P
     assert repository.stage_job(run["id"], "DISCOVERY")["status"] == "COMPLETE"
 
 
+@pytest.mark.asyncio
+async def test_preclaimed_local_stage_is_executed_without_a_second_claim(tmp_path: Path):
+    repository = RunRepository(tmp_path / "productlens.sqlite3")
+    request = repository.create_request("preclaimed", "fixture://gate-1", "Open dashboard")
+    run = repository.create_run(request["id"], str(tmp_path))
+    job = repository.enqueue_job(run["id"], "fixture", {"gate": 1, "render": False})
+    assert repository.claim_job(job["id"])
+    claimed = repository.claim_stage_job(run["id"], "DISCOVERY")
+    assert claimed is not None
+
+    original_claim = repository.claim_stage_job
+
+    def fail_if_claimed_again(*_args, **_kwargs):
+        raise AssertionError("a preclaimed local stage must not be claimed twice")
+
+    repository.claim_stage_job = fail_if_claimed_again
+
+    class FakeJobs:
+        async def run_fixture_stage(self, run_id: str, stage: str, *, gate: int, render: bool):
+            assert (run_id, stage, gate, render) == (run["id"], "DISCOVERY", 1, False)
+            repository.update_stage_job(run_id, stage, status="COMPLETE")
+
+    try:
+        await execute_generation_stage(
+            run["id"], "DISCOVERY", repository=repository, jobs=FakeJobs(), claimed_stage=claimed
+        )
+    finally:
+        repository.claim_stage_job = original_claim
+    assert repository.stage_job(run["id"], "DISCOVERY")["status"] == "COMPLETE"
+
+
 def test_local_worker_dispatches_first_stage_for_url_root_job(tmp_path: Path):
     repository = RunRepository(tmp_path / "productlens.sqlite3")
     request = repository.create_request("local-url", "https://example.test", "Show dashboard")
@@ -70,6 +101,13 @@ def test_local_worker_dispatches_first_stage_for_url_root_job(tmp_path: Path):
     repository.enqueue_job(run["id"], "url", {"render": False})
 
     assert next_pending_stage(repository, run["id"]) == "DISCOVERY"
+
+
+def test_local_worker_concurrency_is_bounded_and_safe():
+    assert worker_concurrency("1") == 1
+    assert worker_concurrency("50") == 50
+    assert worker_concurrency("1000") == 100
+    assert worker_concurrency("invalid") == 1
 
 
 @pytest.mark.asyncio
@@ -85,7 +123,9 @@ async def test_stage_worker_persists_non_retryable_provider_credit_failure(tmp_p
             raise ProviderError("browserbase", 402, "payment required")
 
     with pytest.raises(ProviderError):
-        await execute_generation_stage(run["id"], "DISCOVERY", repository=repository, jobs=FailingJobs())
+        await execute_generation_stage(
+            run["id"], "DISCOVERY", repository=repository, jobs=FailingJobs()
+        )
     assert repository.stage_job(run["id"], "DISCOVERY")["error_code"] == "PROVIDER_CREDIT_REQUIRED"
     assert repository.get_job(job["id"])["error_code"] == "PROVIDER_CREDIT_REQUIRED"
 

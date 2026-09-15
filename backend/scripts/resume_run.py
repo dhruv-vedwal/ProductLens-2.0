@@ -12,11 +12,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from typing import Any
 
 from productlens.config.settings import Settings
 from productlens.services.runtime import build_job_service
-
 
 STAGES = ("DISCOVERY", "PLANNING", "EXECUTION", "NARRATION", "RENDER", "VIDEO_QA")
 
@@ -36,7 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Resume a ProductLens URL run")
     parser.add_argument("run_id")
     parser.add_argument(
-        "--from-stage", choices=STAGES,
+        "--from-stage",
+        choices=STAGES,
         help="Queue this stage and all later stages for a targeted retry.",
     )
     parser.add_argument("--credential-reference", default=None)
@@ -51,8 +52,18 @@ def parse_args() -> argparse.Namespace:
 async def resume(args: argparse.Namespace) -> None:
     settings = Settings.from_environment()
     repository, service = build_job_service(settings)
+    # A supervisor/worker can disappear while Remotion or Browserbase is
+    # outside Python's event loop. Reconcile expired leases before deciding
+    # which checkpoint is resumable; otherwise a stale RENDER row looks live
+    # forever and a subsequent operator has no safe recovery boundary.
+    repository.fail_orphaned_jobs()
+    repository.recover_stale_jobs(
+        max_running_seconds=int(os.getenv("PRODUCTLENS_WORKER_LEASE_SECONDS", "1800"))
+    )
     run = repository.get_run(args.run_id)
-    request = repository.get_request(run["request_id"])
+    # Resolve the run first so older databases fail with a useful lookup error;
+    # the stage payload is reconstructed from the persisted job below.
+    repository.get_request(run["request_id"])
     repository.ensure_stage_jobs(args.run_id)
     write_status_snapshot(settings, repository, args.run_id)
     if args.from_stage:

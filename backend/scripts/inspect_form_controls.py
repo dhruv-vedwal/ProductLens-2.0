@@ -23,10 +23,14 @@ from productlens.providers.browserbase import BrowserbaseProvider
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Inspect a visible Browserbase form without mutations")
+    parser = argparse.ArgumentParser(
+        description="Inspect a visible Browserbase form without mutations"
+    )
     parser.add_argument("--url")
     parser.add_argument("--entry", help="Visible control that reversibly opens the form")
-    parser.add_argument("--field", help="Optional accessible combobox/field whose choices should be observed")
+    parser.add_argument(
+        "--field", help="Optional accessible combobox/field whose choices should be observed"
+    )
     parser.add_argument("--credential-reference")
     parser.add_argument(
         "--request-file",
@@ -43,13 +47,19 @@ def parse_args() -> argparse.Namespace:
         args.url = args.url or request.get("url")
         args.credential_reference = args.credential_reference or request.get("credential_reference")
     if args.run_id:
-        context_path = Path(args.artifact_root) / "runs" / args.run_id / "discovery" / "product-context.json"
+        context_path = (
+            Path(args.artifact_root) / "runs" / args.run_id / "discovery" / "product-context.json"
+        )
         context = json.loads(context_path.read_text(encoding="utf-8"))
-        capabilities = [item for item in context.get("capabilities", []) if item.get("kind") == "form"]
+        capabilities = [
+            item for item in context.get("capabilities", []) if item.get("kind") == "form"
+        ]
         if args.entry:
             capabilities = [item for item in capabilities if item.get("purpose") == args.entry]
         if len(capabilities) != 1:
-            parser.error("--run-id must resolve exactly one discovered form capability; provide --entry to disambiguate")
+            parser.error(
+                "--run-id must resolve exactly one discovered form capability; provide --entry to disambiguate"
+            )
         capability = capabilities[0]
         args.url = capability.get("source_url") or args.url
         args.entry = (capability.get("entry_target") or {}).get("name") or args.entry
@@ -90,7 +100,9 @@ async def inspect(args: argparse.Namespace) -> dict[str, object]:
             # misclassify provider startup latency as missing form evidence.
             page.set_default_navigation_timeout(90_000)
             await page.goto(args.url, wait_until="domcontentloaded")
-            authenticated = await credentials.authenticate_if_required(page, args.credential_reference)
+            authenticated = await credentials.authenticate_if_required(
+                page, args.credential_reference
+            )
             if authenticated and page.url.rstrip("/") != args.url.rstrip("/"):
                 await page.goto(args.url, wait_until="domcontentloaded")
             try:
@@ -107,7 +119,9 @@ async def inspect(args: argparse.Namespace) -> dict[str, object]:
                 raise RuntimeError(f"Visible entry control not found: {args.entry}")
             await entry.click()
             await page.wait_for_timeout(700)
-            scope = await _visible_locator(page.get_by_role("dialog")) or await _visible_locator(page.locator("form"))
+            scope = await _visible_locator(page.get_by_role("dialog")) or await _visible_locator(
+                page.locator("form")
+            )
             if scope is None:
                 raise RuntimeError("Entry control did not open a visible dialog or form")
             fields = await scope.locator(
@@ -137,7 +151,9 @@ async def inspect(args: argparse.Namespace) -> dict[str, object]:
             )
             choices: list[str] = []
             if args.field:
-                field = await _visible_locator(page.get_by_role("combobox", name=args.field, exact=True))
+                field = await _visible_locator(
+                    page.get_by_role("combobox", name=args.field, exact=True)
+                )
                 if field is None:
                     field = await _visible_locator(page.get_by_label(args.field, exact=True))
                 if field is None:
@@ -148,7 +164,9 @@ async def inspect(args: argparse.Namespace) -> dict[str, object]:
                 except PlaywrightError:  # A reversible expansion optimization only.
                     pass
                 await page.wait_for_timeout(700)
-                choices = await page.locator("[role='option'], [role='listbox'] li, [role='menuitem'], [role='menu'] li, li").evaluate_all(
+                choices = await page.locator(
+                    "[role='option'], [role='listbox'] li, [role='menuitem'], [role='menu'] li, li"
+                ).evaluate_all(
                     """nodes => nodes.filter(node => !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length))
                         .map(node => (node.innerText || '').replace(/\\s+/g, ' ').trim())
                         .filter(Boolean).slice(0, 60)"""

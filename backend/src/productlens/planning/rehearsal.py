@@ -6,15 +6,50 @@ import re
 
 from productlens.contracts.models import ActionCapability, ObservedElement, ProductContext, Target
 
-_SUCCESS_WORDS = {"success", "successful", "created", "saved", "added", "confirmed", "complete", "completed"}
+_SUCCESS_WORDS = {
+    "success",
+    "successful",
+    "created",
+    "saved",
+    "added",
+    "confirmed",
+    "complete",
+    "completed",
+}
 _NOISE_WORDS = {"close", "cancel", "save", "create", "submit", "back", "menu"}
 _REQUEST_NOISE = {
-    "about", "application", "complete", "context", "create", "demo", "detailed",
-    "entire", "every", "flow", "full", "management", "minute", "overview", "product",
-    "record", "show", "tour", "walkthrough", "with", "workflow",
+    "about",
+    "application",
+    "complete",
+    "context",
+    "create",
+    "demo",
+    "detailed",
+    "entire",
+    "every",
+    "flow",
+    "full",
+    "management",
+    "minute",
+    "overview",
+    "product",
+    "record",
+    "show",
+    "tour",
+    "walkthrough",
+    "with",
+    "workflow",
 }
 _PAGE_NOISE = {
-    "add", "create", "dashboard", "edit", "new", "page", "save", "settings", "the",
+    "add",
+    "create",
+    "dashboard",
+    "edit",
+    "new",
+    "page",
+    "save",
+    "settings",
+    "the",
 }
 
 
@@ -49,13 +84,24 @@ def select_rehearsal_capability(
     requested_source = (
         objective.primary_entity
         if objective and objective.primary_entity
-        else " ".join([*(objective.must_show if objective else []), *(objective.requested_features if objective else [])])
+        else " ".join(
+            [
+                *(objective.must_show if objective else []),
+                *(objective.requested_features if objective else []),
+            ]
+        )
     )
     requested = _words(requested_source) - _REQUEST_NOISE
     eligible = [
-        capability for capability in capabilities
-        if capability.kind == "form" and capability.safe_to_probe and capability.submit_target is not None
-        and (not require_verified_outcome or (capability.verified and capability.outcome_target is not None))
+        capability
+        for capability in capabilities
+        if capability.kind == "form"
+        and capability.safe_to_probe
+        and capability.submit_target is not None
+        and (
+            not require_verified_outcome
+            or (capability.verified and capability.outcome_target is not None)
+        )
     ]
     # Older/public callers may explicitly authorise one isolated safe record
     # without naming its entity.  A unique fully observed form is then the
@@ -63,18 +109,22 @@ def select_rehearsal_capability(
     if not requested:
         if len(eligible) == 1:
             return eligible[0]
-        raise CapabilitySelectionError("objective has no specific feature evidence for record creation")
+        raise CapabilitySelectionError(
+            "objective has no specific feature evidence for record creation"
+        )
 
     page_by_url = {page.url.rstrip("/"): page for page in context.page_knowledge}
     ranked: list[tuple[int, ActionCapability, set[str], set[str]]] = []
     for capability in eligible:
         page = page_by_url.get(capability.source_url.rstrip("/"))
-        page_evidence = " ".join([
-            page.title if page else "",
-            page.purpose if page else "",
-            *(page.visible_sections if page else []),
-            capability.purpose,
-        ])
+        page_evidence = " ".join(
+            [
+                page.title if page else "",
+                page.purpose if page else "",
+                *(page.visible_sections if page else []),
+                capability.purpose,
+            ]
+        )
         source_terms = _words(page_evidence) - _PAGE_NOISE
         matched = requested & source_terms
         # A form on "Invoice templates" is not as relevant to an Invoice
@@ -86,7 +136,9 @@ def select_rehearsal_capability(
         score = len(matched) * 10 - min(6, len(unrelated))
         ranked.append((score, capability, matched, unrelated))
     if not ranked:
-        raise CapabilitySelectionError("no safe submit-capable form is grounded in the requested feature")
+        raise CapabilitySelectionError(
+            "no safe submit-capable form is grounded in the requested feature"
+        )
     ranked.sort(key=lambda entry: entry[0], reverse=True)
     best_score, best, _, _ = ranked[0]
     tied = [entry for entry in ranked if entry[0] == best_score]
@@ -173,13 +225,15 @@ def derive_outcome_witness(
         text=record_value if is_structural_record else (item.text or item.name)[:300],
         source_url=item.source_url or capability.source_url,
     )
-    return capability.model_copy(update={
-        "outcome_target": target,
-        "outcome_evidence": [
-            *capability.outcome_evidence,
-            "rehearsal-visible-outcome:verified-created-record"
-            if is_structural_record
-            else f"rehearsal-visible-outcome:{phrase[:300]}",
-        ],
-        "verified": True,
-    })
+    return capability.model_copy(
+        update={
+            "outcome_target": target,
+            "outcome_evidence": [
+                *capability.outcome_evidence,
+                "rehearsal-visible-outcome:verified-created-record"
+                if is_structural_record
+                else f"rehearsal-visible-outcome:{phrase[:300]}",
+            ],
+            "verified": True,
+        }
+    )

@@ -25,10 +25,17 @@ def infer_form_schema(elements: list[ObservedElement], source_url: str) -> FormS
     for item in elements:
         role = (item.role or "").casefold()
         if item.tag not in {"input", "select", "textarea"} and role not in {
-            "combobox", "textbox", "checkbox", "radio",
+            "combobox",
+            "textbox",
+            "checkbox",
+            "radio",
         }:
             continue
-        control_type = role if role in {"combobox", "textbox", "checkbox", "radio"} else (item.element_type or item.tag).lower()
+        control_type = (
+            role
+            if role in {"combobox", "textbox", "checkbox", "radio"}
+            else (item.element_type or item.tag).lower()
+        )
         if control_type in {"hidden", "submit", "button", "reset"}:
             continue
         if not _is_stable_field_evidence(item):
@@ -37,8 +44,12 @@ def infer_form_schema(elements: list[ObservedElement], source_url: str) -> FormS
         required_hint = item.required or "required" in name.lower() or "*" in name
         fields.append(
             FormField(
-                name=name[:200], selector=item.selector, control_type=control_type,
-                required=required_hint, options=item.options[:40], confidence=0.8 if item.name else 0.45,
+                name=name[:200],
+                selector=item.selector,
+                control_type=control_type,
+                required=required_hint,
+                options=item.options[:40],
+                confidence=0.8 if item.name else 0.45,
             )
         )
     return FormSchema(

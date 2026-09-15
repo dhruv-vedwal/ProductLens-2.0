@@ -6,10 +6,12 @@ import pytest
 
 from productlens.artifacts.store import RunArtifacts
 from productlens.contracts.models import (
+    ActionIntent,
     DemoPlan,
     DemoTrace,
     OperationKind,
     Postcondition,
+    ReplanDecision,
     SemanticOperation,
     Target,
     Viewport,
@@ -35,13 +37,32 @@ class Adapter:
         return None
 
 
+class PointerNoChangeAdapter(Adapter):
+    async def execute(self, operation):
+        return {"points": [{"x": 1, "y": 1}, {"x": 2, "y": 2}], "surface_changed": False}
+
+
+class ChangedSnapshotAdapter(Adapter):
+    def __init__(self):
+        self.changed = False
+
+    async def execute(self, operation):
+        self.changed = True
+
+    async def snapshot(self, target):
+        return {"url": "https://example.test", "text": "after" if self.changed else "before"}
+
+
 class ScrollTraceAdapter(Adapter):
     def __init__(self):
         self.page = ReactivePage()
         self.after_scroll = False
 
     async def view_state(self):
-        return Viewport(width=1440, height=900), {"x": 0.0, "y": 600.0 if self.after_scroll else 0.0}
+        return Viewport(width=1440, height=900), {
+            "x": 0.0,
+            "y": 600.0 if self.after_scroll else 0.0,
+        }
 
     async def execute(self, operation):
         self.after_scroll = True
@@ -82,10 +103,24 @@ async def test_engine_executes_a_validated_plan():
 
 
 @pytest.mark.asyncio
+async def test_engine_compiles_action_intents_into_the_same_execution_kernel():
+    trace = DemoTrace(
+        run_id="intent-boundary", objective="Inspect the result", started_at=datetime.now(UTC)
+    )
+    event = await ExecutionEngine(Adapter(), trace).run_intent(
+        ActionIntent(goal="Inspect the current result", gesture="observe")
+    )
+    assert event.success is True
+    assert event.kind is OperationKind.READ_VALUE
+
+
+@pytest.mark.asyncio
 async def test_engine_persists_intermediate_scroll_positions_in_trace():
     trace = DemoTrace(run_id="scroll", objective="Reveal details", started_at=datetime.now(UTC))
     event = await ExecutionEngine(ScrollTraceAdapter(), trace).run(
-        SemanticOperation(kind=OperationKind.SCROLL_TO, intent="Reveal details", target={"name": "Details"})
+        SemanticOperation(
+            kind=OperationKind.SCROLL_TO, intent="Reveal details", target={"name": "Details"}
+        )
     )
     assert len(event.scroll_path) == 4
     assert event.scroll_path[1]["y"] == 180
@@ -180,23 +215,114 @@ class ValueAdapter(Adapter):
         return self.locator, "selector"
 
 
+class PostconditionFailureAdapter(Adapter):
+    """The first click dispatches, but its expected state is no longer present."""
+
+    def __init__(self):
+        self.page = ReactivePage()
+        self.calls = 0
+
+    async def visible_locator(self, _target):
+        self.calls += 1
+        if self.calls == 1:
+            raise GroundingError("result overlay replaced the original target")
+        return VisibleLocator(), "role"
+
+
 @pytest.mark.asyncio
 async def test_engine_accepts_phone_control_normalization_after_visible_typing():
-    engine = ExecutionEngine(ValueAdapter("9198223949"), DemoTrace(
-        run_id="phone", objective="Create a safe record", started_at=datetime.now(UTC),
-    ))
-    await engine.verify(Postcondition(
-        kind="value", expected="+91 98223949", target=Target(name="Enter Phone Number"),
-    ))
+    engine = ExecutionEngine(
+        ValueAdapter("9198223949"),
+        DemoTrace(
+            run_id="phone",
+            objective="Create a safe record",
+            started_at=datetime.now(UTC),
+        ),
+    )
+    await engine.verify(
+        Postcondition(
+            kind="value",
+            expected="+91 98223949",
+            target=Target(name="Enter Phone Number"),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_engine_rejects_reversible_stroke_without_observable_surface_change():
+    engine = ExecutionEngine(
+        PointerNoChangeAdapter(),
+        DemoTrace(
+            run_id="pointer-no-change",
+            objective="Draw",
+            started_at=datetime.now(UTC),
+        ),
+    )
+    operation = SemanticOperation(
+        kind=OperationKind.POINTER_SEQUENCE,
+        intent="Draw a reversible stroke",
+        target=Target(name="drawing surface", selector="canvas"),
+        value={"pattern": "short_reversible_stroke"},
+        postconditions=[
+            Postcondition(
+                kind="visible",
+                expected=True,
+                target=Target(name="drawing surface", selector="canvas"),
+            )
+        ],
+    )
+    with pytest.raises(VerificationError, match="no observable change"):
+        await engine.run(operation)
+
+
+@pytest.mark.asyncio
+async def test_engine_verifies_provider_neutral_changed_postcondition():
+    adapter = ChangedSnapshotAdapter()
+    engine = ExecutionEngine(
+        adapter, DemoTrace(run_id="changed", objective="Change state", started_at=datetime.now(UTC))
+    )
+    event = await engine.run(
+        SemanticOperation(
+            kind=OperationKind.CLICK,
+            intent="Change the observed state",
+            target=Target(name="Change", selector="#change"),
+            postconditions=[Postcondition(kind="changed", expected=True)],
+        )
+    )
+    assert event.state_delta["content_changed"] is True
+
+
+@pytest.mark.asyncio
+async def test_engine_rejects_changed_postcondition_when_snapshot_is_identical():
+    engine = ExecutionEngine(
+        Adapter(),
+        DemoTrace(run_id="unchanged", objective="Change state", started_at=datetime.now(UTC)),
+    )
+    with pytest.raises(VerificationError, match="observable state change"):
+        await engine.run(
+            SemanticOperation(
+                kind=OperationKind.CLICK,
+                intent="Change the observed state",
+                target=Target(name="Change", selector="#change"),
+                postconditions=[Postcondition(kind="changed", expected=True)],
+            )
+        )
 
 
 @pytest.mark.asyncio
 async def test_engine_keeps_exact_value_matching_for_non_phone_fields():
-    engine = ExecutionEngine(ValueAdapter("maya"), DemoTrace(
-        run_id="name", objective="Create a safe record", started_at=datetime.now(UTC),
-    ))
+    engine = ExecutionEngine(
+        ValueAdapter("maya"),
+        DemoTrace(
+            run_id="name",
+            objective="Create a safe record",
+            started_at=datetime.now(UTC),
+        ),
+    )
     with pytest.raises(VerificationError, match="Expected Name"):
-        await engine.verify(Postcondition(kind="value", expected="Maya", target=Target(name="Name")))
+        await engine.verify(
+            Postcondition(kind="value", expected="Maya", target=Target(name="Name"))
+        )
 
 
 @pytest.mark.asyncio
@@ -216,13 +342,125 @@ async def test_engine_records_one_bounded_semantic_reground_before_dispatch():
 
 
 @pytest.mark.asyncio
+async def test_adaptive_execution_replaces_only_failed_suffix_and_records_replan():
+    trace = DemoTrace(run_id="adaptive", objective="Show the result", started_at=datetime.now(UTC))
+    plan = DemoPlan(
+        objective="Show the result",
+        narrative_goal="Demonstrate the observed outcome",
+        audience="prospect",
+        target_duration_seconds=20,
+        selected_workflow="observed-flow",
+        workflow_steps=[
+            WorkflowStep(
+                id="dispatch",
+                intent="Open the result",
+                operation=SemanticOperation(
+                    kind=OperationKind.CLICK,
+                    intent="Open the result",
+                    target=Target(name="Open result"),
+                    postconditions=[
+                        Postcondition(
+                            kind="visible",
+                            expected=True,
+                            target=Target(name="Result panel"),
+                        )
+                    ],
+                ),
+            ),
+        ],
+        expected_outcomes=["Result is visible"],
+        viewport_strategy="native",
+        stop_conditions=["result visible"],
+    )
+
+    async def replan(_plan, failed_step, _trace, reason, dispatched):
+        assert failed_step.id == "dispatch"
+        assert dispatched is True
+        assert "result" in reason.lower()
+        # This continuation observes the current page; it does not replay the
+        # click that already dispatched in the browser.
+        return ReplanDecision(
+            reason="The result panel replaced the clicked control; verify the current state.",
+            replacement_steps=[
+                WorkflowStep(
+                    id="verify-current",
+                    intent="Verify the current result state",
+                    operation=SemanticOperation(
+                        kind=OperationKind.READ_VALUE, intent="Read current result state"
+                    ),
+                )
+            ],
+            evidence_refs=["trace:current-page"],
+        )
+
+    result = await ExecutionEngine(PostconditionFailureAdapter(), trace).run_adaptive(
+        plan,
+        replanner=replan,
+    )
+    assert result.outcome_verified
+    assert len(result.events) == 2
+    assert len(result.replan_decisions) == 1
+    assert result.replan_decisions[0]["dispatched"] is True
+    assert result.replan_decisions[0]["failed_operation_id"] == plan.workflow_steps[0].operation.id
+
+
+@pytest.mark.asyncio
+async def test_adaptive_execution_never_replays_dispatched_mutation_with_new_id():
+    trace = DemoTrace(
+        run_id="mutation-replay", objective="Create a record", started_at=datetime.now(UTC)
+    )
+    submit = SemanticOperation(
+        kind=OperationKind.SUBMIT,
+        intent="Create the authorised record",
+        target=Target(name="Create"),
+        side_effect_policy="authorized_mutation",
+        postconditions=[
+            Postcondition(kind="visible", expected=True, target=Target(name="Created record"))
+        ],
+    )
+    plan = DemoPlan(
+        objective="Create a record",
+        narrative_goal="Prove the record was created",
+        audience="operator",
+        target_duration_seconds=20,
+        selected_workflow="record",
+        workflow_steps=[WorkflowStep(id="submit", intent="Create", operation=submit)],
+        expected_outcomes=["Created record"],
+        viewport_strategy="native",
+        stop_conditions=["created"],
+    )
+
+    async def replan(_plan, _failed_step, _trace, _reason, dispatched):
+        assert dispatched is True
+        return ReplanDecision(
+            reason="Retry the create action",
+            replacement_steps=[
+                WorkflowStep(
+                    id="submit-again",
+                    intent="Create again",
+                    operation=submit.model_copy(update={"id": "new-submit"}),
+                )
+            ],
+        )
+
+    with pytest.raises(VerificationError, match="replay a dispatched side effect"):
+        await ExecutionEngine(PostconditionFailureAdapter(), trace).run_adaptive(
+            plan, replanner=replan
+        )
+
+
+@pytest.mark.asyncio
 async def test_engine_clears_a_dismissible_blocking_overlay_before_scene_capture():
     trace = DemoTrace(run_id="overlay", objective="Open product", started_at=datetime.now(UTC))
     event = await ExecutionEngine(OverlayAdapter(), trace).run(
-        SemanticOperation(kind=OperationKind.CLICK, intent="Open overview", target={"name": "Overview"})
+        SemanticOperation(
+            kind=OperationKind.CLICK, intent="Open overview", target={"name": "Overview"}
+        )
     )
     assert event.success
-    assert event.recovery == [{"strategy": "dismiss_safe_overlay_before_scene", "reason": "Choose workspace"}]
+    assert event.recovery == [
+        {"strategy": "dismiss_safe_overlay_before_scene", "reason": "Choose workspace"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -231,7 +469,9 @@ async def test_engine_timestamps_visible_result_before_editorial_reading_hold():
     adapter.page = HoldingPage()
     trace = DemoTrace(run_id="hold", objective="Open product", started_at=datetime.now(UTC))
     event = await ExecutionEngine(adapter, trace, beat_hold_ms=50).run(
-        SemanticOperation(kind=OperationKind.CLICK, intent="Open overview", target={"name": "Overview"})
+        SemanticOperation(
+            kind=OperationKind.CLICK, intent="Open overview", target={"name": "Overview"}
+        )
     )
     finished_at = datetime.now(UTC)
     # The event means the state was verified, not that its required reading
@@ -241,19 +481,29 @@ async def test_engine_timestamps_visible_result_before_editorial_reading_hold():
 
 @pytest.mark.asyncio
 async def test_authorized_visible_submit_captures_outcome_witness_even_in_compact_mode(tmp_path):
-    trace = DemoTrace(run_id="outcome", objective="Create isolated record", started_at=datetime.now(UTC))
+    trace = DemoTrace(
+        run_id="outcome", objective="Create isolated record", started_at=datetime.now(UTC)
+    )
     artifacts = RunArtifacts(tmp_path, "outcome")
     event = await ExecutionEngine(
-        SubmitOutcomeAdapter(), trace, artifacts,
+        SubmitOutcomeAdapter(),
+        trace,
+        artifacts,
         capture_event_screenshots=False,
-    ).run(SemanticOperation(
-        kind=OperationKind.SUBMIT,
-        intent="Create the isolated record",
-        target=Target(name="Create record"),
-        postconditions=[Postcondition(
-            kind="visible", expected="Record created", target=Target(name="Record created"),
-        )],
-    ))
+    ).run(
+        SemanticOperation(
+            kind=OperationKind.SUBMIT,
+            intent="Create the isolated record",
+            target=Target(name="Create record"),
+            postconditions=[
+                Postcondition(
+                    kind="visible",
+                    expected="Record created",
+                    target=Target(name="Record created"),
+                )
+            ],
+        )
+    )
 
     assert Path(event.screenshot_path).as_posix() == "execution/screenshots/001.png"
     assert (artifacts.root / event.screenshot_path).read_bytes() == b"verified visible outcome"
@@ -261,17 +511,23 @@ async def test_authorized_visible_submit_captures_outcome_witness_even_in_compac
 
 @pytest.mark.asyncio
 async def test_submit_url_postcondition_uses_url_witness_not_abstract_dom_target():
-    trace = DemoTrace(run_id="url-outcome", objective="Create isolated record", started_at=datetime.now(UTC))
-    event = await ExecutionEngine(UrlOutcomeAdapter(), trace).run(SemanticOperation(
-        kind=OperationKind.SUBMIT,
-        intent="Create the isolated record",
-        target=Target(name="Create record"),
-        postconditions=[Postcondition(
-            kind="url",
-            expected="https://example.test/records/created",
-            target=Target(name="verified created record"),
-        )],
-    ))
+    trace = DemoTrace(
+        run_id="url-outcome", objective="Create isolated record", started_at=datetime.now(UTC)
+    )
+    event = await ExecutionEngine(UrlOutcomeAdapter(), trace).run(
+        SemanticOperation(
+            kind=OperationKind.SUBMIT,
+            intent="Create the isolated record",
+            target=Target(name="Create record"),
+            postconditions=[
+                Postcondition(
+                    kind="url",
+                    expected="https://example.test/records/created",
+                    target=Target(name="verified created record"),
+                )
+            ],
+        )
+    )
 
     assert event.success
     assert event.after["verified_outcome"]["expected_url"] == "https://example.test/records/created"

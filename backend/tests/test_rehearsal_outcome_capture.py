@@ -3,7 +3,10 @@ from playwright.async_api import async_playwright
 
 from productlens.contracts.models import ActionCapability, FormSchema, Target
 from productlens.planning.rehearsal import derive_outcome_witness
-from productlens.services.generation import _rehearsal_outcome_candidates, _rehearsal_post_submit_state
+from productlens.services.generation import (
+    _rehearsal_outcome_candidates,
+    _rehearsal_post_submit_state,
+)
 
 
 @pytest.mark.asyncio
@@ -16,13 +19,16 @@ async def test_outcome_capture_finds_a_generated_value_in_a_stable_card_layout()
             '<main><div data-testid="record-card">Demo record K7Q9P</div></main>'
         )
         observed = await _rehearsal_outcome_candidates(
-            page, submitted_values=["Demo record K7Q9P"],
+            page,
+            submitted_values=["Demo record K7Q9P"],
         )
         await context.close()
         await browser.close()
 
     capability = ActionCapability(
-        kind="form", purpose="New record", source_url="https://example.test/records",
+        kind="form",
+        purpose="New record",
+        source_url="https://example.test/records",
         entry_target=Target(name="New record", selector="#new"),
         form_schema=FormSchema(source_url="https://example.test/records"),
         submit_target=Target(name="Save", selector="#save"),

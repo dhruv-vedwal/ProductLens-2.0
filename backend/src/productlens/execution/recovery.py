@@ -47,13 +47,14 @@ def repair_dispatched_terminal_submit(
             "source_url": verification.get("source_url"),
         },
     }
-    event.recovery.append({
-        "strategy": "read_only_outcome_verification",
-        "reason": "post-submit target changed after successful navigation",
-    })
+    event.recovery.append(
+        {
+            "strategy": "read_only_outcome_verification",
+            "reason": "post-submit target changed after successful navigation",
+        }
+    )
     trace.errors = [
-        error for error in trace.errors
-        if error.get("code") != "PRODUCTION_CAPTURE_INTERRUPTED"
+        error for error in trace.errors if error.get("code") != "PRODUCTION_CAPTURE_INTERRUPTED"
     ]
     trace.outcome_verified = True
     trace.completed_at = datetime.now(UTC)

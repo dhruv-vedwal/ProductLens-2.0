@@ -31,6 +31,7 @@ def inspect_video(
     black_duration = 0.0
     frozen_duration = 0.0
     sampled_frames: list[dict[str, float]] = []
+    blank_content_frames: list[dict[str, float]] = []
     source_faithfulness: list[dict[str, float]] = []
     timestamp_pacing: dict[str, float] | None = None
     if not execution_verified:
@@ -68,7 +69,11 @@ def inspect_video(
             # frame has been cropped or composed on the wrong canvas.
             source_probe = _probe_video(source_video)
             source_stream = next(
-                (item for item in source_probe.get("streams", []) if item.get("codec_type") == "video"),
+                (
+                    item
+                    for item in source_probe.get("streams", [])
+                    if item.get("codec_type") == "video"
+                ),
                 None,
             )
             if source_stream:
@@ -77,8 +82,13 @@ def inspect_video(
                 rendered_width = float(video_streams[0].get("width") or 0)
                 rendered_height = float(video_streams[0].get("height") or 0)
                 if (
-                    source_width and source_height and rendered_width and rendered_height
-                    and abs((source_width / source_height) - (rendered_width / rendered_height)) / (source_width / source_height) > 0.03
+                    source_width
+                    and source_height
+                    and rendered_width
+                    and rendered_height
+                    and abs((source_width / source_height) - (rendered_width / rendered_height))
+                    / (source_width / source_height)
+                    > 0.03
                 ):
                     # A standard 16:9 delivery may preserve a 16:10 browser
                     # source via letterboxing. Aspect-ratio inequality alone
@@ -169,6 +179,7 @@ def inspect_video(
         if frozen_duration > max(3.0, duration * 0.2):
             hard_failures.append("EXCESSIVE_FROZEN_VIDEO")
         sampled_frames = _sample_frame_quality(video, duration)
+        blank_content_frames = _sample_content_quality(video, duration)
         opening_sample = next((item for item in sampled_frames if item.get("second") == 2.2), None)
         # The branded title ends before this point. A near-uniform white,
         # black, or loading canvas at the first product frame is not an
@@ -192,6 +203,14 @@ def inspect_video(
         # Require visual structure in at least one sampled presentation frame.
         if sampled_frames and all(item["variance"] < 6.0 for item in sampled_frames):
             hard_failures.append("VISUALLY_EMPTY_RENDER")
+        # Captions and the presentation shell can add enough pixels to make a
+        # white loading page look non-uniform at full-frame scale. Inspect the
+        # central product region separately (excluding shell/caption bands) so
+        # a sustained blank page cannot pass visual QA merely because a
+        # caption is present. One transient sample is tolerated; two sampled
+        # blank regions indicate material missing product footage.
+        if len(blank_content_frames) >= 2:
+            hard_failures.append("BLANK_PRODUCT_CONTENT_INTERVAL")
         if source_video is not None and source_video.is_file():
             source_faithfulness = _source_faithfulness(
                 delivery=video,
@@ -238,6 +257,7 @@ def inspect_video(
             "maximum": maximum_duration_seconds,
         },
         "sampled_frame_quality": sampled_frames,
+        "blank_content_quality": blank_content_frames,
         "source_faithfulness": source_faithfulness,
         "frame_pacing": pacing if probe else None,
         "timestamp_pacing": timestamp_pacing,
@@ -248,8 +268,19 @@ def inspect_video(
 def _probe_video(video: Path) -> dict:
     """Read source dimensions without allowing a bad probe to crash QA."""
     completed = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height", "-of", "json", str(video)],
-        capture_output=True, text=True, check=False,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,width,height",
+            "-of",
+            "json",
+            str(video),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     try:
         return json.loads(completed.stdout or "{}")
@@ -270,7 +301,11 @@ def _frame_pacing(stream: dict, duration: float, measured_rate: float) -> dict[s
         observed = 0.0
     expected = max(0.0, duration * measured_rate)
     if not observed or not expected:
-        return {"cadence_error_ratio": 0.0, "expected_frames": expected, "observed_frames": observed}
+        return {
+            "cadence_error_ratio": 0.0,
+            "expected_frames": expected,
+            "observed_frames": observed,
+        }
     return {
         "cadence_error_ratio": round(abs(observed - expected) / expected, 4),
         "expected_frames": round(expected, 2),
@@ -287,10 +322,20 @@ def _timestamp_pacing(video: Path, measured_rate: float) -> dict[str, float]:
     """
     completed = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "frame=best_effort_timestamp_time", "-of", "csv=p=0", str(video),
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=best_effort_timestamp_time",
+            "-of",
+            "csv=p=0",
+            str(video),
         ],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     timestamps: list[float] = []
     for line in completed.stdout.splitlines():
@@ -299,7 +344,11 @@ def _timestamp_pacing(video: Path, measured_rate: float) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
     if len(timestamps) < 2:
-        return {"max_gap_seconds": 0.0, "material_gap_count": 0.0, "sample_count": float(len(timestamps))}
+        return {
+            "max_gap_seconds": 0.0,
+            "material_gap_count": 0.0,
+            "sample_count": float(len(timestamps)),
+        }
     material_gap = max(0.20, 5.0 / max(measured_rate, 1.0))
     gaps = [later - earlier for earlier, later in pairwise(timestamps)]
     return {
@@ -315,16 +364,31 @@ def _sample_frame_quality(video: Path, duration: float) -> list[dict[str, float]
     This deterministic fallback cannot understand product semantics, but it
     catches all-black/all-white/loading-shell renders without paid vision calls.
     """
-    points = sorted({min(max(0.2, duration - 0.2), 2.2), *(
-        max(0.2, duration * fraction) for fraction in (0.2, 0.5, 0.8)
-    )})
+    points = sorted(
+        {
+            min(max(0.2, duration - 0.2), 2.2),
+            *(max(0.2, duration * fraction) for fraction in (0.2, 0.5, 0.8)),
+        }
+    )
     metrics: list[dict[str, float]] = []
     for second in points:
         result = subprocess.run(
             [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{second:.3f}",
-                "-i", str(video), "-frames:v", "1", "-vf", "scale=64:36,format=gray",
-                "-f", "rawvideo", "-",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{second:.3f}",
+                "-i",
+                str(video),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=64:36,format=gray",
+                "-f",
+                "rawvideo",
+                "-",
             ],
             capture_output=True,
             check=False,
@@ -334,16 +398,100 @@ def _sample_frame_quality(video: Path, duration: float) -> list[dict[str, float]
             continue
         average = fmean(values)
         variance = fmean((value - average) ** 2 for value in values)
-        metrics.append({"second": round(second, 3), "mean_luma": round(average, 2), "variance": round(variance, 2)})
+        metrics.append(
+            {
+                "second": round(second, 3),
+                "mean_luma": round(average, 2),
+                "variance": round(variance, 2),
+            }
+        )
+    return metrics
+
+
+def _sample_content_quality(video: Path, duration: float) -> list[dict[str, float]]:
+    """Measure browser content without mistaking a light UI for blank footage.
+
+    A single centered crop incorrectly rejects legitimate white dashboards whose
+    content is aligned to the left or right. Sample a small grid across the
+    product region (excluding shell/caption bands) and only report an interval
+    when nearly every cell is genuinely uniform.
+    """
+    points = sorted(
+        {max(1.0, min(duration - 0.2, duration * fraction)) for fraction in (0.2, 0.5, 0.8)}
+    )
+    metrics: list[dict[str, float]] = []
+    for second in points:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{second:.3f}",
+                "-i",
+                str(video),
+                "-frames:v",
+                "1",
+                # Remove small shell/caption bands while retaining the full
+                # horizontal product area for responsive layouts.
+                "-vf",
+                "crop=iw*0.92:ih*0.72:iw*0.04:ih*0.08,scale=192:108,format=gray",
+                "-f",
+                "rawvideo",
+                "-",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        values = list(result.stdout)
+        if len(values) != 192 * 108:
+            continue
+        cell_width, cell_height = 48, 36
+        blank_cells = 0
+        cells = 0
+        for row in range(3):
+            for column in range(4):
+                cell = [
+                    values[y * 192 + x]
+                    for y in range(row * cell_height, (row + 1) * cell_height)
+                    for x in range(column * cell_width, (column + 1) * cell_width)
+                ]
+                average = fmean(cell)
+                variance = fmean((value - average) ** 2 for value in cell)
+                blank_cells += int(average >= 248.0 and variance < 120.0)
+                cells += 1
+        if cells and blank_cells / cells >= 0.80:
+            average = fmean(values)
+            variance = fmean((value - average) ** 2 for value in values)
+            metrics.append(
+                {
+                    "second": round(second, 3),
+                    "mean_luma": round(average, 2),
+                    "variance": round(variance, 2),
+                }
+            )
     return metrics
 
 
 def _frame_values(video: Path, second: float) -> list[int]:
     result = subprocess.run(
         [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{second:.3f}",
-            "-i", str(video), "-frames:v", "1", "-vf", "scale=64:36,format=gray",
-            "-f", "rawvideo", "-",
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{second:.3f}",
+            "-i",
+            str(video),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=64:36,format=gray",
+            "-f",
+            "rawvideo",
+            "-",
         ],
         capture_output=True,
         check=False,
@@ -370,14 +518,16 @@ def _source_faithfulness(
         evidence = _frame_values(source, source_second)
         if not rendered or not evidence:
             continue
-        metrics.append({
-            "second": round(second, 3),
-            # Presentation is permitted to use a small, bounded camera focus.
-            # Compare against its source at native scale and restrained crop
-            # candidates so a faithful target-focused frame is not mistaken
-            # for unrelated footage merely because it is not pixel-identical.
-            "correlation": round(_best_structural_correlation(rendered, evidence), 3),
-        })
+        metrics.append(
+            {
+                "second": round(second, 3),
+                # Presentation is permitted to use a small, bounded camera focus.
+                # Compare against its source at native scale and restrained crop
+                # candidates so a faithful target-focused frame is not mistaken
+                # for unrelated footage merely because it is not pixel-identical.
+                "correlation": round(_best_structural_correlation(rendered, evidence), 3),
+            }
+        )
     return metrics
 
 
@@ -427,10 +577,11 @@ def _best_structural_correlation(rendered: list[int], source: list[int]) -> floa
         (0.07, 0.03, 0.93, 0.90),
         (0.04, 0.04, 0.96, 0.94),
     ):
-        best = max(best, _correlation(
-            _resample_normalized_crop(rendered, left, top, right, bottom), source
-        ))
-    for zoom in (1.06, 1.12, 1.18):
+        best = max(
+            best,
+            _correlation(_resample_normalized_crop(rendered, left, top, right, bottom), source),
+        )
+    for zoom in (1.06, 1.12, 1.18, 1.28, 1.36):
         crop_width = max(8, round(64 / zoom))
         crop_height = max(8, round(36 / zoom))
         stride = 2
@@ -442,17 +593,23 @@ def _best_structural_correlation(rendered: list[int], source: list[int]) -> floa
         rendered_crop = [
             rendered[
                 (top + min(crop_height - 1, round(row * (crop_height - 1) / 35))) * 64
-                + left + min(crop_width - 1, round(column * (crop_width - 1) / 63))
+                + left
+                + min(crop_width - 1, round(column * (crop_width - 1) / 63))
             ]
-            for row in range(36) for column in range(64)
+            for row in range(36)
+            for column in range(64)
         ]
         best = max(best, _correlation(rendered_crop, source))
         for top in range(0, 36 - crop_height + 1, stride):
             for left in range(0, 64 - crop_width + 1, stride):
                 crop = [
-                    source[(top + min(crop_height - 1, round(row * (crop_height - 1) / 35))) * 64
-                           + left + min(crop_width - 1, round(column * (crop_width - 1) / 63))]
-                    for row in range(36) for column in range(64)
+                    source[
+                        (top + min(crop_height - 1, round(row * (crop_height - 1) / 35))) * 64
+                        + left
+                        + min(crop_width - 1, round(column * (crop_width - 1) / 63))
+                    ]
+                    for row in range(36)
+                    for column in range(64)
                 ]
                 best = max(best, _correlation(rendered, crop))
     return best

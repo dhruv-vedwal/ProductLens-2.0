@@ -1,9 +1,17 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from productlens.artifacts.store import RunArtifacts
+from productlens.artifacts.store import RunArtifacts, materialize_trace_lifecycle
+from productlens.contracts.models import (
+    DemoTrace,
+    InteractionEvent,
+    OperationKind,
+    Postcondition,
+    Target,
+)
 from productlens.storage.local import LocalArtifactStorage
 from productlens.storage.s3 import S3ArtifactStorage
 
@@ -46,7 +54,9 @@ def test_object_storage_manifest_is_checksum_backed_and_published_last(tmp_path,
     published: list[str] = []
     storage = object.__new__(S3ArtifactStorage)
     storage.bucket, storage.prefix = "bucket", "prefix"
-    monkeypatch.setattr(storage, "put", lambda source, key: published.append(key) or f"s3://bucket/{key}")
+    monkeypatch.setattr(
+        storage, "put", lambda source, key: published.append(key) or f"s3://bucket/{key}"
+    )
 
     manifest = storage.publish_run(run)
 
@@ -117,9 +127,7 @@ def test_manifest_excludes_mutable_run_status_checkpoint(tmp_path):
     artifacts.write_json("objective.json", {"objective": "demo"})
     artifacts.write_json("run-status.json", {"status": "RUNNING"})
     artifacts.write_manifest()
-    entries = json.loads((artifacts.root / "artifact-manifest.json").read_text())[
-        "artifacts"
-    ]
+    entries = json.loads((artifacts.root / "artifact-manifest.json").read_text())["artifacts"]
     assert "run-status.json" not in {entry["path"] for entry in entries}
 
 
@@ -141,3 +149,52 @@ def test_planning_retry_inherits_root_discovery_evidence_required_by_delivery_qa
     assert list((child.root / "page-knowledge").glob("*.json"))
     assert (child.root / "feature-graph.json").exists()
     assert (child.root / "candidate-flows.json").exists()
+
+
+def test_trace_lifecycle_projection_materializes_verification_boundaries():
+    event = InteractionEvent(
+        operation_id="op-1",
+        kind=OperationKind.CLICK,
+        intent="Open the observed panel",
+        occurred_at=datetime.now(UTC),
+        action_at=datetime.now(UTC),
+        target=Target(name="Panel", role="button", selector="#panel"),
+        page_url="https://example.test/",
+        success=True,
+        duration_ms=240,
+    )
+    trace = DemoTrace(
+        run_id="run-1", objective="inspect the panel", started_at=datetime.now(UTC), events=[event]
+    )
+    enriched = materialize_trace_lifecycle(trace)
+    assert len(enriched.state_snapshots) == 2
+    assert len(enriched.action_attempts) == 1
+    assert enriched.verification_results[0].status == "passed"
+
+
+def test_trace_lifecycle_preserves_authorized_submit_witness():
+    event = InteractionEvent(
+        operation_id="submit-1",
+        kind=OperationKind.SUBMIT,
+        intent="Submit the form",
+        target=Target(name="Save", role="button", selector="#save"),
+        postconditions=[
+            Postcondition(
+                kind="visible", expected=True, target=Target(name="Created result", role="status")
+            )
+        ],
+        page_url="https://example.test/",
+        success=True,
+        duration_ms=300,
+    )
+    trace = DemoTrace(
+        run_id="run-submit",
+        objective="create a safe record",
+        started_at=datetime.now(UTC),
+        events=[event],
+    )
+    enriched = materialize_trace_lifecycle(trace)
+    assert len(enriched.action_attempts) == 1
+    assert enriched.action_attempts[0].intent.gesture == "submit"
+    assert enriched.action_attempts[0].intent.side_effect_policy == "authorized_mutation"
+    assert enriched.action_attempts[0].intent.expected_state[0].target.name == "Created result"

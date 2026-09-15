@@ -3,6 +3,7 @@
 Passwords are deliberately never stored or returned. Tokens are signed, expire,
 and are additionally backed by a revocable server-side session row.
 """
+
 from __future__ import annotations
 
 import base64
@@ -46,20 +47,33 @@ def verify_password(password: str, encoded: str | None) -> bool:
 
 
 def create_access_token(*, user_id: str, session_id: str, secret: str, ttl_seconds: int) -> str:
-    payload = {"sub": user_id, "sid": session_id, "exp": int(time.time()) + ttl_seconds, "typ": "access"}
+    payload = {
+        "sub": user_id,
+        "sid": session_id,
+        "exp": int(time.time()) + ttl_seconds,
+        "typ": "access",
+    }
     encoded = _encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    signature = _encode(hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest())
+    signature = _encode(
+        hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest()
+    )
     return f"{encoded}.{signature}"
 
 
 def decode_access_token(token: str, secret: str) -> dict[str, Any] | None:
     try:
         encoded, signature = token.split(".", 1)
-        expected = _encode(hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest())
+        expected = _encode(
+            hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest()
+        )
         if not hmac.compare_digest(signature, expected):
             return None
         payload = json.loads(_decode(encoded))
-        if payload.get("typ") != "access" or not isinstance(payload.get("sub"), str) or not isinstance(payload.get("sid"), str):
+        if (
+            payload.get("typ") != "access"
+            or not isinstance(payload.get("sub"), str)
+            or not isinstance(payload.get("sid"), str)
+        ):
             return None
         if int(payload.get("exp", 0)) <= int(time.time()):
             return None

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "generic-presentation-baseline",
+  "requirements": {
+    "native_browser_frame": true,
+    "browser_zoom_percent": 100,
+    "camera_scale_min": 1.0,
+    "camera_scale_max": 1.35,
+    "caption_scene_ids_required": true,
+    "cursor_geometry_required": true,
+    "smooth_scroll_witnesses_required": true,
+    "no_crop": true,
+    "no_frozen_intervals": true
+  }
+}

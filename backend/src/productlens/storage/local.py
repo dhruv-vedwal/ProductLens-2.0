@@ -26,12 +26,19 @@ class LocalArtifactStorage:
         # so guarantees a mutation as soon as the new manifest replaces the
         # prior one.
         for source in sorted(
-            path for path in run_root.rglob("*")
+            path
+            for path in run_root.rglob("*")
             if path.is_file() and path.name != "artifact-manifest.json"
         ):
             relative = source.relative_to(run_root).as_posix()
-            entries.append({"path": relative, "location": str(source), "bytes": source.stat().st_size,
-                            "sha256": hashlib.sha256(source.read_bytes()).hexdigest()})
+            entries.append(
+                {
+                    "path": relative,
+                    "location": str(source),
+                    "bytes": source.stat().st_size,
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }
+            )
         manifest = {"run_id": run_root.name, "artifacts": entries}
         path = run_root / "artifact-manifest.json"
         path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

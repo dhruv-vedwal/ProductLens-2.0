@@ -36,7 +36,9 @@ class WorkflowStateMachine:
         self.current = self.initial
 
     def transition(self, event: str, *, verified: bool = False) -> str:
-        matches = [item for item in self.transitions if item.source == self.current and item.event == event]
+        matches = [
+            item for item in self.transitions if item.source == self.current and item.event == event
+        ]
         if not matches:
             raise InvalidTransition(f"No transition from {self.current!r} for {event!r}")
         rule = matches[0]
@@ -44,7 +46,9 @@ class WorkflowStateMachine:
             raise InvalidTransition(f"Postconditions required before {event!r}")
         previous = self.current
         self.current = rule.target
-        self.history.append({"source": previous, "event": event, "target": self.current, "verified": verified})
+        self.history.append(
+            {"source": previous, "event": event, "target": self.current, "verified": verified}
+        )
         return self.current
 
     def artifact(self) -> dict[str, object]:
@@ -64,7 +68,9 @@ class WorkflowStateMachine:
         }
 
     @classmethod
-    def from_operations(cls, operations: list[SemanticOperation], *, initial: str = "NEW") -> WorkflowStateMachine:
+    def from_operations(
+        cls, operations: list[SemanticOperation], *, initial: str = "NEW"
+    ) -> WorkflowStateMachine:
         """Compile a generic operation sequence into a deterministic state graph."""
         transitions: list[StateTransition] = []
         source = initial
@@ -75,7 +81,9 @@ class WorkflowStateMachine:
                     source=source,
                     event=operation.id,
                     target=target,
-                    required_postconditions=tuple(condition.kind for condition in operation.postconditions),
+                    required_postconditions=tuple(
+                        condition.kind for condition in operation.postconditions
+                    ),
                 )
             )
             source = target
