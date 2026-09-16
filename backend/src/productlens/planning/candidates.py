@@ -2019,8 +2019,7 @@ def build_page_complete_proposal(
             " ".join([objective_text, *getattr(context.objective, "requested_features", [])])
         )
         visual_intent = bool(
-            objective_tokens
-            & {"draw", "drawing", "design", "diagram", "whiteboard", "shape", "shapes", "canvas"}
+            objective_tokens & {"draw", "drawing", "design", "diagram", "whiteboard", "canvas"}
             or any(token.startswith("draw") for token in objective_tokens)
         )
         surface_candidates = [
@@ -2055,16 +2054,37 @@ def build_page_complete_proposal(
                 and not _PLACEHOLDER_ELEMENT_PATTERN.fullmatch(item.name.strip())
             ]
 
+            # A canvas usually exposes many unrelated buttons (lock, hand,
+            # help, undo, collaboration, etc.).  Selecting the ``max`` of
+            # that set by lexical overlap used to pick an arbitrary control
+            # and then draw at a meaningless location.  Restrict the
+            # candidate set to controls whose *observed accessible name*
+            # identifies an editing tool.  This vocabulary is a generic UI
+            # affordance vocabulary, not a product/route allow-list; if no
+            # such control is observed we deliberately do not emit a pointer
+            # mutation and the workflow validator can request more discovery.
+            visual_tool_terms = {
+                "draw", "drawing", "pen", "pencil", "brush", "line", "arrow",
+                "connector", "rectangle", "square", "ellipse", "circle", "diamond",
+                "shape", "text", "label", "freehand", "select", "eraser",
+            }
+            tool_candidates = [
+                item for item in tool_candidates
+                if _tokens(item.name) & visual_tool_terms
+            ]
+
             def tool_score(
                 item: ObservedElement, *, tokens: set[str] = objective_tokens
-            ) -> tuple[int, int, int, int]:
+            ) -> tuple[int, int, int, int, int]:
                 words = _tokens(item.name)
                 overlap = len(words & tokens)
-                draw_like = int(any(token.startswith("draw") for token in words))
-                # Prefer a concise tool label over a settings toggle whose
-                # explanatory sentence happens to contain ``drawing``.
-                concise_draw = int(draw_like and len(words) <= 2)
-                return concise_draw, draw_like, overlap, -len(item.name)
+                draw_like = int(bool(words & {"draw", "drawing", "pen", "pencil", "brush", "freehand"}))
+                shape_like = int(bool(words & {"line", "arrow", "connector", "rectangle", "square", "ellipse", "circle", "diamond", "shape", "text", "label"}))
+                # Selection/eraser controls are useful only when explicitly
+                # requested; they do not create a visible architecture beat.
+                utility_only = int(bool(words & {"select", "eraser", "hand", "pan", "lock", "undo", "redo"}))
+                concise = int(len(words) <= 2)
+                return draw_like, shape_like, overlap, concise, -utility_only
 
             tool = max(tool_candidates, key=tool_score, default=None)
             if tool:
@@ -2105,11 +2125,31 @@ def build_page_complete_proposal(
                             "duration_ms": 1_200,
                             "press": True,
                             "release": True,
+                            # Preserve an observed single-key shortcut when
+                            # the editor exposes one on the tool control. A
+                            # production replay can reassert the intended
+                            # tool immediately before the gesture without
+                            # embedding any editor-specific shortcut.
+                            "tool_shortcut": (
+                                tool.text.strip()
+                                if isinstance(tool.text, str)
+                                and len(tool.text.strip()) == 1
+                                and tool.text.strip().isalnum()
+                                else None
+                            ),
                         },
                         postconditions=[
                             Postcondition(
                                 kind="visible", expected=surface.name, target=destination_target
-                            )
+                            ),
+                            # Visibility of a canvas is not proof that the
+                            # gesture produced an object.  The execution
+                            # snapshot includes a bounded canvas/SVG surface
+                            # signature so this condition fails truthfully
+                            # when the editor ignored the pointer sequence.
+                            Postcondition(
+                                kind="changed", expected=True, target=destination_target
+                            ),
                         ],
                         critical=True,
                         story_phase="demonstrate",
@@ -2124,6 +2164,15 @@ def build_page_complete_proposal(
                         covered_content_groups=[surface.name],
                     )
                 )
+                # Do not synthesize text labels or connector paths from the
+                # wording of the objective.  A fixed grid of normalized points
+                # is not evidence of canvas objects and caused Excalidraw runs
+                # to report successful arrows/labels on an empty canvas.  Text
+                # placement and connectors are planned only after exploration
+                # observes concrete object geometry/state and records it as a
+                # capability.  Until then, retain the reversible stroke above
+                # (or leave the canvas unmodified) and let workflow validation
+                # reject objectives that require unsupported mutations.
         outcomes.append(
             f"{page_subject}: visible content established, explored, explained, demonstrated, and verified"
         )
@@ -2140,6 +2189,23 @@ def build_page_complete_proposal(
     workflow_label = candidate.name
     if workflow_label.lower().startswith("focused evidence walkthrough:") and len(pages) > 1:
         workflow_label = _page_story_subject(pages[1]) or workflow_label
+    # SVG/canvas nodes are common in dashboards (charts, icons, decorative
+    # shells).  Their presence alone must never turn an ordinary CRUD or
+    # reporting request into a synthetic drawing gesture.  Retain pointer
+    # scenes only when the objective explicitly describes a visual-editing
+    # task; the evidence-backed surface/tool checks above still apply.
+    visual_request_terms = {
+        "draw",
+        "drawing",
+        "design",
+        "diagram",
+        "whiteboard",
+        "canvas",
+        "sketch",
+        "paint",
+    }
+    if not (_tokens(objective_text) & visual_request_terms):
+        steps = [step for step in steps if step.kind is not OperationKind.POINTER_SEQUENCE]
     return WorkflowProposal(
         narrative_goal="Guide the viewer through evidence-backed product pages and their visible value.",
         selected_workflow=workflow_label,

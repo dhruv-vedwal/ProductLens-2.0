@@ -1,8 +1,9 @@
 import {Stagehand, browserbase, localBrowser} from "@browserbasehq/stagehand";
 import {z} from "zod/v4";
 
-// JSON-lines bridge. It deliberately only observes; ProductLens' Python
-// Playwright engine validates and executes every final semantic operation.
+// JSON-lines bridge. Observation and bounded rehearsal are exposed here;
+// ProductLens' Python interaction kernel remains the authority for policy,
+// production dispatch, verification, and the final trace.
 const read = await new Promise((resolve, reject) => {
   let input = "";
   process.stdin.setEncoding("utf8");
@@ -345,7 +346,44 @@ try {
       await page.goto(read.url);
     }
   }
-  if (read.mode === "act_observed") {
+  if (read.mode === "rehearse_agent") {
+    // A free-form agent is intentionally restricted to isolated rehearsal.
+    // Production must dispatch one ProductLens-approved candidate at a time
+    // so an LLM cannot create an unverified side effect or bypass the trace.
+    if (read.rehearsal !== true) throw new Error("rehearse_agent requires rehearsal=true");
+    if (typeof read.instruction !== "string" || !read.instruction.trim()) {
+      throw new Error("rehearse_agent requires an instruction");
+    }
+    const maxSteps = Number.isInteger(read.maxSteps) ? Math.max(1, Math.min(40, read.maxSteps)) : 12;
+    const agentOptions = {
+      mode: read.agentMode === "dom" ? "dom" : "hybrid",
+      ...(typeof read.model === "string" && read.model.trim() ? {model: read.model.trim()} : {}),
+    };
+    const agent = stagehand.agent(agentOptions);
+    const result = await agent.execute({
+      instruction: read.instruction.trim(),
+      maxSteps,
+      highlightCursor: false,
+    });
+    process.stdout.write(JSON.stringify({
+      version: 4,
+      mode: "rehearse_agent",
+      environment: read.environment,
+      observedUrl: ((value) => value && value !== "about:blank" ? value : read.url)(await readPageUrl(page, read.url)),
+      result: {
+        success: Boolean(result?.success),
+        message: String(result?.message ?? "").slice(0, 1000),
+        actions: Array.isArray(result?.actions) ? result.actions.map((item) => ({
+          type: String(item?.type ?? ""),
+          pageUrl: typeof item?.pageUrl === "string" ? item.pageUrl : null,
+          taskCompleted: Boolean(item?.taskCompleted),
+          reasoning: typeof item?.reasoning === "string" ? item.reasoning.slice(0, 500) : null,
+          timestamp: Number.isFinite(item?.timestamp) ? item.timestamp : null,
+        })) : [],
+      },
+      metrics: {...await stagehand.metrics(), stagehandSessionId: browser.sessionId ?? null},
+    }));
+  } else if (read.mode === "act_observed") {
     const action = read.action;
     if (!action || typeof action.selector !== "string" || typeof action.description !== "string" ||
         typeof action.method !== "string" || !Array.isArray(action.arguments)) {

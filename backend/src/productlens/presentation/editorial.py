@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from hashlib import sha256
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 from productlens.contracts.models import (
     DemoPlan,
@@ -849,7 +849,7 @@ def _viewer_ready(text: str, title: str = "") -> bool:
     # ``Here, Product Sections Controls Workspace.``; it can overlap evidence
     # yet still says nothing about what the viewer should understand.
     if not normalized.casefold().startswith("welcome to ") and not re.search(
-        r"\b(?:is|are|was|were|has|have|lets|helps|shows|keeps|brings|groups|gathers|contains|connects|supports|organizes|tracks|lists|offers|provides|explains|uses|creates|draws|draw|moves|opens|captures|gives|makes|enables|demonstrates|appears|remains|becomes|causes|caused|prevents|reduces|handles|processes|integrates|improves|requires|highlights|presents|introduces|focuses|describes|details|documents|covers|summarizes|summarises|can|will)\b",
+        r"\b(?:is|are|was|were|has|have|lets|helps|shows|keeps|brings|groups|gathers|contains|connects|supports|organizes|tracks|lists|offers|provides|explains|uses|creates|draws|draw|moves|opens|captures|gives|makes|enables|demonstrates|appears|remains|becomes|causes|caused|prevents|reduces|handles|processes|integrates|improves|requires|highlights|presents|introduces|focuses|describes|details|documents|covers|summarizes|summarises|includes|preserves|records|selects|adds|completes|can|will)\b",
         normalized,
         flags=re.IGNORECASE,
     ):
@@ -857,22 +857,36 @@ def _viewer_ready(text: str, title: str = "") -> bool:
     if normalized[0].islower() or _looks_like_label_collection(normalized):
         return False
     title_words = re.findall(r"[a-z0-9]{3,}", title.lower())
+    if title_words and title_words[0] == "the":
+        title_words = title_words[1:]
     words = re.findall(r"[a-z0-9]{3,}", normalized.lower())
-    if len(title_words) >= 2 and words[: len(title_words)] == title_words:
+    title_prefix_words = title_words
+    if len(title_words) >= 2 and words[: len(title_words) + 1] == ["the", *title_words]:
+        title_prefix_words = ["the", *title_words]
+    if len(title_words) >= 2 and words[: len(title_prefix_words)] == title_prefix_words:
         # Naming a project, company, or feature is useful when it is followed
         # by a real explanation. Reject only a title dump, not the natural
         # grammatical form "Feature X is ..." which prevents a presenter
         # from ever identifying the work being discussed.
         # Decorative emoji/bullets in headings make character offsets
         # unreliable; derive the remainder from normalized semantic tokens.
-        title_prefix = re.sub(r"^[^a-z0-9]+", "", " ".join(title.split()).lower())
+        # Compare semantic title tokens rather than punctuation (ampersands,
+        # bullets, and decorative separators are common in real headings).
+        title_pattern = r"\s*" + r"\W*".join(re.escape(word) for word in title_words)
+        title_prefix = title_pattern
+        if title_prefix_words and title_prefix_words[0] == "the":
+            title_pattern = r"\s*the\W*" + r"\W*".join(re.escape(word) for word in title_words)
         remainder = normalized.lower()[len(title_prefix) :].lstrip(" :—-.")
+        title_match = re.match(title_pattern + r"\b", normalized.lower())
+        remainder = (
+            normalized.lower()[title_match.end() :].lstrip() if title_match else normalized.lower()
+        )
         remainder_words = re.findall(r"[a-z0-9]{3,}", remainder)
         return (
             len(remainder_words) >= 4
             and bool(
                 re.match(
-                    r"^(?:is|are|was|were|focuses|provides|documents|combines|uses|connects|highlights|covers|organizes|keeps|offers|adds|explains|lists|groups|marks)\b",
+                    r"^(?:(?:is|are|was|were|focuses|provides|documents|combines|uses|connects|highlights|covers|organizes|keeps|offers|adds|explains|lists|groups|marks|gathers|exposes|records|preserves|captures|completes|gives)\b|(?:view|page|section|workspace|area|option|field|input)\s+(?:is|are|was|were|focuses|provides|documents|combines|uses|connects|highlights|covers|organizes|keeps|offers|adds|explains|lists|groups|marks|gathers|exposes|records|preserves|captures|completes|gives)\b)",
                     remainder.strip(),
                 )
             )
@@ -1421,14 +1435,26 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
         readable_options = ", ".join(re.findall(r"[A-Z][A-Za-z]+", options)[:3])
         option_lower = target.casefold()
         if "branch" in option_lower:
-            sentence = f"The visible {readable_options or 'Branch'} input connects this record to the location that will handle it"
+            sentence = f"The appointment is linked to {readable_options or 'the selected branch'}, keeping its operating location explicit"
         elif "source" in option_lower:
-            sentence = f"The visible {readable_options or 'source'} choices preserve where this record originated for later context"
+            sentence = f"The selected {readable_options or 'source'} choice preserves where this record originated for later context"
         elif "assign" in option_lower or "agent" in option_lower:
-            sentence = f"The visible {readable_options or 'Assigned To'} input makes ownership explicit before the workflow continues"
+            sentence = f"The selected {readable_options or 'assignment'} choice makes ownership explicit before the workflow continues"
         else:
-            sentence = f"The visible {readable_options or 'available'} choices keep this example connected to the context the workflow needs next"
+            sentence = f"The selected {readable_options or 'available'} choice keeps this example connected to the context the workflow needs next"
         return _human_sentence(sentence)
+    if operation.kind is OperationKind.SELECT_DATE:
+        # Date and time pickers are often custom text widgets, so their
+        # accessibility type is not reliable enough to choose a different
+        # executor. Narration should still describe the viewer value rather
+        # than repeating a placeholder such as ``dd-mm-yyyy`` or ``10:30``.
+        if re.search(r"\btime\b", target, re.IGNORECASE):
+            return _human_sentence(
+                "The booking time sets when this appointment will take place, completing the schedule for the selected clinician"
+            )
+        return _human_sentence(
+            "The booking date anchors this appointment in the visible schedule, so the team can confirm when the visit occurs"
+        )
     if operation.kind is OperationKind.SUBMIT:
         return _human_sentence(
             f"Selecting {target} adds the isolated record to the workflow, then checks its visible result on screen"
@@ -2785,6 +2811,51 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
             # create a duplicate generic "next view" chapter for its load.
             continue
         page = _page_for_operation(context, operation)
+        if (
+            operation.kind in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
+            and operation.target is not None
+        ):
+            # The execution planner stores the source page on a visible link
+            # target.  For narration, however, this scene must describe the
+            # destination that the viewer is about to see. Recover the
+            # same-origin href from the observed semantic selector and bind to
+            # that PageKnowledge record, avoiding source-shell captions such
+            # as ``Dashboard brings Lead Management into view``.
+            selector = str(operation.target.selector or "")
+            href_match = re.search(r"href=['\"]([^'\"]+)['\"]", selector)
+            if href_match:
+                destination = _canonical_page_url(urljoin(context.url, href_match.group(1)))
+                page = next(
+                    (
+                        candidate
+                        for candidate in context.page_knowledge
+                        if _canonical_page_url(candidate.url) == destination
+                        or urlsplit(_canonical_page_url(candidate.url)).path.rstrip("/")
+                        == urlsplit(destination).path.rstrip("/")
+                    ),
+                    page,
+                )
+            if page is None or _canonical_page_url(page.url) == _canonical_page_url(context.url):
+                expected_destination = next(
+                    (
+                        str(condition.expected)
+                        for condition in operation.postconditions
+                        if getattr(condition, "kind", "") == "url" and condition.expected
+                    ),
+                    "",
+                )
+                if expected_destination:
+                    destination = _canonical_page_url(urljoin(context.url, expected_destination))
+                    page = next(
+                        (
+                            candidate
+                            for candidate in context.page_knowledge
+                            if _canonical_page_url(candidate.url) == destination
+                            or urlsplit(_canonical_page_url(candidate.url)).path.rstrip("/")
+                            == urlsplit(destination).path.rstrip("/")
+                        ),
+                        page,
+                    )
         all_page_facts = " ".join(str(item) for item in getattr(page, "visible_facts", []) or [])
         # A route navigation without a DOM target still has a destination
         # page.  Use that observed page identity as the scene subject instead
@@ -2915,6 +2986,27 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
                     observed = _human_sentence(
                         f"The {subject} workspace brings its observed controls and current information together for review"
                     )
+            # A destination fact can be a short heading that passes the
+            # readability filter but still yields route-label prose such as
+            # ``the Lead Management view brings Lead Management into view``.
+            # Prefer a grounded collection/action summary from the same page;
+            # never let a navigation mechanic become the viewer's takeaway.
+            if re.search(
+                r"\bview brings .* into view, showing how this part of the product is organized\b",
+                observed,
+                flags=re.IGNORECASE,
+            ):
+                raw_page_text = " ".join(
+                    str(item) for item in getattr(page, "visible_facts", []) or []
+                )
+                observed = (
+                    _summary_from_collection(raw_page_text, subject)
+                    or _summary_from_schedule(raw_page_text, subject)
+                    or _summary_from_repeated_items(raw_page_text, subject)
+                    or _human_sentence(
+                        f"The {subject} workspace presents its visible controls and current information together, so the viewer can see how this area is used"
+                    )
+                )
             exploration_bridge = _exploration_context_bridge(context, page)
             if exploration_bridge is not None:
                 bridge_copy, bridge_evidence = exploration_bridge
@@ -2978,26 +3070,15 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
                     f"The {page_subject} view exposes {field_ref} to define the range represented by the information on screen"
                 )
             else:
-                section_labels = list(
-                    dict.fromkeys(
-                        _clean(str(value), 56)
-                        for value in (
-                            list(getattr(page, "visible_sections", []) or [])
-                            or list(getattr(page, "visible_facts", []) or [])
-                        )
-                        if str(value).strip() and not _is_metadata_fact(str(value))
-                    )
-                )[:3]
-                if section_labels:
-                    joined = ", ".join(section_labels[:-1])
-                    if len(section_labels) > 1:
-                        joined = f"{joined}, and {section_labels[-1]}"
-                    else:
-                        joined = section_labels[0]
-                    observed = _human_sentence(
-                        f"The {page_subject} view brings {joined} into view, showing how this part of the product is organized"
-                    )
-                elif field_ref.casefold() in {
+                raw_page_text = " ".join(
+                    str(value) for value in getattr(page, "visible_facts", []) or []
+                )
+                observed = (
+                    _summary_from_collection(raw_page_text, page_subject)
+                    or _summary_from_schedule(raw_page_text, page_subject)
+                    or _summary_from_repeated_items(raw_page_text, page_subject)
+                )
+                if not observed and field_ref.casefold() in {
                     page_subject.casefold(),
                     _clean(context.title).casefold(),
                     _clean(opening_purpose).casefold(),
@@ -3256,6 +3337,92 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
                 update={
                     "narration": _human_sentence(
                         f"The {target} area groups the product's available capabilities, giving the viewer a clear map of what follows"
+                    )
+                }
+            )
+        # Evidence recovery can replace a destination introduction with the
+        # old route-label template late in this function.  Keep the final
+        # guard next to the scene append so no later rewrite can reintroduce
+        # crawler language such as ``view brings X into view``.  Rebuild the
+        # line from the destination page's observed content instead.
+        if re.search(
+            r"\b(?:view|page)\s+brings\b.*\binto\s+view\b|\bshowing\s+how\s+this\s+part\s+of\s+the\s+product\s+is\s+organized\b",
+            provisional.narration,
+            re.IGNORECASE,
+        ):
+            destination_subject = (
+                _clean(
+                    str(getattr(page, "purpose", "") or getattr(page, "title", "") or target),
+                    64,
+                )
+                or target
+            )
+            raw_destination_text = " ".join(
+                str(item) for item in getattr(page, "visible_facts", []) or []
+            )
+            repaired_navigation = (
+                _summary_from_collection(raw_destination_text, destination_subject)
+                or _summary_from_schedule(raw_destination_text, destination_subject)
+                or _summary_from_repeated_items(raw_destination_text, destination_subject)
+            )
+            provisional = provisional.model_copy(
+                update={
+                    "narration": repaired_navigation
+                    or _human_sentence(
+                        f"The {destination_subject} workspace presents its observed controls and current information together for review"
+                    )
+                }
+            )
+        # VerifyState beats are often emitted beside a page-wide inventory.
+        # The inventory is useful evidence for planning but is not the thing
+        # being verified.  Rebind the final caption to the observed target so
+        # a field checkpoint cannot inherit a neighbouring page summary.
+        if operation.kind is OperationKind.VERIFY_STATE and target:
+            target_lower = target.casefold()
+            if any(
+                term in target_lower
+                for term in ("phone", "mobile", "telephone", "email", "mail", "name")
+            ):
+                provisional = provisional.model_copy(
+                    update={
+                        "narration": _human_sentence(
+                            f"This form provides the {target} field as a clear checkpoint before the record is completed"
+                        )
+                    }
+                )
+        if (
+            operation.kind is OperationKind.OPEN_NAVIGATION_ITEM
+            and target
+            and re.search(r"\boption\s+includes\b|\bopen\s+the\b", observed, re.IGNORECASE)
+        ):
+            destination_subject = (
+                _clean(
+                    str(getattr(page, "purpose", "") or getattr(page, "title", "") or target),
+                    64,
+                )
+                or target
+            )
+            destination_text = " ".join(
+                str(value) for value in getattr(page, "visible_facts", []) or []
+            )
+            navigation_summary = (
+                _summary_from_collection(destination_text, destination_subject)
+                or _summary_from_schedule(destination_text, destination_subject)
+                or _summary_from_repeated_items(destination_text, destination_subject)
+            )
+            provisional = provisional.model_copy(
+                update={
+                    "narration": navigation_summary
+                    or _human_sentence(
+                        f"The {target} workspace organizes its visible records and controls into the area we are about to explore"
+                    )
+                }
+            )
+        if operation.kind is OperationKind.SELECT_OPTION and target:
+            provisional = provisional.model_copy(
+                update={
+                    "narration": _human_sentence(
+                        f"The selected {target} choice shows the observed context this workflow carries forward"
                     )
                 }
             )
@@ -3675,6 +3842,12 @@ async def enrich_editorial_storyboard(
             "next view" in lowered
             or "next part of the walkthrough" in lowered
             or "is now visible" in lowered
+            or bool(
+                re.search(
+                    r"\b(?:view|page)\s+brings\b.*\binto\s+view\b|\bshowing\s+how\s+this\s+part\s+of\s+the\s+product\s+is\s+organized\b",
+                    lowered,
+                )
+            )
             or "observed details are read" in lowered
             or "before the walkthrough continues" in lowered
             or bool(re.search(r"\b(?:current|working)\s+view\b.*\b(?:before|then)\b", lowered))

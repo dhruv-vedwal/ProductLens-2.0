@@ -17,7 +17,7 @@ from productlens.contracts.models import (
     Viewport,
     WorkflowStep,
 )
-from productlens.execution.engine import ExecutionEngine, VerificationError
+from productlens.execution.engine import ExecutionEngine, VerificationError, _browser_url_matches
 from productlens.execution.playwright_adapter import GroundingError
 
 
@@ -35,6 +35,25 @@ class Adapter:
 
     async def execute(self, operation):
         return None
+
+
+def test_url_postcondition_accepts_spa_query_state_for_observed_route():
+    assert _browser_url_matches(
+        "https://example.test/leads?view=list&page=2",
+        "https://example.test/leads",
+    )
+    assert not _browser_url_matches(
+        "https://example.test/leads?view=list",
+        "https://example.test/other",
+    )
+    assert _browser_url_matches(
+        "https://example.test/leads/6aa999ac7115170648e7b0e4",
+        "https://example.test/leads/6aa9906b7115170648e74af0",
+    )
+    assert not _browser_url_matches(
+        "https://example.test/leads/maya-shah",
+        "https://example.test/leads/john-doe",
+    )
 
 
 class PointerNoChangeAdapter(Adapter):
@@ -112,6 +131,29 @@ async def test_engine_compiles_action_intents_into_the_same_execution_kernel():
     )
     assert event.success is True
     assert event.kind is OperationKind.READ_VALUE
+
+
+@pytest.mark.asyncio
+async def test_engine_persists_kernel_attempt_and_verified_outcome(tmp_path: Path):
+    trace = DemoTrace(
+        run_id="kernel-trace", objective="Inspect the result", started_at=datetime.now(UTC)
+    )
+    artifacts = RunArtifacts(tmp_path, trace.run_id)
+    engine = ExecutionEngine(Adapter(), trace, artifacts, capture_event_screenshots=False)
+    event = await engine.run(
+        SemanticOperation(
+            kind=OperationKind.CLICK,
+            intent="Inspect the visible result",
+            target=Target(name="Result"),
+        )
+    )
+
+    assert event.success
+    payload = (artifacts.root / "execution" / "interaction-trace.json").read_text()
+    assert '"complete": false' in payload
+    assert '"status": "passed"' in payload
+    assert len(engine.interaction_kernel.trace().attempts) == 1
+    assert len(engine.interaction_kernel.trace().verifications) == 1
 
 
 @pytest.mark.asyncio

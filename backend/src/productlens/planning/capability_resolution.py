@@ -19,6 +19,16 @@ from productlens.contracts.models import (
     Target,
 )
 
+
+def _bounded_intent(value: str, limit: int = 300) -> str:
+    """Keep the full request out of bounded contracts without failing planning."""
+    normalized = " ".join(str(value).split())
+    if len(normalized) <= limit:
+        return normalized
+    clipped = normalized[: limit - 3].rsplit(" ", 1)[0]
+    return f"{clipped}..."
+
+
 _WORD_RE = re.compile(r"[a-z0-9]{3,}", re.IGNORECASE)
 
 
@@ -464,7 +474,7 @@ class CapabilityResolver:
                 f"unresolved classes require further observation: {', '.join(unresolved)}"
             )
         return CapabilityResolution(
-            intent=intent,
+            intent=_bounded_intent(intent),
             required_capabilities=required,
             candidates=candidates,
             selected_capability_id=selected.id if selected else None,

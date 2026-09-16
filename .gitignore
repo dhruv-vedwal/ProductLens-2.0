@@ -23,6 +23,9 @@ backend/video/remotion/public/*-[0-9][0-9][0-9].png
 backend/.cache/*
 backend/.remotion/chrome-headless-shell/*
 backend/qa-viewport-*.png
+# Temporary visual-audit captures (never source artifacts)
+backend/excalidraw-*.jpg
+backend/excalidraw-local.png
 backend/**/*.mp4
 backend/**/*.webm
 backend/**/*.mkv

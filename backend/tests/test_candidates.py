@@ -504,6 +504,49 @@ def test_visual_editor_prefers_native_canvas_over_svg_overlay_for_pointer_editin
     assert stroke.target is not None and stroke.target.selector == "canvas"
 
 
+def test_visual_editor_does_not_fabricate_connectors_without_observed_geometry():
+    root = "https://editor.test/"
+    page = PageKnowledge(
+        url=root,
+        title="Diagram workspace",
+        purpose="Diagram workspace",
+        visible_sections=["Canvas", "Toolbar"],
+        scroll_landmarks=["Canvas"],
+        actionable_controls=["Text", "Arrow", "Canvas"],
+        fingerprint="diagram-connectors",
+    )
+    context = ProductContext(
+        url=root,
+        title="Diagram workspace",
+        application_type="web_application",
+        objective=ObjectiveSpec(
+            raw="Create an architecture diagram with components such as client, API, and database, connect them with arrows",
+            requested_features=["diagram", "canvas"],
+        ),
+        page_knowledge=[page],
+        elements=[
+            ObservedElement(tag="button", name="Text", selector="#text", source_url=root, actionable=True),
+            ObservedElement(tag="button", name="Arrow", selector="#arrow", source_url=root, actionable=True, text="A"),
+            ObservedElement(tag="canvas", name="canvas workspace", selector="canvas", source_url=root, actionable=True),
+        ],
+    )
+    proposal = build_page_complete_proposal(
+        context, CandidateDemoFlow(name="diagram", page_urls=[root], score=0.9)
+    )
+    connectors = [
+        operation
+        for operation in proposal.steps
+        if operation.kind is OperationKind.POINTER_SEQUENCE
+        and isinstance(operation.value, dict)
+        and operation.value.get("pattern") == "connector_segment"
+    ]
+    # A toolbar and canvas are not proof that components exist or that their
+    # endpoints are known.  The planner must refuse to synthesize a diagram
+    # from prompt text and arbitrary grid coordinates; a later observation /
+    # rehearsal can add grounded connector operations.
+    assert connectors == []
+
+
 def test_candidate_scope_rejects_action_from_a_page_that_is_no_longer_active():
     leads = "https://demo.test/leads"
     settings = "https://demo.test/settings"

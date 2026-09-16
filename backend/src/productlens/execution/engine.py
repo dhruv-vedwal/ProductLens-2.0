@@ -7,7 +7,7 @@ import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from time import perf_counter
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from playwright.async_api import Error as PlaywrightError
 
@@ -15,20 +15,28 @@ from productlens.artifacts.store import RunArtifacts
 from productlens.browser.recovery import RecoveryBudget
 from productlens.browser.theme import discover_theme_control
 from productlens.contracts.models import (
+    ActionAttempt,
     ActionIntent,
+    Affordance,
     DemoPlan,
     DemoTrace,
     FailureCode,
     InteractionEvent,
+    InteractionRecoveryDecision,
+    InteractionSnapshot,
     OperationKind,
+    OutcomeVerification,
     Postcondition,
     ReplanDecision,
     SemanticOperation,
+    Target,
+    VerificationResult,
     WorkflowState,
     WorkflowStep,
 )
 from productlens.execution.playwright_adapter import GroundingError, PlaywrightAdapter
 from productlens.execution.state_diff import state_delta
+from productlens.interaction import InteractionDirector, InteractionKernel
 
 
 class VerificationError(RuntimeError):
@@ -64,12 +72,80 @@ def _canonical_browser_url(value: str) -> str:
     )
 
 
+def _safe_evidence_url(value: str) -> str:
+    """Keep route identity while removing credential/token query values."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "[redacted-url]"
+    sensitive = re.compile(
+        r"(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|session|code|otp|state)",
+        re.IGNORECASE,
+    )
+    query = [
+        (key, "[redacted]") if sensitive.search(key) else (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+    ]
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
+
+
+def _redact_runtime_text(value: str) -> str:
+    """Remove common personal/credential-shaped values from evidence text."""
+    value = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "[redacted-email]", value)
+    value = re.sub(r"\b(?:\+?\d[\d ()-]{7,}\d)\b", "[redacted-phone]", value)
+    return re.sub(
+        r"(?im)\b(password|passcode|token|secret|api[ -]?key)\b\s*[:=]\s*\S+",
+        r"\1: [redacted]",
+        value,
+    )
+
+
 def _browser_url_matches(actual: str, expected: str) -> bool:
     """Match exact canonical states and the plan's same-origin suffix form."""
     if expected.startswith("**/"):
         suffix = unquote(expected[3:]).rstrip("/")
         return _canonical_browser_url(actual).rstrip("/").endswith("/" + suffix)
-    return _canonical_browser_url(actual) == _canonical_browser_url(expected)
+    actual_canonical = _canonical_browser_url(actual)
+    expected_canonical = _canonical_browser_url(expected)
+    if actual_canonical == expected_canonical:
+        return True
+    # SPAs commonly add filters, view state, cache keys, or pagination to a
+    # route after a semantic navigation click.  A plan that observed the
+    # destination without query state is asserting the page identity, not an
+    # exact transient query string.  Preserve strict matching whenever the
+    # plan supplied query parameters, but accept same-origin path identity for
+    # a query-less expected URL.
+    expected_parts = urlsplit(expected_canonical)
+    actual_parts = urlsplit(actual_canonical)
+    same_path = (
+        not expected_parts.query
+        and expected_parts.scheme == actual_parts.scheme
+        and expected_parts.netloc == actual_parts.netloc
+        and expected_parts.path.rstrip("/") == actual_parts.path.rstrip("/")
+    )
+    if same_path:
+        return True
+    # Creation/detail routes often contain a server-assigned opaque id.  A
+    # rehearsal observes one id, while production intentionally creates a new
+    # isolated record and receives another.  Treat only the final segment as
+    # dynamic when both values are high-entropy identifiers and the parent
+    # route is identical; human-readable slugs remain strict.
+    expected_path = expected_parts.path.rstrip("/").split("/")
+    actual_path = actual_parts.path.rstrip("/").split("/")
+    if (
+        not expected_parts.query
+        and expected_parts.scheme == actual_parts.scheme
+        and expected_parts.netloc == actual_parts.netloc
+        and len(expected_path) == len(actual_path)
+        and expected_path[:-1] == actual_path[:-1]
+        and len(expected_path) > 1
+        and re.fullmatch(r"[a-z0-9_-]{16,}", expected_path[-1], re.IGNORECASE)
+        and re.fullmatch(r"[a-z0-9_-]{16,}", actual_path[-1], re.IGNORECASE)
+        and any(character.isdigit() for character in expected_path[-1])
+        and any(character.isdigit() for character in actual_path[-1])
+    ):
+        return True
+    return False
 
 
 def _value_matches(target_name: str, expected: object, actual: str) -> bool:
@@ -112,6 +188,23 @@ class ExecutionEngine:
         self.force_light_theme = force_light_theme
         self.capture_event_screenshots = capture_event_screenshots
         self.recovery_budget = RecoveryBudget()
+        self.interaction_kernel = InteractionKernel(
+            run_id=trace.run_id,
+            objective=trace.objective,
+        )
+        self.interaction_director = InteractionDirector(self.interaction_kernel)
+
+    def _persist_interaction_trace(self, *, complete: bool = False) -> None:
+        """Write the canonical provider-neutral interaction trace when possible."""
+        if not self.artifacts:
+            return
+        try:
+            trace = self.interaction_kernel.trace(complete=complete)
+            self.artifacts.write_json(
+                "execution/interaction-trace.json", trace.model_dump(mode="json")
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must not mask execution
+            return
 
     def _active_page(self):
         # Keep lightweight adapter fakes and third-party compatibility callers
@@ -137,6 +230,216 @@ class ExecutionEngine:
         # Do not mutate product CSS. The next verifier measures the rendered
         # result and rejects the capture if the site's own control did not win.
 
+    async def _record_interaction_observation(self) -> InteractionSnapshot | None:
+        """Capture a redacted multimodal boundary for the interaction kernel."""
+        try:
+            page = self._active_page()
+            viewport, scroll = await self.adapter.view_state()
+            evidence_reader = getattr(self.adapter, "page_evidence", None)
+            evidence = await evidence_reader() if callable(evidence_reader) else {}
+            if not isinstance(evidence, dict):
+                evidence = {}
+            text = str(evidence.get("text") or "")[:12_000]
+            # Inputs are not included by page_evidence, but redact any values
+            # that a custom adapter may have returned before this snapshot is
+            # persisted. Credentials must never become interaction evidence.
+            text = _redact_runtime_text(text)
+            title = str(evidence.get("title") or "")[:240]
+            controls = (
+                evidence.get("controls") if isinstance(evidence.get("controls"), list) else []
+            )
+            safe_controls: list[dict[str, object]] = []
+            for item in controls:
+                if not isinstance(item, dict):
+                    continue
+                safe_item = dict(item)
+                if "name" in safe_item:
+                    safe_item["name"] = _redact_runtime_text(str(safe_item["name"]))[:240]
+                safe_controls.append(safe_item)
+            affordances: list[Affordance] = []
+            for item in controls[:160]:
+                if not isinstance(item, dict) or not str(item.get("name") or "").strip():
+                    continue
+                tag = str(item.get("tag") or "").casefold()
+                input_type = str(item.get("type") or "").casefold()
+                method = (
+                    "select"
+                    if tag == "select"
+                    else "type"
+                    if tag in {"input", "textarea"} and input_type not in {"checkbox", "radio"}
+                    else "keypress"
+                    if tag == "input" and input_type in {"search", "text"}
+                    else "click"
+                )
+                affordances.append(
+                    Affordance(
+                        label=_redact_runtime_text(str(item.get("name")))[:240],
+                        role=str(item.get("role") or item.get("tag") or "")[:80] or None,
+                        method=method,
+                        target=Target(
+                            name=_redact_runtime_text(str(item.get("name")))[:240],
+                            role=str(item.get("role") or item.get("tag") or "")[:80] or None,
+                            label=_redact_runtime_text(str(item.get("name")))[:240],
+                            selector=str(item.get("selector") or "") or None,
+                            source_url=_safe_evidence_url(str(getattr(page, "url", ""))),
+                        ),
+                        geometry=(
+                            item.get("geometry") if isinstance(item.get("geometry"), dict) else {}
+                        ),
+                        evidence_refs=["runtime:page-evidence"],
+                        confidence=0.86 if not bool(item.get("disabled")) else 0.0,
+                        visible=True,
+                        enabled=not bool(item.get("disabled")),
+                    )
+                )
+            visual_terms = " ".join(
+                str(item.get("name") or "") for item in controls if isinstance(item, dict)
+            ).casefold()
+            focused_target = None
+            focused = evidence.get("focusedControl")
+            if isinstance(focused, dict) and str(focused.get("name") or "").strip():
+                focused_name = _redact_runtime_text(str(focused.get("name")))[:240]
+                focused_target = Target(
+                    name=focused_name,
+                    role=str(focused.get("role") or focused.get("tag") or "")[:80] or None,
+                    label=focused_name,
+                    source_url=_safe_evidence_url(str(getattr(page, "url", ""))),
+                )
+            visual_surface = (
+                "canvas"
+                if "canvas" in visual_terms or "drawing" in text.casefold()
+                else "dom"
+                if controls or text
+                else "unknown"
+            )
+            safe_url = _safe_evidence_url(str(getattr(page, "url", "")))
+            observation_index = len(self.interaction_kernel.trace().observations) + 1
+            screenshot_ref = None
+            dom_ref = None
+            if self.artifacts:
+                observation_dir = self.artifacts.root / "execution" / "observations"
+                observation_dir.mkdir(parents=True, exist_ok=True)
+                evidence_path = observation_dir / f"{observation_index:03d}.json"
+                self.artifacts.write_json(
+                    str(evidence_path.relative_to(self.artifacts.root)),
+                    {
+                        "url": safe_url,
+                        "title": title,
+                        "text": text,
+                        "controls": safe_controls,
+                        "focusedControl": focused if isinstance(focused, dict) else None,
+                        "overlays": evidence.get("overlays") if isinstance(evidence.get("overlays"), list) else [],
+                        "dom": str(evidence.get("domSnapshot") or "")[:50_000],
+                        "accessibility": str(evidence.get("accessibilitySnapshot") or "")[:20_000],
+                    },
+                )
+                dom_ref = str(evidence_path.relative_to(self.artifacts.root))
+                accessibility_ref = dom_ref
+                try:
+                    screenshot_path = observation_dir / f"{observation_index:03d}.png"
+                    await page.screenshot(path=str(screenshot_path), full_page=False)
+                    screenshot_ref = str(screenshot_path.relative_to(self.artifacts.root))
+                except Exception:  # noqa: BLE001 - screenshot is optional evidence
+                    screenshot_ref = None
+            else:
+                accessibility_ref = None
+            observation = InteractionSnapshot(
+                url=safe_url,
+                title=title,
+                visible_text=text,
+                visible_affordances=affordances,
+                screenshot_ref=screenshot_ref,
+                dom_snapshot_ref=dom_ref,
+                accessibility_snapshot_ref=accessibility_ref,
+                viewport=viewport,
+                scroll=scroll,
+                focused_target=focused_target,
+                overlays=[
+                    str(item.get("label") or item.get("role") or "overlay")[:240]
+                    for item in (evidence.get("overlays") or [])
+                    if isinstance(item, dict)
+                ][:24],
+                visual_surface=(
+                    "mixed"
+                    if isinstance(evidence.get("visualSurface"), dict)
+                    and evidence["visualSurface"].get("canvas")
+                    and evidence["visualSurface"].get("svg")
+                    else "canvas"
+                    if isinstance(evidence.get("visualSurface"), dict)
+                    and evidence["visualSurface"].get("canvas")
+                    else visual_surface
+                ),
+                iframe_count=max(0, len(getattr(page, "frames", [])) - 1),
+                evidence_refs=["runtime:page-evidence", "runtime:view-state"],
+            )
+            self.interaction_director.observe(observation)
+            return observation
+        except Exception:  # noqa: BLE001 - evidence must never mask browser truth
+            return None
+
+    @staticmethod
+    def _action_intent_for_operation(operation: SemanticOperation) -> ActionIntent | None:
+        """Convert compatible planned gestures into the kernel contract."""
+        gesture_by_kind = {
+            OperationKind.NAVIGATE: "wait",
+            OperationKind.CLICK: "click",
+            OperationKind.OPEN_NAVIGATION_ITEM: "click",
+            OperationKind.OPEN_MODAL: "click",
+            OperationKind.CLOSE_MODAL: "click",
+            OperationKind.FILL_TEXT: "type",
+            OperationKind.FILL_EMAIL: "type",
+            OperationKind.FILL_PHONE: "type",
+            OperationKind.SELECT_OPTION: "select",
+            OperationKind.SELECT_DATE: "select",
+            OperationKind.SELECT_DATE_RANGE: "select",
+            OperationKind.CHECK: "click",
+            OperationKind.UNCHECK: "click",
+            OperationKind.CHOOSE_RADIO: "click",
+            OperationKind.SEARCH: "type",
+            OperationKind.APPLY_FILTER: "click",
+            OperationKind.SCROLL_TO: "scroll",
+            OperationKind.SUBMIT: "submit",
+            OperationKind.WAIT_FOR_STATE: "wait",
+            OperationKind.READ_VALUE: "observe",
+            OperationKind.VERIFY_STATE: "verify",
+            OperationKind.HOVER: "hover",
+            OperationKind.KEY_PRESS: "key",
+            OperationKind.UPLOAD: "upload",
+            OperationKind.CREATE_RECORD: "submit",
+            OperationKind.POINTER_SEQUENCE: "pointer_sequence",
+            OperationKind.DRAG: "drag",
+        }
+        gesture = gesture_by_kind.get(operation.kind)
+        if gesture is None:
+            # Drag/pointer operations carry richer geometry than this compact
+            # adapter can safely reconstruct. They remain in DemoTrace and
+            # are promoted once their observed path is available.
+            return None
+        policy = "authorized_mutation" if _is_non_replayable_operation(operation) else "read_only"
+        try:
+            parameters = operation.value if isinstance(operation.value, dict) else {}
+            destination = None
+            if gesture == "drag" and isinstance(parameters.get("destination"), dict):
+                destination = Target.model_validate(parameters["destination"])
+            if gesture == "pointer_sequence" and not (
+                parameters.get("points") or parameters.get("relative_points")
+            ):
+                return None
+            return ActionIntent(
+                id=operation.id,
+                goal=operation.intent,
+                gesture=gesture,
+                target=operation.target,
+                value=operation.value,
+                parameters=parameters,
+                destination=destination,
+                expected_state=list(operation.postconditions),
+                evidence_refs=list(operation.evidence_refs),
+                side_effect_policy=policy,
+            )
+        except ValueError:
+            return None
+
     async def run(
         self, operation: SemanticOperation, *, next_state: WorkflowState | None = None
     ) -> InteractionEvent:
@@ -152,6 +455,10 @@ class ExecutionEngine:
         scroll_motion: dict[str, object] | None = None
         verified_outcome: dict | None = None
         action_result: object | None = None
+        before_observation: InteractionSnapshot | None = None
+        after_observation: InteractionSnapshot | None = None
+        kernel_intent = self._action_intent_for_operation(operation)
+        kernel_attempt: ActionAttempt | None = None
         # This is deliberately captured *before* the editorial reading hold.
         # ``occurred_at`` is the moment the verified state became visible; a
         # hold preserves that state for the viewer, it is not part of the
@@ -190,6 +497,12 @@ class ExecutionEngine:
                     # Both calls resolve a fresh locator from the live DOM. A
                     # retry therefore re-grounds semantically, not by reusing an
                     # old coordinate or a cached element handle.
+                    before_observation = await self._record_interaction_observation()
+                    if kernel_intent is not None and before_observation is not None:
+                        kernel_attempt = ActionAttempt(
+                            intent=kernel_intent,
+                            before_state_id=before_observation.id,
+                        )
                     before = await self.adapter.snapshot(operation.target)
                     rect = await self.adapter.target_rect(operation.target)
                     if operation.kind is OperationKind.SCROLL_TO:
@@ -199,7 +512,10 @@ class ExecutionEngine:
                     if (
                         operation.kind is OperationKind.POINTER_SEQUENCE
                         and isinstance(operation.value, dict)
-                        and operation.value.get("pattern") == "short_reversible_stroke"
+                        and operation.value.get("pattern") in {
+                            "short_reversible_stroke",
+                            "connector_segment",
+                        }
                         and isinstance(action_result, dict)
                         and action_result.get("surface_changed") is False
                     ):
@@ -247,7 +563,37 @@ class ExecutionEngine:
                             verification_condition = condition.model_copy(
                                 update={"target": operation.target}
                             )
-                        await self.verify(verification_condition, before=before)
+                        if (
+                            condition.kind == "surface_changed"
+                            and isinstance(action_result, dict)
+                        ):
+                            observed_surface_change = action_result.get("surface_changed")
+                            if observed_surface_change is None:
+                                raise VerificationError(
+                                    "Pointer interaction did not provide a surface change witness"
+                                )
+                            if bool(observed_surface_change) is not bool(condition.expected):
+                                raise VerificationError(
+                                    "Expected observable editor surface change="
+                                    f"{bool(condition.expected)}, got {bool(observed_surface_change)}"
+                                )
+                        elif (
+                            condition.kind == "changed"
+                            and operation.kind is OperationKind.POINTER_SEQUENCE
+                            and isinstance(action_result, dict)
+                            and action_result.get("surface_changed") is not None
+                        ):
+                            # Pointer editors frequently expose no meaningful
+                            # DOM value. Prefer the clipped surface witness
+                            # produced by the adapter over a broad page hash,
+                            # which can be unchanged for a transparent canvas.
+                            if bool(action_result["surface_changed"]) is not bool(condition.expected):
+                                raise VerificationError(
+                                    "Expected observable editor surface change="
+                                    f"{bool(condition.expected)}, got {bool(action_result['surface_changed'])}"
+                                )
+                        else:
+                            await self.verify(verification_condition, before=before)
                         if (
                             operation.kind is OperationKind.SUBMIT
                             and condition.target is not None
@@ -316,6 +662,9 @@ class ExecutionEngine:
                     # Let a just-rendered reactive control settle, then rebuild
                     # the deterministic locator candidates from the current DOM.
                     await self.adapter.page.wait_for_timeout(250)
+                except Exception as error:
+                    failure = error
+                    raise
         finally:
             try:
                 after = await self.adapter.snapshot(operation.target)
@@ -327,6 +676,70 @@ class ExecutionEngine:
                 }
             if verified_outcome is not None:
                 after["verified_outcome"] = verified_outcome
+            after_observation = await self._record_interaction_observation()
+            if kernel_attempt is not None:
+                kernel_attempt.dispatched = action_at is not None
+                kernel_attempt.completed_at = datetime.now(UTC)
+                kernel_attempt.after_state_id = (
+                    after_observation.id if after_observation is not None else None
+                )
+                if not success:
+                    kernel_attempt.error = str(failure or "interaction operation failed")[:500]
+                verification = OutcomeVerification(
+                    intent_id=kernel_attempt.intent.id,
+                    status="passed" if success else "failed",
+                    expected=list(operation.postconditions),
+                    observed_state_id=(
+                        after_observation.id if after_observation is not None else None
+                    ),
+                    evidence_refs=list(operation.evidence_refs)
+                    or [f"trace:operation:{operation.id}"],
+                    state_delta=state_delta(before, after),
+                    confidence=1.0 if success else 0.0,
+                    reason=(
+                        "operation completed and postconditions verified"
+                        if success
+                        else str(failure or "operation failed")[:500]
+                    ),
+                )
+                kernel_attempt.verification = VerificationResult(
+                    intent_id=verification.intent_id,
+                    status=verification.status,
+                    expected=verification.expected,
+                    observed_state_id=verification.observed_state_id,
+                    evidence_refs=verification.evidence_refs,
+                    confidence=verification.confidence,
+                    reason=verification.reason,
+                )
+                try:
+                    self.interaction_kernel.record_attempt(kernel_attempt)
+                    self.interaction_kernel.record_verification(verification)
+                    for item in recovery:
+                        strategy = str(item.get("strategy") or "")
+                        decision = (
+                            "replace_suffix"
+                            if "fallback" in strategy
+                            else "stop"
+                            if action_at is not None and not success
+                            else "retry_before_dispatch"
+                        )
+                        self.interaction_kernel.record_recovery(
+                            InteractionRecoveryDecision(
+                                failed_attempt_id=kernel_attempt.id,
+                                source_snapshot_id=kernel_attempt.before_state_id
+                                or (after_observation.id if after_observation else "unknown"),
+                                decision=decision,
+                                reason=str(item.get("reason") or strategy or "bounded recovery")[
+                                    :500
+                                ],
+                                side_effect_dispatched=action_at is not None,
+                                evidence_refs=[f"trace:operation:{operation.id}"],
+                            )
+                        )
+                except ValueError:
+                    # Preserve browser truth even if a third-party adapter
+                    # supplied a malformed optional kernel boundary.
+                    pass
             viewport, scroll = await self.adapter.view_state()
             event = InteractionEvent(
                 operation_id=operation.id,
@@ -425,6 +838,7 @@ class ExecutionEngine:
                         "settled": event.success,
                     }
                 )
+            self._persist_interaction_trace()
         if next_state and success:
             self.state = next_state
             self.trace.final_state = next_state
@@ -637,6 +1051,47 @@ class ExecutionEngine:
                 raise VerificationError(
                     f"Expected observable state change={expected}, changed fields={delta['changed_fields']}"
                 )
+        elif condition.kind == "focused":
+            if condition.target is None:
+                raise VerificationError("Focused postcondition requires a semantic target")
+            locator, _ = await self.adapter.grounded_locator(condition.target)
+            focused = await locator.evaluate(
+                "element => element === document.activeElement || element.contains(document.activeElement)"
+            )
+            if not focused:
+                raise VerificationError(
+                    f"Expected {condition.target.name!r} to retain keyboard focus"
+                )
+        elif condition.kind == "options_visible":
+            # Native selects expose options in the element; custom comboboxes
+            # expose a visible role=listbox/option surface.  This witness is
+            # read-only and never opens a menu as a side effect.
+            expected = str(condition.expected) if condition.expected not in (True, False) else None
+            page = self.adapter.page
+            if condition.target is not None:
+                locator, _ = await self.adapter.grounded_locator(condition.target)
+                visible = await locator.evaluate(
+                    "element => Array.from(element.options || []).some(option => !option.disabled)"
+                )
+            else:
+                visible = False
+            if not visible:
+                options = page.get_by_role("option")
+                count = await options.count()
+                for index in range(count):
+                    option = options.nth(index)
+                    if not await option.is_visible():
+                        continue
+                    if expected is None or expected.casefold() in (await option.inner_text()).casefold():
+                        visible = True
+                        break
+            if not visible or condition.expected is False:
+                if bool(visible) is not bool(condition.expected):
+                    raise VerificationError("Expected the select options witness to match")
+        elif condition.kind == "overlay_clear":
+            blocker = getattr(self.adapter, "blocking_overlay", None)
+            if callable(blocker) and await blocker(condition.target) is not None:
+                raise VerificationError("A visible overlay still occludes the requested state")
         else:
             raise VerificationError(f"Unknown postcondition {condition.kind}")
 
@@ -644,6 +1099,12 @@ class ExecutionEngine:
         self.trace.completed_at = datetime.now(UTC)
         self.trace.final_state = WorkflowState.COMPLETE
         self.trace.outcome_verified = True
+        interaction_verdicts: dict[str, str] = {}
+        for item in self.interaction_kernel.trace().verifications:
+            interaction_verdicts[item.intent_id] = item.status
+        self._persist_interaction_trace(
+            complete=all(item == "passed" for item in interaction_verdicts.values())
+        )
         if self.artifacts:
             self.artifacts.save_trace(self.trace)
         return self.trace

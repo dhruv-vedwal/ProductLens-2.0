@@ -181,15 +181,18 @@ def derive_outcome_witness(
         terms = _words(phrase)
         if not phrase or terms <= before:
             continue
-        # A dialog/form is the input state, never proof that a submit created
-        # something. It may acquire a new validation message after an invalid
-        # click, so comparing it only with the pre-submit text is insufficient.
-        if item.role in {"dialog", "form"} or item.tag in {"form", "dialog"}:
-            continue
         action_like = item.tag in {"button", "input"} and not item.text
         if action_like:
             continue
         success = bool(terms & _SUCCESS_WORDS)
+        # Input forms are never outcomes. A dialog can be the product's
+        # explicit success confirmation (for example “Booking created — saved
+        # successfully”), so allow only that positive witness; validation and
+        # error dialogs remain excluded.
+        if item.role == "form" or item.tag == "form":
+            continue
+        if (item.role == "dialog" or item.tag == "dialog") and not success:
+            continue
         related = bool(terms & purpose) if purpose else False
         record_value = matching_submitted_value(phrase)
         structural_result = (
@@ -217,12 +220,35 @@ def derive_outcome_witness(
     # full text can include personal/contact columns from the application.
     # Keep the locator tied to the generated value while making every human
     # facing artifact and narration evidence neutral and safe.
-    is_structural_record = bool(record_value and structural_result)
+    selected_record_value = matching_submitted_value(phrase)
+    selected_structural_result = (
+        item.role in {"row", "gridcell", "status", "alert", "listitem"}
+        or item.tag in {"tr", "td", "li"}
+        or (selected_record_value is not None and item.selector.startswith(("#", "[data-testid=")))
+    )
+    is_structural_record = bool(selected_record_value and selected_structural_result)
+    selected_name = item.name
+    selected_text = item.text or item.name
+    # Keep a success-dialog locator concise and semantic. Persisting the full
+    # dialog transcript as an accessible-name equality target is brittle: a
+    # status line, button labels, or localization can change between the
+    # rehearsal and the clean production context. The evidence still retains
+    # the full phrase in ``outcome_evidence``; grounding uses the shortest
+    # observed success-bearing prefix.
+    if (item.role == "dialog" or item.tag == "dialog") and not is_structural_record:
+        success_word = re.search(
+            r"\b(?:success(?:fully|ful)?|created|saved|added|confirmed|complete(?:d)?)\b",
+            phrase,
+            flags=re.IGNORECASE,
+        )
+        if success_word:
+            selected_name = phrase[: success_word.end()].strip()
+            selected_text = selected_name
     target = Target(
-        name="verified created record" if is_structural_record else item.name,
+        name="verified created record" if is_structural_record else selected_name,
         role=item.role,
         selector=item.selector if item.selector.startswith(("#", "[")) else None,
-        text=record_value if is_structural_record else (item.text or item.name)[:300],
+        text=selected_record_value if is_structural_record else selected_text[:300],
         source_url=item.source_url or capability.source_url,
     )
     return capability.model_copy(

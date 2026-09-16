@@ -18,6 +18,12 @@ MUTATING_KINDS = {
     OperationKind.UNCHECK,
     OperationKind.CREATE_RECORD,
 }
+# Local, reversible gestures (canvas strokes, drag/reposition, and similar
+# UI edits) do not leave the product or notify third parties.  They are safe
+# to demonstrate under a read-only objective, but must still carry an
+# observable postcondition so a dispatched gesture cannot be mistaken for a
+# successful interaction.
+REVERSIBLE_GESTURE_KINDS = {OperationKind.POINTER_SEQUENCE, OperationKind.DRAG}
 _BLOCKED_TERMS = {
     "payment",
     "pay",
@@ -48,6 +54,12 @@ def side_effect_decision(operation: SemanticOperation) -> str:
         raise SideEffectPolicyError("Operation explicitly blocks side effects")
     if operation.side_effect_policy == "read_only" and operation.kind in MUTATING_KINDS:
         return "blocked_external"
+    if operation.kind in REVERSIBLE_GESTURE_KINDS:
+        if not any(condition.kind in {"changed", "test_state", "text", "visible"} for condition in operation.postconditions):
+            raise SideEffectPolicyError(
+                "Reversible gesture requires an observable postcondition"
+            )
+        return "allowed_reversible"
     if operation.kind not in MUTATING_KINDS:
         return "read_only"
     evidence = " ".join(
@@ -84,4 +96,6 @@ def authorize_operation(operation: SemanticOperation, allow_external_side_effect
         raise SideEffectPolicyError(
             "Side-effecting operation is not authorized: isolated-demo authorization required"
         )
+    if decision == "allowed_reversible":
+        return decision
     return decision

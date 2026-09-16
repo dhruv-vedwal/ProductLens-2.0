@@ -69,12 +69,69 @@ def _route_depth(value: str) -> int:
 def adaptive_exploration_budget(
     budget: DiscoveryBudget, objective: ObjectiveSpec, *, primary_route_count: int
 ) -> DiscoveryBudget:
-    """Expand bounded discovery only when a full tour proves it needs more pages."""
-    if objective.demo_type != "full_walkthrough":
+    """Expand bounded discovery only when the story needs page-local actions.
+
+    The narrow default is intentionally cheap for simple overviews.  A request
+    that explicitly asks the agent to create, fill, connect, draw, or otherwise
+    demonstrate a state-changing interaction needs enough *exploration* time to
+    open the relevant reversible control and inspect its resulting schema.  We
+    expand only for those generic interaction signals; this is not a product
+    route or workflow allow-list.
+    """
+    interaction_terms = {
+        "create",
+        "add",
+        "fill",
+        "enter",
+        "submit",
+        "save",
+        "configure",
+        "book",
+        "schedule",
+        "connect",
+        "draw",
+        "diagram",
+        "workflow",
+        "upload",
+        "drag",
+        "drop",
+        "invite",
+        "send",
+        "edit",
+        "update",
+        "delete",
+        "remove",
+        "filter",
+        "search",
+    }
+    objective_words = _tokens(
+        " ".join(
+            [
+                objective.raw,
+                objective.primary_entity or "",
+                *objective.requested_features,
+                *objective.must_show,
+            ]
+        )
+    )
+    interactive = bool(objective_words & interaction_terms)
+    if objective.demo_type != "full_walkthrough" and not interactive:
         return budget
     required_pages = max(1, primary_route_count + 1)  # opening page plus primary controls
-    expanded_pages = min(12, max(budget.max_pages, required_pages))
-    expanded_actions = min(72, max(budget.max_actions, expanded_pages * 4))
+    # Interactive feature tours need a route plus a reversible entry-control
+    # probe; full tours additionally need every visible primary route.
+    page_floor = 6 if interactive else 0
+    if interactive and objective.demo_type != "full_walkthrough":
+        # A focused workflow must not become a broad route sweep merely
+        # because the shell exposes many links.  Keep enough room for the
+        # entry page, the requested area, one supporting context page, and a
+        # result/detail state; relevance scoring decides which four-to-six
+        # routes earn that budget.
+        expanded_pages = min(6, max(budget.max_pages, page_floor))
+    else:
+        expanded_pages = min(12, max(budget.max_pages, required_pages, page_floor))
+    action_multiplier = 8 if interactive else 4
+    expanded_actions = min(96, max(budget.max_actions, expanded_pages * action_multiplier))
     # Even when the default page count already covers the visible routes,
     # full-tour discovery still needs time for page-local scroll sampling and
     # semantic probes. Previously the early return left the 60-second narrow
@@ -82,7 +139,11 @@ def adaptive_exploration_budget(
     # A page can require one bounded recovery/reopen plus a scroll sample;
     # budget roughly 75 seconds per selected page so a six-page SPA does not
     # expire halfway through route-local evidence collection.
-    expanded_time = min(900, max(budget.max_time_seconds, 180, expanded_pages * 75))
+    time_floor = 240 if interactive else 180
+    per_page_seconds = 45 if interactive else 75
+    expanded_time = min(
+        900, max(budget.max_time_seconds, time_floor, expanded_pages * per_page_seconds)
+    )
     if (
         expanded_pages == budget.max_pages
         and expanded_actions == budget.max_actions
@@ -328,6 +389,17 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
             }
             if entity_words and entity_words <= generic_entity_words:
                 walkthrough_entity = None
+    # Action-led visual objectives (draw/build/design a diagram, edit a
+    # canvas, etc.) describe an operation over an observed surface rather
+    # than asking for a literal page/entity label.  The first token after the
+    # imperative is frequently an adjective ("simple", "quick", "basic")
+    # and must not become a grounding requirement.  Leave entity selection to
+    # the observed canvas/tool evidence so any visual editor can be planned
+    # without product-specific vocabulary.
+    visual_action_objective = bool(
+        re.search(r"\b(?:create|build|draw|design|make|edit|sketch)\b", lower)
+        and re.search(r"\b(?:diagram|architecture|whiteboard|canvas|drawing|flowchart)\b", lower)
+    )
     # A completeness clause such as "walkthrough of every safe primary
     # section" describes breadth, not a product entity. Treating it as a
     # must-show feature makes full-tour planning fail before discovery can
@@ -362,7 +434,40 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
         # walkthrough subject was parsed above, it is the canonical feature
         # entity for this relationship.
         target = walkthrough_entity or target
-        if source != target:
+        # ``using`` also introduces ordinary execution qualifiers ("using
+        # realistic synthetic values when required"), not only a supporting
+        # product surface.  Do not turn those prose qualifiers into mandatory
+        # relationship pages; retain context phrases that name an observable
+        # setup/authentication/configuration surface.
+        source_words = _tokens(source)
+        qualifier_words = {
+            "realistic",
+            "synthetic",
+            "values",
+            "only",
+            "when",
+            "requires",
+            "required",
+            "observed",
+            "flow",
+            "needed",
+            "it",
+        }
+        observable_context_words = {
+            "config",
+            "configuration",
+            "settings",
+            "setting",
+            "setup",
+            "authentication",
+            "auth",
+            "permissions",
+            "permission",
+        }
+        prose_qualifier = bool(source_words & qualifier_words) and not bool(
+            source_words & observable_context_words
+        )
+        if source != target and not prose_qualifier:
             relationships.append(
                 ObjectiveRelationship(source=source, target=target, relation="context_for")
             )
@@ -448,8 +553,11 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
         "resources",
         "detail",
     }
-    primary_entity = walkthrough_entity or next(
-        (word for word in requested if word not in generic), None
+    primary_entity = (
+        None
+        if visual_action_objective and not walkthrough_entity
+        else walkthrough_entity
+        or next((word for word in requested if word not in generic), None)
     )
     if primary_entity is None and relationships:
         primary_entity = (
@@ -629,7 +737,21 @@ def _relationship_child_controls(
         if not terms or terms & _UNSAFE_ACTION_WORDS or not (terms & relationship_terms):
             continue
         controls.append((len(terms & relationship_terms), item))
-    return [item for _score, item in sorted(controls, key=lambda candidate: -candidate[0])]
+    # Relationship controls are a supporting-context probe, not a second
+    # crawler.  Repeated portal/virtualized controls can otherwise make every
+    # matching duplicate consume a remote CDP round trip and starve the actual
+    # feature page.  Keep the strongest unique semantic controls only.
+    unique: list[ObservedElement] = []
+    seen: set[tuple[str, str, str]] = set()
+    for _score, item in sorted(controls, key=lambda candidate: -candidate[0]):
+        key = (item.source_url or "", item.name.casefold(), item.selector)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+        if len(unique) >= 4:
+            break
+    return unique
 
 
 def _focused_relationship_evidence_complete(
@@ -1082,6 +1204,20 @@ def _bounded_page_navigation(
 class LiveDiscovery:
     """Inspects only the current page and its visible navigation; it never crawls blindly."""
 
+    @staticmethod
+    async def _safe_escape(page) -> None:
+        """Dismiss a reversible probe without letting a wedged CDP target leak.
+
+        Browser targets can stop answering while a portal is animating.  Cleanup
+        must be best-effort and bounded; otherwise a harmless Escape in a
+        ``finally`` block can consume the entire discovery watchdog.
+        """
+        try:
+            await asyncio.wait_for(page.keyboard.press("Escape"), timeout=3)
+            await asyncio.wait_for(page.wait_for_timeout(250), timeout=2)
+        except (PlaywrightError, TimeoutError):
+            return
+
     async def _visible_semantic_control(self, page, item: ObservedElement):
         """Resolve one currently visible discovery control without coordinates."""
         role = item.role if item.role in {"button", "link"} else "button"
@@ -1099,29 +1235,30 @@ class LiveDiscovery:
             # candidate and continue with the remaining evidence rather than
             # consuming the whole run deadline.
             try:
-                count = await asyncio.wait_for(locator.count(), timeout=2.5)
+                # Do not call ``count()`` here.  Counting a virtualized list or
+                # portal subtree forces a full remote DOM query and, on a
+                # target that is mid-transition, can block until the outer
+                # Browserbase lease expires.  The observed semantic control is
+                # already ranked and de-duplicated; the first currently
+                # visible match is the safe candidate.
+                candidate = locator.first
+                visible = await asyncio.wait_for(candidate.is_visible(), timeout=1.5)
+                box = await asyncio.wait_for(candidate.bounding_box(), timeout=1.5)
             except (PlaywrightError, TimeoutError):
                 continue
-            for index in range(min(count, 24)):
-                candidate = locator.nth(index)
-                try:
-                    visible = await asyncio.wait_for(candidate.is_visible(), timeout=1.5)
-                    box = await asyncio.wait_for(candidate.bounding_box(), timeout=1.5)
-                except (PlaywrightError, TimeoutError):
-                    continue
-                if not visible:
-                    continue
-                if not box or box["width"] < 2 or box["height"] < 2:
-                    continue
-                in_viewport = (
-                    box["x"] + box["width"] > 0
-                    and box["x"] < viewport["width"]
-                    and box["y"] + box["height"] > 0
-                    and box["y"] < viewport["height"]
-                )
-                if in_viewport:
-                    return candidate
-                deferred = deferred or candidate
+            if not visible:
+                continue
+            if not box or box["width"] < 2 or box["height"] < 2:
+                continue
+            in_viewport = (
+                box["x"] + box["width"] > 0
+                and box["x"] < viewport["width"]
+                and box["y"] + box["height"] > 0
+                and box["y"] < viewport["height"]
+            )
+            if in_viewport:
+                return candidate
+            deferred = deferred or candidate
         if deferred is not None:
             # The semantic locator is still valid but currently below the
             # fold. Scroll its DOM element into the reading region, then
@@ -1146,6 +1283,46 @@ class LiveDiscovery:
             except PlaywrightError:
                 pass
         return None
+
+    @staticmethod
+    async def _dom_semantic_click(page, item: ObservedElement) -> bool:
+        """Dispatch one evidence-grounded semantic click through the DOM.
+
+        A remote CDP session can reject Playwright's locator click while the
+        renderer is reconciling a portal.  The observed accessible name and
+        visible geometry still provide a safe target, so a single DOM-native
+        ``click()`` is a bounded fallback.  It never uses coordinates or a
+        product-specific selector and is limited to the reversible discovery
+        probe (production remains Playwright-authoritative).
+        """
+        try:
+            result = await asyncio.wait_for(
+                page.evaluate(
+                    """name => {
+                        const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+                        const wanted = normalize(name);
+                        const nodes = Array.from(document.querySelectorAll(
+                            'button, [role="button"], input[type="button"], input[type="submit"]'
+                        ));
+                        const node = nodes.find(candidate => {
+                            const rect = candidate.getBoundingClientRect();
+                            if (!(rect.width || rect.height || candidate.getClientRects().length)) return false;
+                            const label = normalize(
+                                candidate.getAttribute('aria-label') || candidate.innerText || candidate.value
+                            );
+                            return label === wanted;
+                        });
+                        if (!node) return false;
+                        node.click();
+                        return true;
+                    }""",
+                    item.name,
+                ),
+                timeout=5,
+            )
+            return bool(result)
+        except (PlaywrightError, TimeoutError):
+            return False
 
     async def _form_schema_from_scope(self, scope, source_url: str) -> FormSchema:
         """Extract only stable, human-identifiable controls from an open form.
@@ -1390,15 +1567,12 @@ class LiveDiscovery:
                     if values:
                         break
                     await page.wait_for_timeout(300)
-                await page.keyboard.press("Escape")
+                await self._safe_escape(page)
                 enriched.append(
                     field.model_copy(update={"options": list(dict.fromkeys(values))[:40]})
                 )
             except PlaywrightError:
-                try:
-                    await page.keyboard.press("Escape")
-                except PlaywrightError:
-                    pass
+                await self._safe_escape(page)
                 enriched.append(field)
         return schema.model_copy(update={"fields": enriched})
 
@@ -1684,7 +1858,10 @@ class LiveDiscovery:
             prior_url = page.url
             try:
                 visible = await self._visible_semantic_control(page, item)
+                dom_clicked = False
                 if visible is None:
+                    dom_clicked = await self._dom_semantic_click(page, item)
+                if visible is None and not dom_clicked:
                     continue
                 # A visible control can still be completing a design-system
                 # entrance/portal transition immediately after a route probe.
@@ -1693,51 +1870,119 @@ class LiveDiscovery:
                 # readiness checks and never relies on this discovery timing.
                 await page.wait_for_timeout(500)
                 try:
-                    await visible.click(timeout=5_000)
-                except PlaywrightTimeoutError:
-                    # This remains a safe, pre-submit exploration click on an
-                    # already verified visible semantic control. A single
-                    # force attempt handles transient sticky headers or
-                    # animation wrappers without broadening to coordinates.
-                    await visible.click(timeout=3_000, force=True)
+                    before_editable_count = await asyncio.wait_for(
+                        page.evaluate(
+                            """() => Array.from(document.querySelectorAll(
+                                'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="combobox"]'
+                            )).filter(node => {
+                                const rect = node.getBoundingClientRect();
+                                return !!(rect.width || rect.height || node.getClientRects().length);
+                            }).length"""
+                        ),
+                        timeout=3,
+                    )
+                except (PlaywrightError, TimeoutError):
+                    before_editable_count = 0
+                if not dom_clicked:
+                    try:
+                        await visible.click(timeout=5_000)
+                    except PlaywrightTimeoutError:
+                        # This remains a safe, pre-submit exploration click on
+                        # an already verified visible semantic control. A
+                        # single force attempt handles transient animation
+                        # wrappers without broadening to coordinates.
+                        await visible.click(timeout=3_000, force=True)
                 await page.wait_for_timeout(500)
-                dialogs = page.get_by_role("dialog")
-                dialog = None
-                for index in range(await dialogs.count()):
-                    candidate = dialogs.nth(index)
-                    if await candidate.is_visible():
-                        dialog = candidate
-                        break
-                if dialog is None:
-                    # A form may be rendered in a page-side panel rather than
-                    # a semantic dialog. It is still safe to record only when
-                    # it exposes an actual visible form.
-                    forms = page.locator("form")
-                    scope = None
-                    for index in range(await forms.count()):
-                        candidate = forms.nth(index)
-                        if await candidate.is_visible():
+                # Resolve the newly opened surface without counting large
+                # portal/virtualized subtrees (``count`` can block a remote
+                # CDP target while the SPA is re-rendering).  The first
+                # visible semantic surface is sufficient because the click
+                # itself was already ranked and grounded.
+                scope = None
+                for candidate in (
+                    page.get_by_role("dialog").first,
+                    page.locator("[aria-modal='true']").first,
+                    page.locator("form").first,
+                    page.locator(
+                        "[class*='drawer' i], [class*='modal' i], [class*='panel' i]"
+                    ).first,
+                ):
+                    try:
+                        if await asyncio.wait_for(candidate.is_visible(), timeout=1.5):
                             scope = candidate
                             break
-                else:
-                    scope = dialog
+                    except (PlaywrightError, TimeoutError):
+                        continue
+                if scope is None:
+                    # Plain portals may expose no semantic form surface.  A
+                    # positive editable-control delta is direct evidence that
+                    # the reversible entry click opened a workflow; use a
+                    # bounded body scope instead of a product-specific class.
+                    try:
+                        after_editable_count = await asyncio.wait_for(
+                            page.evaluate(
+                                """() => Array.from(document.querySelectorAll(
+                                    'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="combobox"]'
+                                )).filter(node => {
+                                    const rect = node.getBoundingClientRect();
+                                    return !!(rect.width || rect.height || node.getClientRects().length);
+                                }).length"""
+                            ),
+                            timeout=3,
+                        )
+                    except (PlaywrightError, TimeoutError):
+                        after_editable_count = before_editable_count
+                    if after_editable_count > 0:
+                        scope = page.locator("body")
                 if scope is None:
                     if _canonical_route(page.url) != _canonical_route(prior_url):
                         await page.go_back(wait_until="domcontentloaded")
                     else:
-                        await page.keyboard.press("Escape")
+                        await self._safe_escape(page)
                     continue
                 observed = await self.inspect(page, objective)
                 schema: FormSchema = await self._enrich_choice_options(
                     page, await self._form_schema_from_scope(scope, page.url)
                 )
+                # A portal can expose a visible shell (or even a semantic
+                # dialog) while rendering its actual controls in a sibling
+                # subtree.  If the click produced a positive editable-control
+                # delta and the selected shell yielded no fields, re-scan the
+                # bounded page body as the evidence scope.  This remains
+                # generic and state-grounded; it never invents selectors.
                 if not schema.fields:
-                    await page.keyboard.press("Escape")
+                    try:
+                        after_editable_count = await asyncio.wait_for(
+                            page.evaluate(
+                                """() => Array.from(document.querySelectorAll(
+                                    'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="combobox"]'
+                                )).filter(node => {
+                                    const rect = node.getBoundingClientRect();
+                                    return !!(rect.width || rect.height || node.getClientRects().length);
+                                }).length"""
+                            ),
+                            timeout=3,
+                        )
+                    except (PlaywrightError, TimeoutError):
+                        after_editable_count = before_editable_count
+                    if after_editable_count > 0:
+                        schema = await self._enrich_choice_options(
+                            page, await self._form_schema_from_scope(page.locator("body"), page.url)
+                        )
+                if not schema.fields:
+                    await self._safe_escape(page)
                     continue
                 submit_target = None
                 close_target = None
                 for candidate in observed.elements:
                     name = candidate.name.lower()
+                    # The entry control itself (for example ``New ...``) can
+                    # remain mounted behind a portal and match the generic
+                    # create/add vocabulary.  It opens the surface; it is not
+                    # the submit action.  Exclude that exact semantic control
+                    # so rehearsal cannot dispatch the entry click twice.
+                    if name == item.name.casefold():
+                        continue
                     if (
                         candidate.tag in {"button", "input"}
                         and submit_target is None
@@ -1753,13 +1998,13 @@ class LiveDiscovery:
                     ):
                         close_target = _capability_target(candidate)
                 if close_target is None:
-                    await page.keyboard.press("Escape")
+                    await self._safe_escape(page)
                 else:
                     closer = page.get_by_role("button", name=close_target.name, exact=True)
                     if await closer.count():
                         await closer.first.click()
                     else:
-                        await page.keyboard.press("Escape")
+                        await self._safe_escape(page)
                 await page.wait_for_timeout(250)
                 capabilities.append(
                     ActionCapability(
@@ -1781,10 +2026,7 @@ class LiveDiscovery:
                 actions.append(f"reversible_form_probe:{item.name}")
             except PlaywrightError as error:
                 blockers.append(f"capability_probe_failed:{item.name}:{str(error)[:120]}")
-                try:
-                    await page.keyboard.press("Escape")
-                except PlaywrightError:
-                    pass
+                await self._safe_escape(page)
         return capabilities, actions, blockers
 
     async def discover(
@@ -2240,11 +2482,7 @@ class LiveDiscovery:
                         # discovery probe. Escape is semantic and harmless;
                         # the page reload is only a read-only fallback when a
                         # component does not expose a dismissible state.
-                        try:
-                            await page.keyboard.press("Escape")
-                            await page.wait_for_timeout(250)
-                        except PlaywrightError:
-                            pass
+                        await self._safe_escape(page)
                 # A relationship context often lives one visible navigation
                 # level below its generic entry surface (for example, an
                 # observed Settings item followed by a named configuration).

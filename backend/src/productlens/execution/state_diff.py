@@ -35,6 +35,7 @@ _OBSERVABLE_FIELDS = {
     "exists",
     "dom_hash",
     "accessibility_hash",
+    "surface_signature",
     "loading",
 }
 
@@ -90,6 +91,7 @@ def state_delta(
                 "attributes",
                 "dom_hash",
                 "accessibility_hash",
+                "surface_signature",
             }
         ),
         "scroll_changed": scroll_changed,

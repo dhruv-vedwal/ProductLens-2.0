@@ -169,6 +169,16 @@ class PlaywrightAdapter:
                 )
         if target.label:
             candidates.append(("label", self.page.get_by_label(target.label, exact=True)))
+            # Placeholder text is often the only stable semantic identity for
+            # date/time and custom design-system inputs. Keep it separate from
+            # CSS selectors so punctuation/Unicode in the placeholder cannot
+            # make a captured selector invalid.
+            try:
+                candidates.append(
+                    ("placeholder", self.page.get_by_placeholder(target.label, exact=True))
+                )
+            except (PlaywrightError, AttributeError):
+                pass
         # A selector captured from the observed DOM is stronger evidence for
         # an action target than nearby descriptive text.  Forms commonly
         # render a label and its input as separate nodes (for example a
@@ -177,6 +187,16 @@ class PlaywrightAdapter:
         # plan fail in production.  Keep semantic role/label evidence first,
         # then use the observed selector, and only then fall back to text.
         if target.selector:
+            # Canvas editors often render a full-size static backing canvas
+            # beneath a second, pointer-active canvas.  A bare observed
+            # ``canvas`` selector is intentionally preserved as the fallback,
+            # but prefer the non-static layer when it is present so pointer
+            # gestures reach the editor rather than its paint-only backdrop.
+            # This is a rendering-semantic distinction, not an app adapter;
+            # unknown editors still use the original selector if no such
+            # layer exists.
+            if target.selector.strip().casefold() == "canvas":
+                candidates.append(("interactive_canvas", self.page.locator("canvas:not(.static)")))
             candidates.append(("selector", self.page.locator(target.selector)))
         if target.text:
             candidates.append(("text", self.page.get_by_text(target.text, exact=True)))
@@ -215,6 +235,15 @@ class PlaywrightAdapter:
                     candidates.append(
                         (f"{prefix}:label", frame.get_by_label(target.label, exact=True))
                     )
+                    try:
+                        candidates.append(
+                            (
+                                f"{prefix}:placeholder",
+                                frame.get_by_placeholder(target.label, exact=True),
+                            )
+                        )
+                    except (PlaywrightError, AttributeError):
+                        pass
                 if target.selector:
                     candidates.append((f"{prefix}:selector", frame.locator(target.selector)))
                 if target.text:
@@ -457,6 +486,17 @@ class PlaywrightAdapter:
         """
         self.ensure_page()
         dialogs = self.page.get_by_role("dialog")
+        target_box: dict[str, float] | None = None
+        if target is not None:
+            try:
+                target_locator, _ = await self.visible_locator(target)
+                box = await target_locator.bounding_box()
+                if box:
+                    target_box = {key: float(box.get(key, 0)) for key in ("x", "y", "width", "height")}
+            except (GroundingError, PlaywrightError):
+                # An unavailable target is itself useful evidence below: an
+                # open modal/popover may be intercepting the page.
+                target_box = None
         try:
             for index in range(await dialogs.count()):
                 dialog = dialogs.nth(index)
@@ -477,7 +517,50 @@ class PlaywrightAdapter:
                 label = (await dialog.inner_text()).strip().replace("\n", " ")
                 return label[:240] or "visible dialog"
         except PlaywrightError:
-            return None
+            pass
+
+        # Many design systems do not use role=dialog.  Detect only visible,
+        # elevated, pointer-intercepting surfaces that spatially overlap the
+        # requested target.  This deliberately avoids class-name-only
+        # heuristics: a candidate must have a fixed/absolute position, a
+        # positive stacking context and an actual intersection with the target
+        # (or cover the viewport when the target cannot be grounded).
+        try:
+            candidates = await self.page.evaluate(
+                """(target) => {
+                  const visible = node => {
+                    const r = node.getBoundingClientRect();
+                    const s = getComputedStyle(node);
+                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' &&
+                      s.display !== 'none' && s.pointerEvents !== 'none';
+                  };
+                  const intersects = (a, b) => {
+                    if (!b) return a.width >= innerWidth * .55 && a.height >= innerHeight * .35;
+                    return a.left < b.x + b.width && a.right > b.x &&
+                      a.top < b.y + b.height && a.bottom > b.y;
+                  };
+                  return Array.from(document.querySelectorAll(
+                    '[aria-modal="true"],[data-state="open"],[role="listbox"],[role="menu"],
+                    '[class*="modal" i],[class*="popover" i],[class*="dropdown" i],
+                    '[class*="backdrop" i],[class*="overlay" i]'
+                  )).filter(node => visible(node)).map(node => {
+                    const r = node.getBoundingClientRect();
+                    const s = getComputedStyle(node);
+                    return { node, rect: {left:r.left, top:r.top, right:r.right, bottom:r.bottom,
+                      width:r.width, height:r.height}, position:s.position,
+                      zIndex: Number.parseInt(s.zIndex || '0', 10) || 0,
+                      label:(node.getAttribute('aria-label') || node.innerText || '').trim().slice(0, 180) };
+                  }).filter(item => ['fixed','absolute','sticky'].includes(item.position) &&
+                    item.zIndex >= 1 && intersects(item.rect, target)).sort((a,b) => b.zIndex-a.zIndex)
+                    .map(item => ({rect:item.rect, label:item.label, zIndex:item.zIndex}));
+                }""",
+                target_box,
+            )
+            if isinstance(candidates, list) and candidates:
+                item = candidates[0]
+                return str(item.get("label") or "visible overlay")[:240]
+        except (PlaywrightError, TypeError):
+            pass
         return None
 
     async def target_rect(self, target: Target | None) -> Rect | None:
@@ -526,8 +609,26 @@ class PlaywrightAdapter:
             payload = operation.value if isinstance(operation.value, dict) else {}
             points = payload.get("points")
             surface = None
-            if payload.get("pattern") == "short_reversible_stroke" and operation.target is not None:
+            pattern = str(payload.get("pattern", ""))
+            if pattern in {"short_reversible_stroke", "connector_segment"} and operation.target is not None:
                 surface, _ = await self.grounded_locator(operation.target)
+            relative_points = payload.get("relative_points")
+            if (
+                not isinstance(points, list)
+                and isinstance(relative_points, list)
+                and operation.target is not None
+            ):
+                box = await surface.bounding_box()
+                if not box or box.get("width", 0) < 16 or box.get("height", 0) < 16:
+                    raise GroundingError("Observed drawing surface has no usable geometry")
+                points = [
+                    {
+                        "x": float(box["x"]) + float(item["x"]) * float(box["width"]),
+                        "y": float(box["y"]) + float(item["y"]) * float(box["height"]),
+                    }
+                    for item in relative_points
+                    if isinstance(item, dict) and {"x", "y"} <= set(item)
+                ]
             if (
                 not isinstance(points, list)
                 and payload.get("pattern") == "short_reversible_stroke"
@@ -550,9 +651,10 @@ class PlaywrightAdapter:
                     {"x": float(box["x"]) + width - inset_x, "y": center_y - inset_y * 0.15},
                 ]
             surface_fingerprint = None
+            surface_structure = None
             surface_box = None
             proof_box = None
-            if payload.get("pattern") == "short_reversible_stroke" and operation.target is not None:
+            if pattern in {"short_reversible_stroke", "connector_segment"} and operation.target is not None:
                 # Capture a lightweight, target-local fingerprint before the
                 # gesture.  This is outcome evidence, not a product adapter:
                 # a clipped rendered screenshot is the only portable signal
@@ -592,12 +694,42 @@ class PlaywrightAdapter:
                                     "height": bottom - top,
                                 }
                                 surface_fingerprint = await self.page.screenshot(clip=proof_box)
+                    # A selection marquee or cursor highlight can change
+                    # pixels without creating an editor element.  Where the
+                    # page exposes an SVG/DOM scene graph, retain a compact
+                    # structural fingerprint as stronger evidence of a
+                    # committed edit; canvas-only editors continue to use
+                    # the pixel witness above.
+                    try:
+                        surface_structure = await self.page.evaluate(
+                            """() => ({
+                              svg: Array.from(document.querySelectorAll('svg')).map(node => ({
+                                count: node.querySelectorAll('*').length,
+                                html: node.innerHTML.length
+                              })),
+                              canvas: document.querySelectorAll('canvas').length,
+                              semantic_nodes: document.querySelectorAll(
+                                '[data-testid],[data-shape],[data-element-id],[aria-label]'
+                              ).length
+                            })"""
+                        )
+                    except PlaywrightError:
+                        surface_structure = None
                 except PlaywrightError:
                     surface_fingerprint = None
                 payload = {**payload, "points": points}
             if not isinstance(points, list) or len(points) < 2:
                 raise GroundingError("PointerSequence requires at least two observed points")
             duration_ms = max(0, int(payload.get("duration_ms", 450)))
+            shortcut = payload.get("tool_shortcut")
+            if isinstance(shortcut, str) and len(shortcut.strip()) == 1 and shortcut.isalnum():
+                # Some canvas editors revert to selection after a toolbar
+                # click when focus moves to the drawing surface.  Reassert
+                # only the shortcut that discovery observed on the chosen
+                # tool; this keeps the gesture generic and avoids guessing
+                # application-specific keys.
+                await self.page.keyboard.press(shortcut.strip())
+                await self.page.wait_for_timeout(180)
             # Browser mouse moves are discrete events.  A three-point path is
             # enough for cursor presentation but too sparse for drawing
             # surfaces that build a stroke from continuous pointer movement.
@@ -626,7 +758,10 @@ class PlaywrightAdapter:
             # moved with no button pressed, making canvas/whiteboard actions
             # silently no-op on real pages.
             pressed = bool(
-                payload.get("press", payload.get("pattern") == "short_reversible_stroke")
+                payload.get(
+                    "press",
+                    payload.get("pattern") in {"short_reversible_stroke", "connector_segment"},
+                )
             )
             first = points[0]
             if not isinstance(first, dict) or not {"x", "y"} <= set(first):
@@ -649,7 +784,8 @@ class PlaywrightAdapter:
             if pressed or bool(payload.get("release", False)):
                 await self.page.mouse.up(button=button)
             changed = None
-            if payload.get("pattern") == "short_reversible_stroke" and operation.target is not None:
+            after_structure = None
+            if pattern in {"short_reversible_stroke", "connector_segment"} and operation.target is not None:
                 try:
                     # Canvas/SVG editors often commit their paint layer on the
                     # next compositor tick after pointerup.  Let that render
@@ -660,9 +796,35 @@ class PlaywrightAdapter:
                     after_fingerprint = (
                         await self.page.screenshot(clip=proof_box) if proof_box else None
                     )
-                    changed = bool(
-                        surface_fingerprint is not None and after_fingerprint != surface_fingerprint
+                    after_structure = await self.page.evaluate(
+                        """() => ({
+                          svg: Array.from(document.querySelectorAll('svg')).map(node => ({
+                            count: node.querySelectorAll('*').length,
+                            html: node.innerHTML.length
+                          })),
+                          canvas: document.querySelectorAll('canvas').length,
+                          semantic_nodes: document.querySelectorAll(
+                            '[data-testid],[data-shape],[data-element-id],[aria-label]'
+                          ).length
+                        })"""
                     )
+                    structural_witness = bool(
+                        isinstance(surface_structure, dict)
+                        and surface_structure.get("svg")
+                        and isinstance(after_structure, dict)
+                        and after_structure != surface_structure
+                    )
+                    pixel_witness = bool(
+                        surface_fingerprint is not None
+                        and after_fingerprint != surface_fingerprint
+                    )
+                    # Prefer structural proof when an SVG scene graph is
+                    # available; transient selection pixels are not a valid
+                    # committed drawing.  For canvas-only products, the
+                    # clipped pixel witness remains the portable fallback.
+                    changed = structural_witness if (
+                        isinstance(surface_structure, dict) and surface_structure.get("svg")
+                    ) else pixel_witness
                 except PlaywrightError:
                     changed = False
             return {
@@ -670,6 +832,13 @@ class PlaywrightAdapter:
                 "duration_ms": duration_ms,
                 "button": button,
                 **({"surface_changed": changed} if changed is not None else {}),
+                **({
+                    "semantic_evidence": {
+                        "before": surface_structure,
+                        "after": after_structure,
+                        "committed": bool(changed),
+                    }
+                } if pattern in {"short_reversible_stroke", "connector_segment"} else {}),
             }
         if operation.kind is OperationKind.READ_VALUE and operation.target is None:
             return {
@@ -684,10 +853,49 @@ class PlaywrightAdapter:
             await self.page.wait_for_timeout(timeout_ms)
             return {"waited_ms": timeout_ms}
         if operation.kind is OperationKind.KEY_PRESS and operation.target is None:
+            # A focused canvas text editor needs human-paced text input rather
+            # than a single keyboard shortcut.  The planner uses this form
+            # only after grounding a visible text tool and canvas target.
+            if isinstance(operation.value, dict) and isinstance(operation.value.get("text"), str):
+                text = operation.value["text"]
+                focus_before = await self.page.evaluate(
+                    """() => {
+                      const e = document.activeElement;
+                      if (!e || e === document.body || e === document.documentElement) return null;
+                      const tag = e.tagName.toLowerCase();
+                      const editable = e.isContentEditable || tag === 'input' || tag === 'textarea' ||
+                        e.getAttribute('role') === 'textbox';
+                      return editable ? {
+                        tag,
+                        name: (e.getAttribute('aria-label') || e.getAttribute('name') ||
+                          e.getAttribute('placeholder') || '').slice(0,160),
+                        contenteditable: e.isContentEditable,
+                      } : null;
+                    }"""
+                )
+                if not focus_before:
+                    raise GroundingError(
+                        "Keyboard text input requires a focused editable surface"
+                    )
+                await self.page.keyboard.type(text, delay=70)
+                await self.page.wait_for_timeout(120)
+                focus = await self.page.evaluate(
+                    """() => { const e=document.activeElement; return e && e !== document.body ? {
+                      tag:e.tagName.toLowerCase(), name:(e.getAttribute('aria-label') || e.getAttribute('name') ||
+                      e.getAttribute('placeholder') || '').slice(0,160), contenteditable:e.isContentEditable
+                    } : null; }"""
+                )
+                return {"text_length": len(text), "scope": "focused-editable", "focused": focus}
             key = str(operation.value or "Escape")
             await self.page.keyboard.press(key)
             await self.page.wait_for_timeout(120)
-            return {"key": key, "scope": "page"}
+            focus = await self.page.evaluate(
+                """() => { const e=document.activeElement; return e && e !== document.body ? {
+                  tag:e.tagName.toLowerCase(), name:(e.getAttribute('aria-label') || e.getAttribute('name') ||
+                  e.getAttribute('placeholder') || '').slice(0,160), contenteditable:e.isContentEditable
+                } : null; }"""
+            )
+            return {"key": key, "scope": "page", "focused": focus}
         if operation.target is None:
             raise GroundingError(f"{operation.kind} needs a semantic target")
         locator, _ = await self.grounded_locator(operation.target)
@@ -708,7 +916,20 @@ class PlaywrightAdapter:
             await locator.click()
             await locator.press("ControlOrMeta+A")
             await locator.press("Backspace")
-            return await locator.press_sequentially(str(operation.value), delay=70)
+            result = await locator.press_sequentially(str(operation.value), delay=70)
+            # Lightweight adapter fakes used by unit tests (and a few remote
+            # wrappers) expose the action methods but not Playwright's
+            # ``evaluate`` helper.  Keep the browser witness when available;
+            # the execution engine will require it for a real production
+            # interaction, while compatibility adapters can still exercise
+            # the visible typing sequence itself.
+            try:
+                focus = await locator.evaluate(
+                    "element => ({focused: element === document.activeElement || element.contains(document.activeElement), valuePresent: Boolean(element.value || element.textContent), valueLength: String(element.value || element.textContent || '').length})"
+                )
+            except (AttributeError, PlaywrightError):
+                focus = None
+            return {"typed": True, "focus": focus, "result": result}
         if operation.kind == OperationKind.SELECT_DATE:
             return await locator.fill(str(operation.value))
         if operation.kind == OperationKind.SELECT_DATE_RANGE:
@@ -719,7 +940,11 @@ class PlaywrightAdapter:
             return await locator.fill(str(operation.value["start"]))
         if operation.kind == OperationKind.SELECT_OPTION:
             try:
-                return await locator.select_option(str(operation.value))
+                selected = await locator.select_option(str(operation.value))
+                state = await locator.evaluate(
+                    "element => ({value: String(element.value || ''), selectedText: element.selectedOptions ? Array.from(element.selectedOptions).map(o => o.textContent.trim()) : [], focused: element === document.activeElement})"
+                )
+                return {"selected": selected, "state": state}
             except (AttributeError, PlaywrightError):
                 # Design-system comboboxes expose their choices through the
                 # accessibility tree instead of a native <select>. The value
@@ -731,7 +956,8 @@ class PlaywrightAdapter:
                 for index in range(count):
                     candidate = option.nth(index)
                     if await candidate.is_visible():
-                        return await candidate.click()
+                        await candidate.click()
+                        return {"selected": str(operation.value), "options_visible": True}
                 raise GroundingError(f"Observed option is no longer visible: {operation.value!r}")
         if operation.kind in {OperationKind.CHECK, OperationKind.CHOOSE_RADIO}:
             return await locator.check()
@@ -820,7 +1046,10 @@ class PlaywrightAdapter:
         if operation.kind is OperationKind.KEY_PRESS:
             key = str(operation.value or "Enter")
             await locator.press(key)
-            return {"key": key}
+            focus = await locator.evaluate(
+                "element => element === document.activeElement || element.contains(document.activeElement)"
+            )
+            return {"key": key, "focused": bool(focus)}
         if operation.kind is OperationKind.DRAG:
             payload = operation.value if isinstance(operation.value, dict) else {}
             destination_data = payload.get("destination")
@@ -869,7 +1098,20 @@ class PlaywrightAdapter:
             OperationKind.APPLY_FILTER,
         }:
             try:
-                result = await locator.click()
+                click_position = None
+                if isinstance(operation.value, dict) and isinstance(
+                    operation.value.get("relative"), dict
+                ):
+                    relative = operation.value["relative"]
+                    box = await locator.bounding_box()
+                    if box and 0 <= float(relative.get("x", -1)) <= 1 and 0 <= float(
+                        relative.get("y", -1)
+                    ) <= 1:
+                        click_position = {
+                            "x": float(box["width"]) * float(relative["x"]),
+                            "y": float(box["height"]) * float(relative["y"]),
+                        }
+                result = await locator.click(position=click_position) if click_position else await locator.click()
             except PlaywrightError:
                 if operation.kind is not OperationKind.OPEN_NAVIGATION_ITEM:
                     raise
@@ -950,11 +1192,32 @@ class PlaywrightAdapter:
                       }
                       return (hash >>> 0).toString(16);
                     };
+                    const surfaceSignature = element => {
+                      try {
+                        if (element instanceof HTMLCanvasElement) {
+                          const width = Math.min(element.width || 0, 320);
+                          const height = Math.min(element.height || 0, 240);
+                          if (!width || !height) return '';
+                          const source = document.createElement('canvas');
+                          source.width = width; source.height = height;
+                          const ctx = source.getContext('2d', {willReadFrequently: true});
+                          if (!ctx) return '';
+                          ctx.drawImage(element, 0, 0, width, height);
+                          const data = ctx.getImageData(0, 0, width, height).data;
+                          let sampled = '';
+                          for (let i = 0; i < data.length; i += 16) sampled += String.fromCharCode(data[i]);
+                          return fingerprint(sampled);
+                        }
+                        if (element instanceof SVGElement) return fingerprint(element.outerHTML.slice(0, 200000));
+                      } catch (_) { return ''; }
+                      return '';
+                    };
                     return {
                         url: window.location.href,
                         text: (element.innerText || element.textContent || '').slice(0, 500),
                         page_text_hash: fingerprint((document.body?.innerText || '').slice(0, 12000)),
                         dom_hash: fingerprint((document.body?.innerHTML || '').slice(0, 120000)),
+                        surface_signature: surfaceSignature(element),
                         accessibility_hash: fingerprint(Array.from(document.querySelectorAll(
                           'button,a,input,textarea,select,[role],[aria-label]'
                         )).filter(node => {
@@ -975,6 +1238,13 @@ class PlaywrightAdapter:
                             checked: 'checked' in element ? element.checked : null,
                             disabled: 'disabled' in element ? element.disabled : null,
                         },
+                        focused: element === document.activeElement || element.contains(document.activeElement),
+                        active_element: document.activeElement ? {
+                          tag: document.activeElement.tagName.toLowerCase(),
+                          name: (document.activeElement.getAttribute('aria-label') ||
+                            document.activeElement.getAttribute('name') ||
+                            document.activeElement.getAttribute('placeholder') || '').slice(0,160),
+                        } : null,
                     };
                 }"""
             )
@@ -995,6 +1265,19 @@ class PlaywrightAdapter:
                     url: window.location.href,
                     title: document.title,
                     text: (document.body?.innerText || '').slice(0, limit),
+                    domSnapshot: (() => {
+                      const body = document.body;
+                      if (!body) return '';
+                      const clone = body.cloneNode(true);
+                      clone.querySelectorAll('input, textarea, select').forEach(element => {
+                        element.removeAttribute('value');
+                        if (element.tagName === 'TEXTAREA') element.textContent = '';
+                        if (element.tagName === 'SELECT') element.querySelectorAll('option').forEach(option => {
+                          option.removeAttribute('selected');
+                        });
+                      });
+                      return clone.outerHTML.slice(0, 50000);
+                    })(),
                     controls: Array.from(document.querySelectorAll(
                       'button, a, input, textarea, select, [role="button"], [role="link"], [role="tab"]'
                     )).filter(element => {
@@ -1004,11 +1287,62 @@ class PlaywrightAdapter:
                     }).slice(0, 80).map(element => ({
                       tag: element.tagName.toLowerCase(),
                       role: element.getAttribute('role'),
+                      selector: (() => {
+                        const esc = value => (globalThis.CSS && CSS.escape)
+                          ? CSS.escape(String(value))
+                          : String(value).replace(/[^a-zA-Z0-9_-]/g, '_');
+                        const testId = element.getAttribute('data-testid');
+                        if (testId) return `[data-testid="${String(testId).replace(/\\"/g, '\\\\"')}"]`;
+                        const id = element.getAttribute('id');
+                        if (id) return `#${esc(id)}`;
+                        const name = element.getAttribute('name');
+                        if (name) return `${element.tagName.toLowerCase()}[name="${String(name).replace(/\\"/g, '\\\\"')}"]`;
+                        const label = element.getAttribute('aria-label');
+                        if (label) return `${element.tagName.toLowerCase()}[aria-label="${String(label).replace(/\\"/g, '\\\\"')}"]`;
+                        return null;
+                      })(),
                       name: (element.getAttribute('aria-label') || element.innerText ||
                         element.getAttribute('placeholder') || element.getAttribute('name') || '').trim().slice(0, 160),
                       type: element.getAttribute('type'),
                       disabled: Boolean(element.disabled),
+                      geometry: (() => { const box = element.getBoundingClientRect(); return {
+                        x: box.x, y: box.y, width: box.width, height: box.height,
+                      }; })(),
                     })).filter(item => item.name),
+                    visualSurface: {
+                      canvas: document.querySelectorAll('canvas').length > 0,
+                      svg: document.querySelectorAll('svg').length > 0,
+                      contenteditable: document.querySelectorAll('[contenteditable="true"]').length > 0,
+                    },
+                    focusedControl: (() => {
+                      const element = document.activeElement;
+                      if (!element || element === document.body || element === document.documentElement) return null;
+                      const box = element.getBoundingClientRect();
+                      return {
+                        tag: element.tagName.toLowerCase(),
+                        role: element.getAttribute('role'),
+                        name: (element.getAttribute('aria-label') || element.getAttribute('placeholder') ||
+                          element.getAttribute('name') || element.innerText || '').trim().slice(0, 160),
+                        geometry: {x: box.x, y: box.y, width: box.width, height: box.height},
+                        contenteditable: element.getAttribute('contenteditable') === 'true',
+                      };
+                    })(),
+                    overlays: Array.from(document.querySelectorAll(
+                      '[aria-modal="true"],[role="dialog"],[role="listbox"],[role="menu"],[data-state="open"],
+                      '[class*="modal" i],[class*="popover" i],[class*="dropdown" i],[class*="backdrop" i],[class*="overlay" i]'
+                    )).filter(element => {
+                      const box = element.getBoundingClientRect();
+                      const style = getComputedStyle(element);
+                      return box.width > 0 && box.height > 0 && style.visibility !== 'hidden' &&
+                        style.display !== 'none' && style.pointerEvents !== 'none';
+                    }).slice(0, 24).map(element => {
+                      const box = element.getBoundingClientRect();
+                      return {
+                        role: element.getAttribute('role'),
+                        label: (element.getAttribute('aria-label') || element.innerText || '').trim().slice(0, 180),
+                        geometry: {x: box.x, y: box.y, width: box.width, height: box.height},
+                      };
+                    }),
                     shadowRoots: Array.from(document.querySelectorAll('*')).filter(element => element.shadowRoot)
                       .slice(0, 20).map((host, index) => ({
                         index,
@@ -1021,6 +1355,9 @@ class PlaywrightAdapter:
                           role: element.getAttribute('role'),
                           name: (element.getAttribute('aria-label') || element.innerText ||
                             element.getAttribute('placeholder') || element.getAttribute('name') || '').trim().slice(0, 160),
+                          geometry: (() => { const box = element.getBoundingClientRect(); return {
+                            x: box.x, y: box.y, width: box.width, height: box.height,
+                          }; })(),
                         })).filter(item => item.name),
                       })),
                 })"""
@@ -1063,6 +1400,12 @@ class PlaywrightAdapter:
                 ]
             if shadow_controls:
                 result["controls"] = [*(result.get("controls", []) or []), *shadow_controls[:80]]
+            try:
+                result["accessibilitySnapshot"] = await self.page.locator("body").aria_snapshot(
+                    timeout=2_000
+                )
+            except (AttributeError, PlaywrightError):
+                result["accessibilitySnapshot"] = ""
             result.pop("shadowRoots", None)
             return result
         except PlaywrightError as error:

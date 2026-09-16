@@ -22,9 +22,34 @@ class CapabilityCompilationError(ValueError):
 _TRANSIENT_REACT_ID = re.compile(r"^#:r[0-9a-z]+:$", re.IGNORECASE)
 
 
+def _dependency_priority(field: FormField) -> tuple[int, int]:
+    """Order observed controls by generic dependency semantics.
+
+    Choice controls commonly enable dependent inputs (dates, times, detail
+    panels).  DOM order is not a dependency graph and often places the
+    disabled dependent control first.  Keep the original order as the second
+    key while moving observed choices ahead of their dependants and dates to
+    the end.  Explicit ``depends_on`` ordering remains authoritative inside
+    ``order_form_fields``; this is only the final deterministic tie-breaker.
+    """
+    control = field.control_type.casefold()
+    if control in {"radio", "checkbox", "switch"}:
+        return (0, 0)
+    if control in {"select", "combobox"}:
+        return (1, 0)
+    if control in {"date", "time"} or "date" in field.name.casefold() or "time" in field.name.casefold():
+        return (3, 0)
+    return (2, 0)
+
+
 def _is_transient_selector(selector: str) -> bool:
     """Reject React/MUI generated ids whether CSS escaping is present or not."""
     return bool(_TRANSIENT_REACT_ID.fullmatch(selector.replace("\\", "")))
+
+
+def _is_well_formed_selector(selector: str) -> bool:
+    """Reject truncated attribute selectors from dynamic accessibility probes."""
+    return selector.count("[") == selector.count("]") and selector.count('"') % 2 == 0
 
 
 def _field_target(field: FormField, source_url: str) -> Target:
@@ -34,7 +59,11 @@ def _field_target(field: FormField, source_url: str) -> Target:
     # identity; retain only stable attribute/id selectors as bounded hints.
     selector = (
         field.selector
-        if field.selector.startswith(("#", "[")) and not _is_transient_selector(field.selector)
+        if (
+            field.selector.startswith(("#", "["))
+            and _is_well_formed_selector(field.selector)
+            and not _is_transient_selector(field.selector)
+        )
         else None
     )
     return Target(
@@ -49,14 +78,24 @@ def _operation_for(field: FormField, source_url: str) -> SemanticOperation:
     target = _field_target(field, source_url)
     control = field.control_type.casefold()
     name = field.name.casefold()
-    # Radio/checkbox inputs are option groups, not text fields.  Without an
-    # observed option value, treating their labels as fill targets produces
-    # invalid operations such as typing into ``Old`` or ``Yes``.  Leave these
-    # controls as visible form evidence; a later capability probe can compile
-    # an explicit choice when the group semantics are known.
-    if control in {"radio", "checkbox", "switch", "hidden"}:
+    # Checkboxes/switches require an explicit policy (for example consent) and
+    # hidden controls are never user actions.  A radio is different: the live
+    # rehearsal gives us a unique option selector, so choosing that observed
+    # option is a deterministic, replayable interaction.
+    if control in {"checkbox", "switch", "hidden"}:
         raise CapabilityCompilationError(
             f"Form control has no deterministic editable value: {field.name}"
+        )
+    if control == "radio":
+        return SemanticOperation(
+            kind=OperationKind.CHOOSE_RADIO,
+            intent=f"Choose the observed {field.name} option",
+            target=target,
+            value=True,
+            postconditions=[Postcondition(kind="changed", expected=True, target=target)],
+            story_phase="demonstrate",
+            page_url=source_url,
+            evidence_refs=[f"form-field:{source_url}:{field.name}"],
         )
     if name in {"type", "id"} and control in {"input", "string", "text"}:
         raise CapabilityCompilationError(
@@ -94,7 +133,17 @@ def _operation_for(field: FormField, source_url: str) -> SemanticOperation:
         intent=f"Enter the observed {field.name} value",
         target=target,
         value=value,
-        postconditions=[Postcondition(kind="value", expected=value, target=target)],
+        # Custom comboboxes frequently do not expose the selected value through
+        # the native input value (the visible label is rendered in a portal).
+        # Require a DOM state change for those controls and let the live
+        # grounding/verifier inspect the resulting widget state.  Text/date
+        # controls retain exact value verification because their value is the
+        # evidence we need to prove a filled field.
+        postconditions=(
+            [Postcondition(kind="value", expected=value, target=target)]
+            if field.required
+            else [Postcondition(kind="changed", expected=True, target=target)]
+        ),
         story_phase="demonstrate",
         page_url=source_url,
         evidence_refs=[f"form-field:{source_url}:{field.name}"],
@@ -152,8 +201,43 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
     # inputs and a required-by-behaviour selector such as a source/category,
     # while avoiding unnecessary branch/assignee/remark changes in a demo.
     candidate_fields = required_fields or [
-        field for field in capability.form_schema.fields if not _explicitly_optional(field)
+        field
+        for field in capability.form_schema.fields
+        if not _explicitly_optional(field)
+        and field.control_type.casefold() not in {"radio", "checkbox", "switch", "hidden"}
+        and field.name.casefold() not in {"type", "id"}
     ]
+    # A successful rehearsal can reveal dependent controls that are not
+    # natively marked required (custom widgets commonly omit that metadata).
+    # Include only fields explicitly promoted by the rehearsal boundary; this
+    # avoids broadening every form with unrelated optional inputs.
+    promoted = [
+        field
+        for field in capability.form_schema.fields
+        if "rehearsal:include" in field.validation_messages
+        and field.control_type.casefold() not in {"checkbox", "switch", "hidden"}
+        and field.name.casefold() not in {"type", "id"}
+    ]
+    seen_fields: set[tuple[str, str | None]] = set()
+    seen_choice_groups: set[str] = set()
+    unique_fields: list[FormField] = []
+    for field in [*candidate_fields, *promoted]:
+        if field.control_type.casefold() == "radio":
+            # A group is represented by one observed option during rehearsal;
+            # compiling every label would select mutually exclusive values in
+            # sequence. The selector contains the option value, so it is the
+            # stable group identity even when labels are duplicated.
+            group_selector = re.sub(r"\[value=(?:\\?['\"]).*", "", field.selector or "")
+            group_selector = group_selector or (field.selector or field.name)
+            if group_selector in seen_choice_groups:
+                continue
+            seen_choice_groups.add(group_selector)
+        key = (field.name.casefold(), field.selector)
+        if key in seen_fields:
+            continue
+        seen_fields.add(key)
+        unique_fields.append(field)
+    candidate_fields = unique_fields
     if not candidate_fields and required_fields:
         raise CapabilityCompilationError("Creation capability has no observed editable fields")
     # A form can expose optional dependent controls (for example a Branch
@@ -166,7 +250,13 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
         candidate_fields = order_form_fields(candidate_fields)
     except FormDependencyError as error:
         raise CapabilityCompilationError(str(error)) from error
-    for field in candidate_fields[:8]:
+    candidate_fields = sorted(candidate_fields, key=_dependency_priority)
+    # The rehearsal boundary already scoped these controls to the selected
+    # capability. Do not silently drop fields at an arbitrary eight-control
+    # cutoff (which can omit required identity/date fields after dependency
+    # choices are ordered). Keep the browser-side discovery bound as the only
+    # generic safety cap.
+    for field in candidate_fields[:32]:
         try:
             field_operations.append(_operation_for(field, capability.source_url))
         except CapabilityCompilationError:
@@ -260,6 +350,11 @@ def compile_read_only_form_inspection(capability: ActionCapability) -> list[Sema
     except FormDependencyError as error:
         raise CapabilityCompilationError(str(error)) from error
     for field in fields[:8]:
+        # Read-only inspection must not mutate option groups.  A radio choice
+        # is compiled only after the authorised rehearsal explicitly promotes
+        # the observed option into the production capability.
+        if field.control_type.casefold() in {"radio", "checkbox", "switch", "hidden"}:
+            continue
         try:
             field_operations.append(_operation_for(field, capability.source_url))
         except CapabilityCompilationError:

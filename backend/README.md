@@ -75,11 +75,11 @@ replaces `final/demo.mp4` only after a non-empty result is produced.
 After credentials and account credit are available, set a responsive paid `OPENROUTER_MODEL`, then verify in this order:
 
 1. `GET /readiness` reports OpenRouter, ElevenLabs, Browserbase, and Stagehand capability state without returning credentials.
-2. Install the isolated Stagehand bridge once, without running a demo: `cd stagehand; npm install`. It only supports observation; Python/Playwright re-grounds every returned selector and remains the execution authority.
+2. Install the isolated Stagehand bridge once, without running a demo: `cd stagehand; npm install`. Stagehand provides semantic/visual observation and a bounded read-only rehearsal during exploration; Python/Playwright re-grounds every returned affordance and remains the production execution authority.
 3. Run a non-destructive URL objective with `render: false`; inspect `/runs/{run_id}/details` for grounded planning and verified trace evidence.
 4. Repeat with `render: true`; verify captions remain trace-derived and audio is present only when synthesis succeeds.
 5. Use Browserbase discovery only after the local production path is proven for that target application. A cloud run creates an auditable Browserbase session record and closes that session after CDP disconnect, including discovery failures.
-6. Enable `stagehand_assist` only for one scoped objective. It is optional and independent of Browserbase: validate its observation result and DOM re-grounding before expanding use.
+6. Stagehand is invoked automatically whenever the provider is configured (including cloud runs). The compatibility request field `stagehand_assist` is not required to unlock intelligence; every observation/rehearsal result is still advisory until re-grounded by ProductLens.
 
 ## Funded smoke-test checklist
 
@@ -87,7 +87,7 @@ Provider-backed checks are deliberately not part of ordinary regression runs. Wh
 
 1. **OpenRouter:** a non-destructive plan-only URL run (`render: false`) with a narrow objective.
 2. **Browserbase:** the same run with `cloud_discovery: true`; confirm the persisted browser-session record is `CLOSED` and the trace remains verified.
-3. **Stagehand:** repeat the scoped Browserbase run with `stagehand_assist: true`; confirm `discovery/stagehand-observation.json` exists and only re-grounded candidates contribute to the plan.
+3. **Stagehand:** inspect the same scoped Browserbase run; confirm `discovery/stagehand-observation.json` contains observation/rehearsal diagnostics and only re-grounded candidates contribute to the plan.
 4. **ElevenLabs:** enable `PRODUCTLENS_CAPTION_ONLY=false` for one fixture run; confirm audio duration, captions, screen timing, and the final MP4 remain synchronized.
 
 ## Public acceptance batch

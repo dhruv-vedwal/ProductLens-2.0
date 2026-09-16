@@ -176,6 +176,13 @@ def test_objective_spec_extracts_configuration_relationship_from_prose():
     assert relationship.relation == "context_for"
 
 
+def test_objective_spec_does_not_turn_synthetic_value_qualifier_into_context_page():
+    objective = _objective_spec(
+        "Create a lead flow using realistic synthetic values only when the observed flow requires it"
+    )
+    assert objective.supporting_relationships == []
+
+
 def test_focused_relationship_completion_requires_the_actual_context_detail_page():
     objective = _objective_spec(
         "Create a walkthrough of Invoice Management in the context of Invoice Configuration"
@@ -652,6 +659,30 @@ def test_narrow_objective_never_expands_discovery_budget():
     budget = DiscoveryBudget(max_pages=6, max_actions=24, max_model_calls=3, max_time_seconds=60)
     objective = ObjectiveSpec(raw="show one feature", demo_type="workflow_demo")
     assert adaptive_exploration_budget(budget, objective, primary_route_count=8) == budget
+
+
+def test_interactive_workflow_gets_page_local_probe_budget_without_full_tour():
+    budget = DiscoveryBudget(max_pages=6, max_actions=24, max_model_calls=3, max_time_seconds=60)
+    objective = ObjectiveSpec(
+        raw="create a record and verify the resulting detail view",
+        demo_type="workflow_demo",
+    )
+    expanded = adaptive_exploration_budget(budget, objective, primary_route_count=4)
+    assert expanded.max_pages == 6
+    assert expanded.max_actions >= 48
+    assert expanded.max_time_seconds >= 240
+
+
+def test_interactive_budget_uses_declared_must_show_terms():
+    budget = DiscoveryBudget(max_pages=3, max_actions=12, max_model_calls=3, max_time_seconds=30)
+    objective = ObjectiveSpec(
+        raw="walk through this feature",
+        demo_type="feature_walkthrough",
+        must_show=["draw and connect the nodes"],
+    )
+    expanded = adaptive_exploration_budget(budget, objective, primary_route_count=1)
+    assert expanded.max_actions >= 48
+    assert expanded.max_time_seconds >= 240
 
 
 def test_discovery_does_not_replay_the_opening_url_after_collecting_evidence():

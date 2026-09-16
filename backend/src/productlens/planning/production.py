@@ -72,7 +72,14 @@ class PlanningValidationError(ValueError):
 
 
 SIDE_EFFECTING = {OperationKind.SUBMIT, OperationKind.CHECK, OperationKind.UNCHECK}
-NO_POSTCONDITION_REQUIRED = {OperationKind.SCROLL_TO, OperationKind.READ_VALUE}
+NO_POSTCONDITION_REQUIRED = {
+    OperationKind.SCROLL_TO,
+    OperationKind.READ_VALUE,
+    # Keyboard text/commit gestures are verified by the following scene
+    # witness (DOM/scene-graph or explicit state transition), not by a
+    # brittle key-label visibility assertion.
+    OperationKind.KEY_PRESS,
+}
 
 
 class ProductionPlanningService:
@@ -239,6 +246,7 @@ class ProductionPlanningService:
             scope_failures = validate_flow_scope(proposal, context=context, candidate=candidate)
             if scope_failures:
                 raise PlanningValidationError(scope_failures[0])
+        proposal = self._filter_unrequested_visual_gestures(proposal, objective)
         specification = context.objective
         if specification and "create_isolated_record" in specification.permitted_mutations:
             if not allow_external_side_effects:
@@ -1509,6 +1517,7 @@ class ProductionPlanningService:
                 OperationKind.WAIT_FOR_STATE,
                 OperationKind.VERIFY_STATE,
                 OperationKind.POINTER_SEQUENCE,
+                OperationKind.KEY_PRESS,
             }:
                 raise PlanningValidationError(f"Target is required for {operation.kind}")
             elif operation.kind is OperationKind.POINTER_SEQUENCE:
@@ -1518,6 +1527,12 @@ class ProductionPlanningService:
                 pattern = (
                     operation.value.get("pattern") if isinstance(operation.value, dict) else None
                 )
+                # A generic surface gesture may derive a stroke from the
+                # observed canvas bounds, but connector paths must always be
+                # supplied as concrete points captured during exploration.
+                # The former implementation accepted ``connector_segment``
+                # with no points and let the executor draw a synthetic grid
+                # path, producing false success on empty editors.
                 generated_surface_pattern = (
                     pattern == "short_reversible_stroke" and operation.target is not None
                 )
@@ -1530,6 +1545,10 @@ class ProductionPlanningService:
                 if not operation.evidence_refs:
                     raise PlanningValidationError(
                         "PointerSequence requires evidence references for its observed path"
+                    )
+                if pattern == "connector_segment" and not isinstance(points, list):
+                    raise PlanningValidationError(
+                        "Connector paths require geometry observed during exploration"
                     )
             elif operation.kind is OperationKind.DRAG:
                 payload = operation.value if isinstance(operation.value, dict) else None
@@ -1554,7 +1573,7 @@ class ProductionPlanningService:
                     raise PlanningValidationError(
                         f"Drag destination is not grounded in current evidence: {destination_target.name}"
                     )
-            elif (
+            elif operation.target is not None and (
                 operation.target.selector not in observed_selectors
                 and operation.target.name.lower() not in observed_names
                 and (operation.target.source_url, operation.target.name.casefold())
@@ -1892,7 +1911,7 @@ class ProductionPlanningService:
                     for condition in postconditions
                 ]
             if operation.kind is OperationKind.SELECT_OPTION and not any(
-                condition.kind == "value" for condition in postconditions
+                condition.kind in {"value", "changed"} for condition in postconditions
             ):
                 postconditions.append(Postcondition(kind="value", expected=value, target=target))
             grounded.append(
@@ -2096,6 +2115,38 @@ class ProductionPlanningService:
             return build_page_complete_proposal(context, candidate)
         except ValueError as error:
             raise PlanningValidationError(str(error)) from error
+
+    @staticmethod
+    def _filter_unrequested_visual_gestures(
+        proposal: WorkflowProposal, objective: str
+    ) -> WorkflowProposal:
+        """Prevent provider plans from inventing drawing actions on dashboards.
+
+        Providers may over-read a generic SVG/chart as an invitation to draw,
+        especially when the request contains words such as ``flow`` or
+        ``shapes`` in ordinary prose.  Visual gestures are retained only when
+        the user explicitly asks for a drawing/diagram/editor task; all other
+        operations remain untouched and are still validated against evidence.
+        """
+        visual_terms = {
+            "draw",
+            "drawing",
+            "diagram",
+            "whiteboard",
+            "canvas",
+            "sketch",
+            "paint",
+        }
+        if set(re.findall(r"[a-z0-9]{3,}", objective.casefold())) & visual_terms:
+            return proposal
+        filtered = [
+            operation
+            for operation in proposal.steps
+            if operation.kind not in {OperationKind.POINTER_SEQUENCE, OperationKind.DRAG}
+        ]
+        if len(filtered) == len(proposal.steps):
+            return proposal
+        return proposal.model_copy(update={"steps": filtered})
 
     @staticmethod
     def _route_tour(objective: str, context: ProductContext) -> WorkflowProposal:

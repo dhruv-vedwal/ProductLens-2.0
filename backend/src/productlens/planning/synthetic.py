@@ -52,8 +52,18 @@ def _candidate_value(field: str, *, seed: int, attempt: int) -> str:
         return f"Contact{suffix}" if fallback_identity else last
     if "name" in field:
         return f"Demo Contact{suffix}" if fallback_identity else f"{first} {last}"
-    if "date" in field:
-        return (datetime.now(UTC).date() + timedelta(days=7 + (seed + attempt) % 14)).isoformat()
+    if "date" in field or re.search(r"\b(?:dd|mm|yyyy)[-/]", field):
+        # Keep generated dates close to today.  Product UIs commonly expose a
+        # bounded booking/calendar window; a year-ahead synthetic date is not
+        # safer, it is simply rejected as invalid.  The value remains
+        # deterministic per field/attempt and never reuses observed data.
+        value = datetime.now(UTC).date() + timedelta(days=7 + (seed + attempt) % 8)
+        # Respect the format exposed by the observed control. Design-system
+        # text pickers commonly advertise dd-mm-yyyy while native date inputs
+        # require ISO; the field label/placeholder is the only source used.
+        if re.search(r"dd[-/]mm[-/]yyyy", field):
+            return value.strftime("%d-%m-%Y")
+        return value.isoformat()
     if "time" in field:
         return "10:30"
     if "number" in field or "quantity" in field or "size" in field:
@@ -84,15 +94,29 @@ def value_for(
         for value in (forbidden_values or set())
         if (normalized := _comparable(value)) and len(normalized) >= 4
     }
-    for attempt in range(32):
+    # Busy demo accounts can expose hundreds of existing values; keep the
+    # generator bounded but large enough to find an isolated candidate without
+    # falling back to a real customer value.
+    for attempt in range(128):
         candidate = _candidate_value(field, seed=seed, attempt=attempt)
         normalized = _comparable(candidate)
-        if normalized and not any(
-            normalized in value or value in normalized for value in forbidden
+        calendar_field = "date" in field or "time" in field or bool(
+            re.search(r"\b(?:dd|mm|yyyy)[-/]", field)
+        )
+        if normalized and (
+            calendar_field
+            or not any(
+                normalized == value
+                or (
+                    len(value) >= 8
+                    and (normalized in value or value in normalized)
+                )
+                for value in forbidden
+            )
         ):
             return candidate
     raise SyntheticDataError(
-        "Could not generate an isolated value distinct from observed product data"
+        f"Could not generate an isolated value for {operation.target.name!r} distinct from observed product data"
     )
 
 

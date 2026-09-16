@@ -115,6 +115,27 @@ def test_rehearsal_rejects_a_dialog_even_when_new_validation_copy_appears_after_
     assert witnessed is None
 
 
+def test_rehearsal_accepts_an_explicit_success_confirmation_dialog():
+    capability = _capability()
+    witnessed = derive_outcome_witness(
+        capability,
+        before_text="Appointments Create appointment Customer Save appointment",
+        observed=[
+            ObservedElement(
+                tag="div",
+                role="dialog",
+                name="Appointment created Pending confirmation Saved successfully Close",
+                text="Appointment created Pending confirmation Saved successfully Close",
+                selector='[role="dialog"]',
+                source_url=capability.source_url,
+            )
+        ],
+    )
+    assert witnessed is not None
+    assert witnessed.outcome_target.role == "dialog"
+    assert witnessed.outcome_target.name == "Appointment created"
+
+
 def test_rehearsal_accepts_a_new_structural_row_with_the_generated_record_value():
     capability = _capability()
     witnessed = derive_outcome_witness(

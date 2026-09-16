@@ -34,6 +34,56 @@ class CaptureDurationError(RuntimeError):
     """Native-speed evidence cannot fit the approved final duration envelope."""
 
 
+class RecordingProvenanceError(RuntimeError):
+    """The media file does not belong to the run whose trace is being rendered."""
+
+
+def _validate_recording_provenance(trace: DemoTrace, artifacts: RunArtifacts, raw: Path) -> None:
+    """Fail closed when provider metadata points at another run's recording.
+
+    A copied Browserbase metadata file used to be enough for a render to pair a
+    fresh trace with an old recording.  That produces a plausible MP4 while
+    silently lying about every click and caption.  Provider metadata is
+    optional for local fixture captures, but when present it must identify this
+    run and the exact file selected by :class:`RunArtifacts`.
+    """
+    metadata_path = artifacts.execution / "browserbase-recording.json"
+    if not metadata_path.is_file():
+        return
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        raise RecordingProvenanceError("invalid Browserbase recording metadata") from error
+    if not isinstance(payload, dict):
+        raise RecordingProvenanceError("invalid Browserbase recording metadata")
+    if payload.get("native_recording") in {"unavailable", "failed"}:
+        return
+    provider = str(payload.get("provider", "")).casefold()
+    if provider != "browserbase":
+        return
+    metadata_run = payload.get("run_id")
+    if metadata_run is not None and str(metadata_run) != str(trace.run_id):
+        raise RecordingProvenanceError(
+            f"recording metadata belongs to run {metadata_run}, expected {trace.run_id}"
+        )
+    expected = raw.resolve()
+    artifact_ref = payload.get("artifact")
+    if artifact_ref:
+        try:
+            recorded = Path(str(artifact_ref)).resolve()
+        except (OSError, ValueError) as error:
+            raise RecordingProvenanceError("invalid recording artifact reference") from error
+        if recorded != expected:
+            raise RecordingProvenanceError(
+                "recording metadata artifact does not match this run's source video"
+            )
+    recorded_sha = payload.get("sha256")
+    if recorded_sha:
+        digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+        if str(recorded_sha) != digest:
+            raise RecordingProvenanceError("recording bytes changed after provider capture")
+
+
 def _completed_segment_after_timeout(command: list[str]) -> bool:
     """Accept a fully muxed segment when Remotion's launcher outlives encoding.
 
@@ -187,13 +237,16 @@ def _remotion_hardware_acceleration() -> str:
 def _render_chunk_frames() -> int:
     """Bound one resumable compositor segment for long product demos."""
     try:
-        requested = int(os.getenv("PRODUCTLENS_REMOTION_CHUNK_FRAMES", "3600"))
+        # A 1080p browser frame is intentionally rendered at native cadence,
+        # but CPU-only workers can take longer than the stage timeout for a
+        # two-minute monolithic Chromium segment.  Thirty-second chunks keep
+        # each unit resumable and below the timeout while the concat pass
+        # preserves one continuous CFR timeline and every source frame.
+        requested = int(os.getenv("PRODUCTLENS_REMOTION_CHUNK_FRAMES", "900"))
     except ValueError:
         requested = 3600
-    # At 30fps the default is a two-minute segment. This keeps long demo
-    # renders resumable while avoiding repeated Chromium setup for every short
-    # scene block in an otherwise healthy walkthrough. The environment can
-    # lower this for constrained workers without changing presentation data.
+    # At 30fps the default is a thirty-second segment. This keeps long demo
+    # renders resumable on CPU workers without changing presentation data.
     return min(7_200, max(150, requested))
 
 
@@ -201,7 +254,9 @@ class NarrationTimingError(RuntimeError):
     """Audio cannot fit the proven browser evidence without distorting it."""
 
 
-def _prepare_remotion_source(raw: Path, public: Path, run_id: str) -> str:
+def _prepare_remotion_source(
+    raw: Path, public: Path, run_id: str, *, strip_audio: bool = False
+) -> str:
     """Materialize browser evidence in the codec Remotion renders reliably.
 
     Browserbase/Playwright recordings are frequently VP8 WebM. Chromium can
@@ -240,7 +295,32 @@ def _prepare_remotion_source(raw: Path, public: Path, run_id: str) -> str:
         stream = json.loads(probe.stdout).get("streams", [{}])[0]
     except (TypeError, ValueError, json.JSONDecodeError, IndexError):
         stream = {}
-    if stream.get("codec_name") == "h264" and stream.get("pix_fmt") in {"yuv420p", "yuvj420p"}:
+    audio_probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "json",
+            str(raw),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        has_audio = bool(json.loads(audio_probe.stdout or "{}").get("streams"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        has_audio = False
+    if (
+        not strip_audio
+        and stream.get("codec_name") == "h264"
+        and stream.get("pix_fmt") in {"yuv420p", "yuvj420p"}
+    ) or (strip_audio and not has_audio and stream.get("codec_name") == "h264" and stream.get("pix_fmt") in {"yuv420p", "yuvj420p"}):
         shutil.copy2(raw, destination)
         return source_asset
     subprocess.run(
@@ -482,6 +562,37 @@ def _recording_space_cursor_paths(
     return converted
 
 
+def _safe_camera_zoom(rect, requested: float, *, source_width: int, source_height: int) -> float:
+    """Bound a target zoom so the target and a context margin stay in-frame.
+
+    Camera decisions are produced before the native recording dimensions are
+    known.  Re-checking them here prevents edge targets (toolbar buttons,
+    sidebars, form fields) from being magnified into a clipped browser frame.
+    The returned value is deterministic and never invents a zoom when the
+    requested camera can not be made safe.
+    """
+    try:
+        zoom = min(1.36, max(1.0, float(requested)))
+    except (TypeError, ValueError):
+        zoom = 1.0
+    if rect is None or source_width <= 0 or source_height <= 0:
+        return zoom
+    # Keep at least a small margin around the focused evidence.  This is a
+    # target-specific bound, not a global browser-scale change.
+    margin = 0.04
+    cx = (float(rect.x) + float(rect.width) / 2) / source_width
+    cy = (float(rect.y) + float(rect.height) / 2) / source_height
+    half_w = (float(rect.width) / source_width) * 0.5 + margin
+    half_h = (float(rect.height) / source_height) * 0.5 + margin
+    # Scaling around the top-left then translating the focus to centre gives
+    # an available half-span of 0.5/zoom in each axis.  Reduce only as much as
+    # needed to keep the evidence rectangle visible.
+    max_zoom_x = 0.5 / max(half_w, abs(cx - 0.5), 0.001)
+    max_zoom_y = 0.5 / max(half_h, abs(cy - 0.5), 0.001)
+    safe = min(zoom, max(1.0, max_zoom_x), max(1.0, max_zoom_y))
+    return round(min(1.36, max(1.0, safe)), 4)
+
+
 def _editorial_cut_windows(
     trace: DemoTrace,
     source_seconds: float,
@@ -591,6 +702,33 @@ def _editorial_cut_windows(
                         min(source_seconds, reveal + post_reveal_hold),
                     )
                 )
+        # Human-visible operations (typing, selecting, dragging, submitting,
+        # and pointer gestures) are the proof of a workflow.  Never split the
+        # physical gesture from its result just because a remote DOM witness
+        # arrived several seconds later; that old micro-cut made fields appear
+        # to be pasted and canvas actions look like unexplained jumps.
+        elif event.kind in {
+            OperationKind.FILL_TEXT,
+            OperationKind.FILL_EMAIL,
+            OperationKind.FILL_PHONE,
+            OperationKind.SELECT_OPTION,
+            OperationKind.SELECT_DATE,
+            OperationKind.SELECT_DATE_RANGE,
+            OperationKind.SUBMIT,
+            OperationKind.CREATE_RECORD,
+            OperationKind.DRAG,
+            OperationKind.POINTER_SEQUENCE,
+            OperationKind.KEY_PRESS,
+            OperationKind.CLICK,
+            OperationKind.OPEN_MODAL,
+            OperationKind.CLOSE_MODAL,
+        }:
+            windows.append(
+                (
+                    max(0.0, action - (0.35 if compact_tour else 0.6)),
+                    min(source_seconds, max(reveal, action + event.duration_ms / 1000.0) + post_reveal_hold),
+                )
+            )
         elif reveal - action <= 3.8:
             windows.append(
                 (
@@ -1068,6 +1206,7 @@ def render_remotion(
     raw = artifacts.browser_video_path()
     if not raw.exists():
         raise FileNotFoundError("Execution evidence video is required before rendering")
+    _validate_recording_provenance(trace, artifacts, raw)
     renderer = Path(__file__).resolve().parents[3] / "video" / "remotion"
     # Render outside the delivery location.  A worker may be interrupted while
     # Chromium is encoding, and a partially written or stale file must never be
@@ -1256,7 +1395,12 @@ def render_remotion(
         trace = _remap_trace_for_cuts(trace, windows)
         artifacts.write_json("presentation/render-trace.json", trace.model_dump(mode="json"))
         source_seconds = editorial_seconds
-    source_asset = _prepare_remotion_source(render_source, public, current_run_id)
+    # Caption-led delivery is intentionally silent.  Strip any incidental
+    # microphone/audio track from a provider recording unless an approved TTS
+    # asset is present; otherwise Remotion would leak unrelated source audio.
+    source_asset = _prepare_remotion_source(
+        render_source, public, current_run_id, strip_audio=narration_path is None
+    )
     # The public asset name is stable per run, but its bytes can change after
     # a timing/source-edit repair. Include that content identity in Remotion
     # props so durable frame segments cannot be reused against a replaced
@@ -1365,7 +1509,12 @@ def render_remotion(
                 "y": rect.y if rect else 540,
                 "width": rect.width if rect else 1,
                 "height": rect.height if rect else 1,
-                "zoom": decision.zoom if decision else 1.0,
+                "zoom": _safe_camera_zoom(
+                    rect,
+                    decision.zoom if decision else 1.0,
+                    source_width=source_width,
+                    source_height=source_height,
+                ),
             }
         )
     presentation_redactions = _presentation_secret_redactions(

@@ -1,8 +1,9 @@
-"""Optional Stagehand v4 observation bridge.
+"""Stagehand v4 semantic/visual bridge.
 
-Stagehand may suggest selectors, but it never executes ProductLens workflow
-operations. Every candidate is re-grounded against the live Playwright DOM by
-the ProductLens discovery/execution layers before it can influence a DemoPlan.
+Stagehand supplies observations and bounded read-only rehearsal during
+exploration. It never owns ProductLens production workflow truth: every hint
+is re-grounded against the live Playwright DOM and production dispatch remains
+inside the ProductLens interaction kernel.
 """
 
 from __future__ import annotations
@@ -53,6 +54,17 @@ class StagehandActionResult:
     success: bool
     message: str
     action: str
+    observed_url: str | None = None
+    environment: str = "LOCAL"
+
+
+@dataclass(frozen=True)
+class StagehandRehearsalResult:
+    """Bounded agent rehearsal result; never production success evidence."""
+
+    success: bool
+    message: str
+    actions: list[dict[str, object]]
     observed_url: str | None = None
     environment: str = "LOCAL"
 
@@ -259,6 +271,76 @@ class StagehandProvider:
         except (TypeError, ValueError) as error:
             raise ProviderError(
                 "stagehand", None, "Stagehand returned an invalid action result"
+            ) from error
+
+    async def rehearse_agent(
+        self,
+        *,
+        url: str,
+        instruction: str,
+        environment: str = "LOCAL",
+        browserbase_session_id: str | None = None,
+        browserbase_connect_url: str | None = None,
+        browserbase_extension_id: str | None = None,
+        cache_dir: Path | None = None,
+        max_steps: int = 12,
+        agent_mode: str = "hybrid",
+    ) -> StagehandRehearsalResult:
+        """Run a bounded semantic/visual agent only in isolated rehearsal."""
+        if not instruction.strip():
+            raise ValueError("rehearsal instruction cannot be empty")
+        if agent_mode not in {"hybrid", "dom"}:
+            raise ValueError("agent_mode must be hybrid or dom")
+        if not 1 <= max_steps <= 40:
+            raise ValueError("max_steps must be between 1 and 40")
+        if environment not in {"LOCAL", "BROWSERBASE"}:
+            raise ValueError("Stagehand environment must be LOCAL or BROWSERBASE")
+        if environment == "BROWSERBASE" and not self.browserbase_api_key:
+            raise ProviderError(
+                "stagehand", None, "Browserbase API key is required for cloud rehearsal"
+            )
+        if not self.bridge.is_file():
+            raise ProviderError("stagehand", None, "Stagehand bridge is not installed")
+        response = await self._invoke(
+            {
+                "mode": "rehearse_agent",
+                "rehearsal": True,
+                "url": url,
+                "instruction": instruction.strip(),
+                "environment": environment,
+                "model": self.model or None,
+                "browserbaseSessionID": browserbase_session_id,
+                "browserbaseConnectUrl": browserbase_connect_url,
+                "stagehandExtensionId": browserbase_extension_id,
+                "cacheDir": str(cache_dir) if cache_dir else None,
+                "maxSteps": max_steps,
+                "agentMode": agent_mode,
+            }
+        )
+        try:
+            if response.get("version") != 4 or response.get("mode") != "rehearse_agent":
+                raise ValueError("unsupported rehearsal bridge response")
+            observed_url = response.get("observedUrl")
+            if observed_url is not None and (
+                not isinstance(observed_url, str) or not _same_origin(url, observed_url)
+            ):
+                raise ValueError("rehearsal left the requested origin")
+            result = response.get("result")
+            if not isinstance(result, dict) or not isinstance(result.get("success"), bool):
+                raise TypeError("rehearsal result must be an object with success")
+            raw_actions = result.get("actions", [])
+            if not isinstance(raw_actions, list):
+                raise TypeError("rehearsal actions must be a list")
+            return StagehandRehearsalResult(
+                success=result["success"],
+                message=str(result.get("message") or "")[:1000],
+                actions=[item for item in raw_actions if isinstance(item, dict)],
+                observed_url=observed_url,
+                environment=str(response.get("environment") or environment),
+            )
+        except (TypeError, ValueError) as error:
+            raise ProviderError(
+                "stagehand", None, "Stagehand returned an invalid rehearsal result"
             ) from error
 
     async def _invoke(self, payload: dict[str, object]) -> dict[str, object]:

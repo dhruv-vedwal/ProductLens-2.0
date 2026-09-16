@@ -333,6 +333,7 @@ class RunArtifacts:
             "state_snapshots": self.execution / "state-snapshots.json",
             "action_attempts": self.execution / "action-attempts.json",
             "verification_results": self.execution / "verification-results.json",
+            "interaction_trace": self.execution / "interaction-trace.json",
         }
         required = {
             **self.required_delivery_artifacts(),

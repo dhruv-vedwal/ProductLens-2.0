@@ -118,7 +118,23 @@ class Target(BaseModel):
 
 
 class Postcondition(BaseModel):
-    kind: Literal["url", "visible", "value", "test_state", "text", "changed"]
+    # ``focused`` and ``options_visible`` are interaction witnesses rather
+    # than product-specific actions.  ``surface_changed`` is used by pointer
+    # editors (canvas/SVG) where no DOM value exists to compare.  Keeping them
+    # in the contract makes a dispatched gesture insufficient on its own: the
+    # browser must prove the state the viewer is meant to see.
+    kind: Literal[
+        "url",
+        "visible",
+        "value",
+        "test_state",
+        "text",
+        "changed",
+        "focused",
+        "options_visible",
+        "surface_changed",
+        "overlay_clear",
+    ]
     expected: Any
     target: Target | None = None
     timeout_ms: int = Field(default=5_000, ge=1)
@@ -208,8 +224,10 @@ class ActionIntent(BaseModel):
             raise ValueError(f"{self.gesture} gestures require a grounded target")
         if self.gesture == "drag" and self.destination is None:
             raise ValueError("drag gestures require a grounded destination")
-        if self.gesture == "pointer_sequence" and not self.parameters.get("points"):
-            raise ValueError("pointer_sequence gestures require observed points")
+        if self.gesture == "pointer_sequence" and not (
+            self.parameters.get("points") or self.parameters.get("relative_points")
+        ):
+            raise ValueError("pointer_sequence gestures require observed points or relative_points")
         if self.gesture == "submit" and not self.expected_state:
             raise ValueError("submit gestures require an evidence-backed expected state")
         if self.gesture == "submit" and self.side_effect_policy != "authorized_mutation":
@@ -706,6 +724,7 @@ class StateSnapshot(BaseModel):
     loading: bool = False
     focused_target: Target | None = None
     evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    overlays: list[str] = Field(default_factory=list, max_length=24)
 
 
 class VerificationResult(BaseModel):
@@ -735,6 +754,158 @@ class ActionAttempt(BaseModel):
     verification: VerificationResult | None = None
     retry_of: str | None = None
     error: str | None = Field(default=None, max_length=500)
+
+
+class InteractionIntent(BaseModel):
+    """A single user-facing outcome the interaction kernel must achieve.
+
+    This is intentionally separate from ``SemanticOperation``: an intent is
+    a goal, while an operation is only one possible browser gesture that may
+    satisfy it after observing the live UI.
+    """
+
+    schema_version: int = Field(default=1, ge=1)
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    objective: str = Field(min_length=3, max_length=420)
+    audience_value: str = Field(min_length=3, max_length=420)
+    safety_policy: Literal["read_only", "authorized_mutation", "blocked"] = "read_only"
+    required_outcomes: list[Postcondition] = Field(default_factory=list, max_length=24)
+    excluded_actions: list[str] = Field(default_factory=list, max_length=24)
+
+
+class Affordance(BaseModel):
+    """One action possibility grounded in the current visible UI snapshot."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    label: str = Field(min_length=1, max_length=240)
+    role: str | None = Field(default=None, max_length=80)
+    method: Literal[
+        "click",
+        "type",
+        "keypress",
+        "hover",
+        "scroll",
+        "drag",
+        "select",
+        "upload",
+        "wait",
+    ]
+    target: Target | None = None
+    geometry: dict[str, float] = Field(default_factory=dict)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=24)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    risk: Literal["none", "low", "medium", "high"] = "none"
+    visible: bool = True
+    enabled: bool = True
+
+
+class ActionCandidate(BaseModel):
+    """A proposed atomic gesture, never a product-specific workflow command."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    intent_id: str
+    action: ActionIntent
+    affordance_id: str | None = None
+    source_snapshot_id: str
+    preconditions: list[Postcondition] = Field(default_factory=list, max_length=24)
+    expected_outcomes: list[Postcondition] = Field(default_factory=list, max_length=24)
+    fallback_candidate_ids: list[str] = Field(default_factory=list, max_length=8)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    safety_verified: bool = False
+    rehearsal_required: bool = False
+
+
+class OutcomeVerification(BaseModel):
+    """Evidence-backed verdict that an interaction achieved its intent."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    intent_id: str
+    status: Literal["passed", "failed", "inconclusive"]
+    expected: list[Postcondition] = Field(default_factory=list, max_length=24)
+    observed_state_id: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    state_delta: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    reason: str = Field(default="", max_length=500)
+    checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class InteractionRecoveryDecision(BaseModel):
+    """A bounded recovery decision for an unexpected post-action state."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    failed_attempt_id: str
+    source_snapshot_id: str
+    decision: Literal["reobserve", "retry_before_dispatch", "replace_suffix", "stop"]
+    reason: str = Field(min_length=3, max_length=500)
+    replacement_candidate_ids: list[str] = Field(default_factory=list, max_length=24)
+    side_effect_dispatched: bool = False
+    evidence_refs: list[str] = Field(default_factory=list, max_length=24)
+
+
+class CapabilityProfile(BaseModel):
+    """Capabilities proven for the current product/version, not assumed."""
+
+    schema_version: int = Field(default=1, ge=1)
+    product_fingerprint: str
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    capabilities: list[str] = Field(default_factory=list, max_length=64)
+    verified_intents: list[str] = Field(default_factory=list, max_length=64)
+    blocked_capabilities: list[str] = Field(default_factory=list, max_length=64)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=128)
+
+
+class InteractionSnapshot(BaseModel):
+    """Rich multimodal observation captured at an interaction boundary."""
+
+    schema_version: int = Field(default=1, ge=1)
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=120)
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    url: str
+    title: str = ""
+    visible_text: str = Field(default="", max_length=12_000)
+    visible_affordances: list[Affordance] = Field(default_factory=list, max_length=160)
+    screenshot_ref: str | None = None
+    dom_snapshot_ref: str | None = None
+    accessibility_snapshot_ref: str | None = None
+    viewport: Viewport | None = None
+    scroll: dict[str, float] = Field(default_factory=dict)
+    focused_target: Target | None = None
+    loading: bool = False
+    overlays: list[str] = Field(default_factory=list, max_length=24)
+    iframe_count: int = Field(default=0, ge=0)
+    shadow_root_count: int = Field(default=0, ge=0)
+    visual_surface: Literal["dom", "canvas", "mixed", "unknown"] = "unknown"
+    evidence_refs: list[str] = Field(default_factory=list, max_length=64)
+    fingerprint: str | None = None
+
+
+class InteractionTrace(BaseModel):
+    """Canonical interaction evidence consumed by presentation and QA."""
+
+    schema_version: int = Field(default=1, ge=1)
+    run_id: str
+    objective: str
+    snapshots: list[StateSnapshot] = Field(default_factory=list, max_length=600)
+    observations: list[InteractionSnapshot] = Field(default_factory=list, max_length=600)
+    attempts: list[ActionAttempt] = Field(default_factory=list, max_length=600)
+    verifications: list[OutcomeVerification] = Field(default_factory=list, max_length=600)
+    recoveries: list[InteractionRecoveryDecision] = Field(default_factory=list, max_length=160)
+    capability_profile: CapabilityProfile | None = None
+    complete: bool = False
+
+    @model_validator(mode="after")
+    def complete_requires_verified_outcomes(self) -> InteractionTrace:
+        if self.complete:
+            # Failed attempts may be retained for audit when a bounded
+            # recovery later proves the same intent.  Completion is decided by
+            # the latest verdict per intent, not by erasing that history.
+            latest: dict[str, OutcomeVerification] = {}
+            for item in self.verifications:
+                latest[item.intent_id] = item
+            if any(item.status != "passed" for item in latest.values()):
+                raise ValueError("a complete interaction trace has failed verifications unresolved")
+        return self
 
 
 class ProductContext(BaseModel):

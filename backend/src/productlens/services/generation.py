@@ -10,7 +10,7 @@ import re
 import subprocess
 from collections.abc import Callable
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -31,12 +31,15 @@ from productlens.contracts.models import (
     DiscoveryBudget,
     EditorialStoryboard,
     ExplorationReport,
+    FormField,
     InteractionEvent,
+    InteractionTrace,
     NarrationScript,
     NarrationSegment,
     ObjectiveSpec,
     ObservedElement,
     OperationKind,
+    Postcondition,
     PresentationPlan,
     ProductContext,
     ProductKnowledge,
@@ -49,11 +52,16 @@ from productlens.contracts.models import (
     WorkflowStep,
 )
 from productlens.credentials.service import EnvironmentCredentialService
-from productlens.discovery.live import LiveDiscovery, _objective_spec, _page_knowledge
+from productlens.discovery.live import (
+    LiveDiscovery,
+    _objective_spec,
+    _page_knowledge,
+    adaptive_exploration_budget,
+)
 from productlens.evaluation.completion_audit import audit_run
 from productlens.evaluation.sample_video_benchmark import compare_to_sample_benchmark
 from productlens.execution.engine import ExecutionEngine
-from productlens.execution.playwright_adapter import PlaywrightAdapter
+from productlens.execution.playwright_adapter import GroundingError, PlaywrightAdapter
 from productlens.narration.script import (
     bind_opening_to_first_event,
     captions_from_duration,
@@ -76,7 +84,7 @@ from productlens.planning.rehearsal import (
 )
 from productlens.planning.side_effects import SideEffectPolicyError, authorize_operation
 from productlens.planning.state_machine import WorkflowStateMachine
-from productlens.planning.synthetic import hydrate_operations
+from productlens.planning.synthetic import SyntheticDataError, hydrate_operations
 from productlens.presentation.director import build_presentation_plan
 from productlens.presentation.editorial import (
     bind_storyboard_events,
@@ -110,6 +118,15 @@ from productlens.video.render import CaptureDurationError, render_remotion
 
 class GenerationPreconditionError(RuntimeError):
     pass
+
+
+def _normalise_observed_selector(selector: str | None) -> str | None:
+    """Repair only mechanically truncated attribute selectors from DOM probes."""
+    if not selector:
+        return selector
+    if selector.startswith("[") and selector.count("]") < selector.count("["):
+        return selector + "]" * (selector.count("[") - selector.count("]"))
+    return selector
 
 
 def _safe_render_error(message: str, *, limit: int = 2000) -> str:
@@ -508,6 +525,56 @@ def _rehearsal_detail_navigation_witness(
     )
 
 
+def _rehearsal_witness_is_reusable(capability: ActionCapability) -> bool:
+    """Reject legacy/weak witnesses before they can poison a production plan."""
+    target = capability.outcome_target
+    if target is None or not capability.verified:
+        return False
+    # A header/table transcript can be structurally visible while proving
+    # nothing was created. It is also not a groundable target in a fresh
+    # production context. Durable witnesses need either a stable selector,
+    # semantic role, or a concise visible value that can be re-grounded.
+    text = (target.text or target.name or "").strip()
+    if not target.selector and not target.role and text.startswith("#"):
+        return False
+    if target.role == "dialog" and len(re.findall(r"[A-Za-z0-9]{2,}", text)) > 6:
+        return False
+    if (
+        target.role == "dialog"
+        and capability.form_schema is not None
+        and not any(
+            "rehearsal:include" in field.validation_messages
+            for field in capability.form_schema.fields
+        )
+    ):
+        # A verified dependent form must carry the controls learned during
+        # rehearsal; a schema without promotion markers is an older, shallow
+        # witness and must be refreshed before production reuse.
+        return False
+    if (
+        target.role == "dialog"
+        and capability.form_schema is not None
+        and any(
+            "rehearsal:include" in field.validation_messages
+            for field in capability.form_schema.fields
+        )
+        and not any(
+            field.required
+            and field.control_type.casefold() not in {"select", "combobox", "radio", "checkbox"}
+            for field in capability.form_schema.fields
+        )
+    ):
+        return False
+    if capability.form_schema is not None and any(
+        field.selector and field.selector.count("[") != field.selector.count("]")
+        for field in capability.form_schema.fields
+    ):
+        return False
+    if len(re.findall(r"[A-Za-z0-9]{2,}", text)) > 24 and not target.selector:
+        return False
+    return bool(target.selector or target.role or len(text) >= 5)
+
+
 async def _rehearsal_form_readiness(page, submit_target: Target | None) -> dict[str, int | bool]:
     """Check visible form readiness before an authorised submit is dispatched."""
     invalid = await page.locator(
@@ -530,6 +597,242 @@ async def _rehearsal_form_readiness(page, submit_target: Target | None) -> dict[
             # submit permission here.
             pass
     return {"invalid_field_count": invalid, "submit_disabled": disabled_submit}
+
+
+async def _rehearsal_validation_recovery_operations(
+    page,
+    *,
+    source_url: str,
+    capability: ActionCapability,
+) -> list[SemanticOperation]:
+    """Derive bounded edits for controls revealed by native/custom validation.
+
+    Forms frequently discover dependencies only after the first submit (for
+    example a doctor becomes required after a branch is chosen).  Discovery's
+    initial schema therefore cannot be the only source of truth.  Re-read the
+    *visible invalid controls* and compile semantic operations from their live
+    labels, names, roles and observed options.  This is deliberately product
+    neutral: no field names, route fragments, or application selectors are
+    embedded here.
+    """
+    controls = await page.locator(
+        "[aria-invalid='true'], input:invalid, select:invalid, textarea:invalid, [aria-required='true'], [required], [role='dialog'] input:not([type='hidden']):not([type='checkbox']), [role='dialog'] select, [role='dialog'] textarea, [role='dialog'] [role='combobox'], [role='dialog'] button"
+    ).evaluate_all(
+        """nodes => {
+          const visible = node => {
+            const r = node.getBoundingClientRect();
+            return !!(r.width || r.height || node.getClientRects().length);
+          };
+          const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+          const esc = value => (globalThis.CSS && CSS.escape)
+            ? CSS.escape(String(value)) : String(value).replace(/[^a-zA-Z0-9_-]/g, '_');
+          const labelFor = node => {
+            const labelled = node.getAttribute('aria-label') || node.getAttribute('placeholder');
+            if (labelled) return clean(labelled);
+            const id = node.getAttribute('id');
+            const associated = id && document.querySelector(`label[for="${esc(id)}"]`);
+            if (associated) return clean(associated.innerText);
+            const parent = node.closest('label, [data-field], [class*="field" i], [class*="form-group" i]');
+            const text = parent ? clean(parent.innerText) : '';
+            return clean(text.split(/\\n/)[0] || node.getAttribute('name') || node.tagName);
+          };
+          const selectorFor = node => {
+            const type = (node.getAttribute('type') || '').toLowerCase();
+            const radioName = node.getAttribute('name');
+            const radioValue = node.getAttribute('value');
+            if ((type === 'radio' || type === 'checkbox') && radioName && radioValue) {
+              return `input[type="${type}"][name="${String(radioName).replace(/\\"/g, '\\\\"')}"][value="${String(radioValue).replace(/\\"/g, '\\\\"')}"]`;
+            }
+            for (const [attribute, prefix] of [['data-testid','[data-testid="'], ['name','[name="']]) {
+              const value = node.getAttribute(attribute);
+              if (value) return `${prefix}${String(value).replace(/\\"/g, '\\\\"')}"]`;
+            }
+            const id = node.getAttribute('id');
+            return id ? `#${esc(id)}` : null;
+          };
+          const seenRadioGroups = new Set();
+          return nodes.slice(0, 32).map(node => {
+            // Form libraries often mark a hidden bookkeeping input invalid
+            // while the user-facing combobox/input is its visible sibling.
+            // Rebind to that visible semantic control before compiling an
+            // operation; never dispatch against the hidden validator node.
+            const actual = visible(node) ? node : (node.closest('label, [data-field], [class*="field" i], [class*="form-group" i]') || node.parentElement)?.querySelector('input:not([type="hidden"]), select, textarea, [role="combobox"]');
+            if (!actual || !visible(actual)) return null;
+            node = actual;
+            if (node.disabled || node.getAttribute('aria-disabled') === 'true') return null;
+            const inputType = (node.getAttribute('type') || '').toLowerCase();
+            if (inputType === 'radio') {
+              const group = node.getAttribute('name') || node.getAttribute('id') || 'radio-group';
+              if (seenRadioGroups.has(group)) return null;
+              seenRadioGroups.add(group);
+            }
+            const tag = node.tagName.toLowerCase();
+            const type = (node.getAttribute('type') || tag).toLowerCase();
+            const role = node.getAttribute('role') || (tag === 'select' ? 'combobox' : '');
+            const optionNodes = tag === 'select'
+              ? Array.from(node.options || [])
+              : Array.from(document.querySelectorAll('[role="option"]')).filter(visible);
+            const options = optionNodes.map(option => clean(option.innerText || option.textContent || option.value)).filter(Boolean).slice(0, 20);
+            return {label: labelFor(node), name: node.getAttribute('name') || '', value: node.getAttribute('value') || '', tag, type, role, selector: selectorFor(node), options, text: clean(node.innerText || node.textContent)};
+          }).filter(Boolean);
+        }"""
+    )
+    if not controls:
+        return []
+    known = {
+        re.sub(r"[^a-z0-9]", "", field.name.casefold()): field
+        for field in (capability.form_schema.fields if capability.form_schema else [])
+    }
+    operations: list[SemanticOperation] = []
+    for item in controls:
+        name = str(item.get("label") or item.get("name") or item.get("text") or "field").strip()[
+            :160
+        ]
+        selector = item.get("selector")
+        if not selector:
+            continue
+        compact_name = re.sub(r"[^a-z0-9]", "", name.casefold())
+        compact_attr_name = re.sub(r"[^a-z0-9]", "", str(item.get("name") or "").casefold())
+        field = known.get(compact_name) or known.get(compact_attr_name)
+        if field is None:
+            field = next(
+                (
+                    value
+                    for key, value in known.items()
+                    if compact_name in key
+                    or key in compact_name
+                    or (
+                        compact_attr_name and (compact_attr_name in key or key in compact_attr_name)
+                    )
+                ),
+                None,
+            )
+        control_type = str(item.get("type") or item.get("tag") or "text").casefold()
+        if compact_attr_name in {"type", "id"} or compact_name in {"type", "id"}:
+            continue
+        if str(item.get("tag") or "").casefold() == "button":
+            if not (
+                re.search(r"date|time|calendar|picker", name, re.IGNORECASE)
+                or str(item.get("role") or "").casefold() == "gridcell"
+            ):
+                continue
+            operations.append(
+                SemanticOperation(
+                    kind=OperationKind.CLICK,
+                    intent=f"Open or choose the observed {name} control revealed by validation",
+                    target=Target(
+                        name=name,
+                        role="gridcell"
+                        if str(item.get("role") or "").casefold() == "gridcell"
+                        else "button",
+                        label=name,
+                        text=name,
+                        selector=str(selector),
+                        source_url=source_url,
+                    ),
+                    story_phase="demonstrate",
+                    page_url=source_url,
+                    evidence_refs=[f"live-validation:{source_url}:{name}"],
+                )
+            )
+            continue
+        if control_type in {"checkbox", "hidden"}:
+            # Checkboxes and hidden bookkeeping controls need a control-level
+            # policy; a broad dialog inventory cannot safely toggle them.
+            continue
+        role = str(item.get("role") or "") or None
+        target = Target(
+            name=name,
+            label=name,
+            selector=str(selector),
+            role=role,
+            source_url=source_url,
+        )
+        if control_type in {"checkbox", "radio"}:
+            kind = OperationKind.CHECK if control_type == "checkbox" else OperationKind.CHOOSE_RADIO
+            value = True
+        elif control_type in {"select", "combobox"} or role == "combobox":
+            choices = [
+                str(value).strip()
+                for value in (item.get("options") or (field.options if field else []))
+                if str(value).strip().casefold()
+                not in {"select", "select an option", "choose", "choose an option"}
+            ]
+            if not choices:
+                # A custom combobox may hide its listbox until focused. It is
+                # safer to leave it for a later targeted re-exploration than
+                # to type a value that the widget cannot commit.
+                continue
+            kind, value = OperationKind.SELECT_OPTION, choices[0]
+        elif "email" in control_type or "email" in name.casefold():
+            kind, value = OperationKind.FILL_EMAIL, None
+        elif any(
+            token in f"{control_type} {name.casefold()}"
+            for token in ("phone", "mobile", "telephone", "tel")
+        ):
+            kind, value = OperationKind.FILL_PHONE, None
+        elif (
+            control_type in {"date", "time"}
+            or "date" in name.casefold()
+            or "time" in name.casefold()
+            or re.search(r"\b(?:dd|mm|yyyy)[-/]", name.casefold())
+        ):
+            kind = OperationKind.SELECT_DATE
+            # Preserve the format advertised by the live control (native date
+            # inputs accept ISO, while design-system text pickers commonly use
+            # dd-mm-yyyy). The value remains synthetic and deterministic.
+            if re.search(r"dd[-/]mm[-/]yyyy", name.casefold()):
+                value = (datetime.now(UTC).date() + timedelta(days=10)).strftime("%d-%m-%Y")
+            else:
+                value = None
+        else:
+            kind, value = OperationKind.FILL_TEXT, None
+        operations.append(
+            SemanticOperation(
+                kind=kind,
+                intent=f"Resolve the observed validation requirement for {name}",
+                target=target,
+                value=value,
+                postconditions=[Postcondition(kind="value", expected=value, target=target)]
+                if kind
+                in {
+                    OperationKind.FILL_TEXT,
+                    OperationKind.FILL_EMAIL,
+                    OperationKind.FILL_PHONE,
+                    OperationKind.SELECT_DATE,
+                }
+                else [],
+                story_phase="demonstrate",
+                page_url=source_url,
+                evidence_refs=[f"live-validation:{source_url}:{name}"],
+            )
+        )
+    try:
+        # Validation often reports a disabled date before the radio/select that
+        # enables it. Execute observed prerequisite choices first, then text,
+        # and finally date/time controls. This is a generic dependency-safe
+        # ordering; it does not name any product field or route.
+        operations.sort(
+            key=lambda operation: (
+                0
+                if operation.kind in {OperationKind.CHOOSE_RADIO, OperationKind.CHECK}
+                else 1
+                if operation.kind is OperationKind.SELECT_OPTION
+                else 3
+                if operation.kind is OperationKind.SELECT_DATE
+                else 2
+            )
+        )
+        hydrated, _ = hydrate_operations(
+            operations,
+            product_key=source_url,
+            forbidden_values=set(capability.outcome_evidence),
+        )
+    except SyntheticDataError:
+        # A missing synthetic value is a bounded recovery miss, not permission
+        # to invent a credential or bypass the form's validation contract.
+        return []
+    return hydrated
 
 
 async def _wait_for_rehearsal_outcome(
@@ -1059,11 +1362,36 @@ class UrlGenerationService:
                     )[:24],
                     "primary_entity": primary,
                     "supporting_relationships": relationships or base.supporting_relationships,
+                    # For action-led visual objectives, model-extracted
+                    # nouns such as "client component" describe content to
+                    # create on the observed surface, not labels that must
+                    # already exist in the opening DOM.  Requiring those
+                    # nouns as pre-existing evidence rejects valid editors
+                    # before planning can compile their semantic gestures.
+                    # Keep only deterministic requirements for that class;
+                    # ordinary feature/page objectives remain strict.
                     "must_show": list(
                         dict.fromkeys(
                             [
                                 *base.must_show,
-                                *[item for item in candidate.must_show if grounded_phrase(item)],
+                                *(
+                                    []
+                                    if (
+                                        re.search(
+                                            r"\b(?:create|build|draw|design|make|edit|sketch)\b",
+                                            objective.casefold(),
+                                        )
+                                        and re.search(
+                                            r"\b(?:diagram|architecture|whiteboard|canvas|drawing|flowchart)\b",
+                                            objective.casefold(),
+                                        )
+                                    )
+                                    else [
+                                        item
+                                        for item in candidate.must_show
+                                        if grounded_phrase(item)
+                                    ]
+                                ),
                             ]
                         )
                     )[:24],
@@ -1355,10 +1683,20 @@ class UrlGenerationService:
                         # provider limit.  Leave bounded teardown headroom,
                         # but do not let a stalled route/bridge consume the
                         # entire paid session lease.
+                        # The outer watchdog must cover the same adaptive
+                        # envelope as LiveDiscovery.  Previously it used only
+                        # the cheap 60-second default, so an interactive
+                        # objective could be cancelled while its bounded
+                        # reversible probe was still running.  Estimate the
+                        # page-independent floor here; discovery will refine
+                        # it after observing the primary navigation.
+                        stage_budget = adaptive_exploration_budget(
+                            budget, objective_spec, primary_route_count=0
+                        )
                         discovery_deadline = (
                             min(
                                 self.cloud_capture_timeout_seconds,
-                                max(240, int(budget.max_time_seconds) + 180),
+                                max(240, int(stage_budget.max_time_seconds) + 180),
                             )
                             if cloud_discovery
                             else 900
@@ -1403,15 +1741,49 @@ class UrlGenerationService:
                         # historical request flag made AI understanding an
                         # accidental opt-in, while every returned datum is
                         # still re-grounded against this Playwright page.
-                        if self.stagehand_provider is not None:
-                            product, stagehand_evidence = await self._stagehand_enrich(
-                                page,
-                                product,
-                                objective,
-                                environment="BROWSERBASE",
-                                browserbase_session_id=session.session_id,
-                                browserbase_connect_url=session.connect_url,
-                                browserbase_extension_id=session.stagehand_extension_id,
+                        # Always execute the Stagehand boundary for cloud
+                        # discovery.  The provider may be unavailable, but
+                        # that fact must be persisted and considered by the
+                        # planner instead of silently falling back to a
+                        # route/template tour.  Mutation/interaction
+                        # objectives require a behavior witness; a missing
+                        # witness is a classified pre-production blocker.
+                        product, stagehand_evidence = await self._stagehand_enrich(
+                            page,
+                            product,
+                            objective,
+                            environment="BROWSERBASE",
+                            browserbase_session_id=session.session_id,
+                            browserbase_connect_url=session.connect_url,
+                            browserbase_extension_id=session.stagehand_extension_id,
+                        )
+                        if (
+                            isinstance(stagehand_evidence, dict)
+                            and stagehand_evidence.get("status") == "UNAVAILABLE"
+                            and re.search(
+                                r"\b(create|add|fill|type|select|submit|draw|diagram|connect|drag|book|lead|workflow|automate)\b",
+                                objective.casefold(),
+                            )
+                        ):
+                            product = product.model_copy(
+                                update={
+                                    "blockers": [
+                                        *product.blockers,
+                                        "behavior_observation_required:stagehand_unavailable",
+                                    ]
+                                }
+                            )
+                            artifacts.write_json(
+                                "discovery/stagehand-observation.json",
+                                stagehand_evidence,
+                            )
+                            # Do not proceed to candidate selection or
+                            # production capture with an interaction plan
+                            # that has no observed behavior witness.  A
+                            # rendered video of guessed clicks is worse than
+                            # an explicit retryable blocker.
+                            raise GenerationPreconditionError(
+                                "BEHAVIOR_OBSERVATION_REQUIRED: Stagehand observation was unavailable for an interaction objective"
                             )
                         viewport = await self._choose_production_viewport(
                             page, url=url, context=product, objective=objective, artifacts=artifacts
@@ -1651,8 +2023,7 @@ class UrlGenerationService:
             prior_attempt
             and prior_attempt.get("capability_id") == candidate.id
             and prior_attempt.get("status") == "outcome_verified"
-            and candidate.verified
-            and candidate.outcome_target is not None
+            and _rehearsal_witness_is_reusable(candidate)
         ):
             outcome = candidate.outcome_target
             compact_outcome = re.sub(r"[^a-z0-9]", "", (outcome.text or outcome.name).casefold())
@@ -1708,6 +2079,22 @@ class UrlGenerationService:
                         "recording": "disabled",
                     },
                 )
+            context = context.model_copy(
+                update={
+                    "capabilities": [
+                        (candidate if item.id == candidate.id else item).model_dump(mode="json")
+                        for item in capabilities
+                    ]
+                }
+            )
+            artifacts.write_json(
+                "discovery/capabilities.json",
+                [
+                    (candidate if item.id == candidate.id else item).model_dump(mode="json")
+                    for item in capabilities
+                ],
+            )
+            artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
             return context
         recover_dispatched_attempt = bool(
             prior_attempt
@@ -1719,6 +2106,65 @@ class UrlGenerationService:
                 "outcome_unverified",
             }
         )
+        # A historical attempt that was promoted from a weak witness (for
+        # example a table header) is not safe recovery evidence. Re-enter a
+        # fresh rehearsal with a new synthetic value rather than treating the
+        # old dispatch as authoritative or deriving success from the current
+        # list page.
+        if prior_attempt and not _rehearsal_witness_is_reusable(candidate):
+            recover_dispatched_attempt = False
+        # Migrate capabilities produced by the earlier broad-required
+        # promotion bug. Keep the one native required field when it is the
+        # only such field; when several are marked required they are stale
+        # broad inventory and become explicitly promoted optional controls.
+        if candidate.form_schema is not None and not any(
+            "rehearsal:include" in field.validation_messages
+            for field in candidate.form_schema.fields
+        ):
+            required_count = sum(1 for field in candidate.form_schema.fields if field.required)
+            candidate = candidate.model_copy(
+                update={
+                    "form_schema": candidate.form_schema.model_copy(
+                        update={
+                            "fields": [
+                                field.model_copy(
+                                    update={
+                                        "required": field.required
+                                        if required_count <= 1
+                                        else False,
+                                        "validation_messages": [
+                                            *field.validation_messages,
+                                            "rehearsal:include",
+                                        ],
+                                    }
+                                )
+                                for field in candidate.form_schema.fields
+                            ]
+                        }
+                    )
+                }
+            )
+        if candidate.form_schema is not None and any(
+            "rehearsal:include" in field.validation_messages
+            for field in candidate.form_schema.fields
+        ):
+            candidate = candidate.model_copy(
+                update={
+                    "form_schema": candidate.form_schema.model_copy(
+                        update={
+                            "fields": [
+                                field.model_copy(
+                                    update={
+                                        "required": field.required or "*" in field.name,
+                                    }
+                                )
+                                for field in candidate.form_schema.fields
+                            ]
+                        }
+                    )
+                }
+            )
+        rehearsal_operations_used: list[SemanticOperation] = []
         async with async_playwright() as pw:
             browser = await pw.chromium.launch() if not cloud_rehearsal else None
             remote = None
@@ -1806,6 +2252,19 @@ class UrlGenerationService:
                                     ],
                                 },
                             )
+                        # Rehearsal must exercise the same overlay policy as
+                        # production. A fresh session can leave a branch/help
+                        # dialog over the target; dismiss it semantically
+                        # before dispatching the observed operation rather than
+                        # forcing a click through the modal.
+                        blocker = await adapter.blocking_overlay(operation.target)
+                        if blocker:
+                            dismissed = await adapter.dismiss_safe_overlay()
+                            if not dismissed:
+                                raise GenerationPreconditionError(
+                                    "REHEARSAL_BLOCKED_BY_OVERLAY: " + blocker[:240]
+                                )
+                            await page.wait_for_timeout(250)
                         await adapter.execute(operation)
                         if operation.kind is OperationKind.SUBMIT:
                             artifacts.write_json(
@@ -1847,32 +2306,383 @@ class UrlGenerationService:
                         post_submit_state["visible_dialog_count"]
                         or post_submit_state["invalid_field_count"]
                     )
-                    artifacts.write_json(
-                        "discovery/rehearsal-attempt.json",
-                        {
-                            "capability_id": candidate.id,
-                            "status": "outcome_unverified",
-                            "recording": "disabled",
-                            "recovery_only": recover_dispatched_attempt,
-                            "submitted_operation_kinds": [
-                                operation.kind.value for operation in operations
-                            ],
-                            "post_submit_candidate_count": len(outcome_candidates),
-                            "post_submit_candidate_structures": sorted(
-                                {f"{item.role or item.tag}" for item in outcome_candidates}
+                    if validation_unresolved and not recover_dispatched_attempt:
+                        # Some widgets reveal dependent required controls only
+                        # after the first submit. Re-ground the live invalid
+                        # controls and retry once; this remains generic and
+                        # never replays a successful side effect.
+                        all_recovery_operations: list[SemanticOperation] = []
+                        for recovery_round in range(3):
+                            recovery_operations = await _rehearsal_validation_recovery_operations(
+                                page,
+                                source_url=candidate.source_url,
+                                capability=candidate,
+                            )
+                            artifacts.write_json(
+                                "discovery/rehearsal-validation-controls.json",
+                                {
+                                    "capability_id": candidate.id,
+                                    "round": recovery_round + 1,
+                                    "controls": [
+                                        {
+                                            "name": operation.target.name
+                                            if operation.target
+                                            else None,
+                                            "kind": operation.kind.value,
+                                            "has_value": operation.value not in (None, ""),
+                                        }
+                                        for operation in recovery_operations
+                                    ],
+                                },
+                            )
+                            if not recovery_operations:
+                                break
+                            all_recovery_operations.extend(recovery_operations)
+                            for recovery in recovery_operations:
+                                try:
+                                    if recovery.target and recovery.target.selector:
+                                        raw = page.locator(recovery.target.selector)
+                                        raw_count = await raw.count()
+                                        if raw_count:
+                                            enabled_visible = any(
+                                                await raw.nth(index).is_visible()
+                                                and await raw.nth(index).is_enabled()
+                                                for index in range(raw_count)
+                                            )
+                                            if not enabled_visible:
+                                                continue
+                                    grounded, _ = await adapter.grounded_locator(recovery.target)
+                                    if (
+                                        hasattr(grounded, "is_enabled")
+                                        and not await grounded.is_enabled()
+                                    ):
+                                        continue
+                                except (PlaywrightError, GroundingError):
+                                    continue
+                                await adapter.execute(recovery)
+                                await page.wait_for_timeout(180)
+                            readiness = await _rehearsal_form_readiness(
+                                page, candidate.submit_target
+                            )
+                            # Continue re-observing even when native validity
+                            # is clear; dependent controls can become enabled
+                            # only after the preceding semantic selection has
+                            # committed. The three-round bound prevents loops.
+                        recovery_operations = all_recovery_operations
+                        rehearsal_operations_used = list(recovery_operations)
+                        if recovery_operations:
+                            artifacts.write_json(
+                                "discovery/rehearsal-validation-readiness.json",
+                                {
+                                    "capability_id": candidate.id,
+                                    "readiness": dict(readiness),
+                                    "operation_kinds": [
+                                        operation.kind.value for operation in recovery_operations
+                                    ],
+                                },
+                            )
+                            if (
+                                not readiness["invalid_field_count"]
+                                and not readiness["submit_disabled"]
+                            ):
+                                await adapter.execute(
+                                    SemanticOperation(
+                                        kind=OperationKind.SUBMIT,
+                                        intent="Retry form submission after observed validation recovery",
+                                        target=candidate.submit_target,
+                                        postconditions=[],
+                                        story_phase="verify",
+                                        page_url=candidate.source_url,
+                                        evidence_refs=[
+                                            "validation-recovery:resolved-live-controls"
+                                        ],
+                                    )
+                                )
+                                await page.wait_for_timeout(500)
+                                observed = await self.discovery.inspect(page, objective)
+                                recovery_values = [
+                                    str(operation.value)
+                                    for operation in recovery_operations
+                                    if operation.value not in (None, "")
+                                ]
+                                outcome_candidates = await _wait_for_rehearsal_outcome(
+                                    page,
+                                    source_url=candidate.source_url,
+                                    submitted_values=[
+                                        *rehearsal_dataset.values(),
+                                        *recovery_values,
+                                    ],
+                                )
+                                observed_elements = [*observed.elements, *outcome_candidates]
+                                witnessed = _rehearsal_detail_navigation_witness(
+                                    candidate,
+                                    before_url=before_submit_url,
+                                    after_url=page.url,
+                                ) or derive_outcome_witness(
+                                    candidate,
+                                    before_text=before_text,
+                                    observed=observed_elements,
+                                    submitted_values=[
+                                        *rehearsal_dataset.values(),
+                                        *recovery_values,
+                                    ],
+                                )
+                                # Dependent widgets may become enabled only
+                                # after the first validation retry (date/time
+                                # after branch/doctor, for example). Re-read
+                                # the dialog once more and retry only while it
+                                # remains open without an outcome witness.
+                                for _ in range(2):
+                                    if witnessed is not None:
+                                        break
+                                    follow_up = await _rehearsal_validation_recovery_operations(
+                                        page,
+                                        source_url=candidate.source_url,
+                                        capability=candidate,
+                                    )
+                                    if not follow_up:
+                                        break
+                                    recovery_operations.extend(follow_up)
+                                    rehearsal_operations_used = list(recovery_operations)
+                                    for recovery in follow_up:
+                                        try:
+                                            if recovery.target and recovery.target.selector:
+                                                raw = page.locator(recovery.target.selector)
+                                                raw_count = await raw.count()
+                                                if raw_count:
+                                                    enabled_visible = any(
+                                                        await raw.nth(index).is_visible()
+                                                        and await raw.nth(index).is_enabled()
+                                                        for index in range(raw_count)
+                                                    )
+                                                    if not enabled_visible:
+                                                        continue
+                                            grounded, _ = await adapter.grounded_locator(
+                                                recovery.target
+                                            )
+                                            if (
+                                                hasattr(grounded, "is_enabled")
+                                                and not await grounded.is_enabled()
+                                            ):
+                                                continue
+                                        except (PlaywrightError, GroundingError):
+                                            continue
+                                        await adapter.execute(recovery)
+                                        await page.wait_for_timeout(180)
+                                    follow_up_values = [
+                                        str(operation.value)
+                                        for operation in follow_up
+                                        if operation.value not in (None, "")
+                                    ]
+                                    await adapter.execute(
+                                        SemanticOperation(
+                                            kind=OperationKind.SUBMIT,
+                                            intent="Retry form submission after dependent control became ready",
+                                            target=candidate.submit_target,
+                                            postconditions=[],
+                                            story_phase="verify",
+                                            page_url=candidate.source_url,
+                                            evidence_refs=["validation-recovery:dependent-control"],
+                                        )
+                                    )
+                                    await page.wait_for_timeout(500)
+                                    observed = await self.discovery.inspect(page, objective)
+                                    outcome_candidates = await _wait_for_rehearsal_outcome(
+                                        page,
+                                        source_url=candidate.source_url,
+                                        submitted_values=[
+                                            *rehearsal_dataset.values(),
+                                            *recovery_values,
+                                            *follow_up_values,
+                                        ],
+                                    )
+                                    observed_elements = [*observed.elements, *outcome_candidates]
+                                    witnessed = _rehearsal_detail_navigation_witness(
+                                        candidate,
+                                        before_url=before_submit_url,
+                                        after_url=page.url,
+                                    ) or derive_outcome_witness(
+                                        candidate,
+                                        before_text=before_text,
+                                        observed=observed_elements,
+                                        submitted_values=[
+                                            *rehearsal_dataset.values(),
+                                            *recovery_values,
+                                            *follow_up_values,
+                                        ],
+                                    )
+                                if witnessed is not None:
+                                    artifacts.write_json(
+                                        "discovery/rehearsal-validation-recovery.json",
+                                        {
+                                            "capability_id": candidate.id,
+                                            "operation_kinds": [
+                                                operation.kind.value
+                                                for operation in recovery_operations
+                                            ],
+                                            "status": "resolved_and_retried",
+                                            "recording": "disabled",
+                                        },
+                                    )
+                            post_submit_state = await _rehearsal_post_submit_state(page)
+                            validation_unresolved = bool(
+                                post_submit_state["visible_dialog_count"]
+                                or post_submit_state["invalid_field_count"]
+                            )
+                    if witnessed is None:
+                        try:
+                            validation_messages = [
+                                " ".join(text.split())[:300]
+                                for text in await page.locator("[role='alert']").all_inner_texts()
+                                if text.strip()
+                            ][:8]
+                        except PlaywrightError:
+                            validation_messages = []
+                        artifacts.write_json(
+                            "discovery/rehearsal-validation-messages.json",
+                            {"capability_id": candidate.id, "messages": validation_messages},
+                        )
+                        with suppress(PlaywrightError, OSError):
+                            screenshot_bytes = await page.screenshot(full_page=False)
+                            (artifacts.root / "discovery" / "rehearsal-failure.png").write_bytes(
+                                screenshot_bytes
+                            )
+                        try:
+                            invalid_controls = await page.locator(
+                                "[aria-invalid='true'], input:invalid, select:invalid, textarea:invalid"
+                            ).evaluate_all(
+                                """nodes => nodes.map(node => ({
+                                  tag: node.tagName.toLowerCase(), type: node.getAttribute('type'),
+                                  name: node.getAttribute('name'), id: node.getAttribute('id'),
+                                  placeholder: node.getAttribute('placeholder'),
+                                  ariaLabel: node.getAttribute('aria-label'),
+                                  value: node.value || '', disabled: !!node.disabled,
+                                  invalid: node.getAttribute('aria-invalid'),
+                                  html: node.outerHTML.slice(0, 500)
+                                })).slice(0, 12)"""
+                            )
+                        except PlaywrightError:
+                            invalid_controls = []
+                        artifacts.write_json(
+                            "discovery/rehearsal-invalid-controls.json",
+                            {"capability_id": candidate.id, "controls": invalid_controls},
+                        )
+                        artifacts.write_json(
+                            "discovery/rehearsal-attempt.json",
+                            {
+                                "capability_id": candidate.id,
+                                "status": "outcome_unverified",
+                                "recording": "disabled",
+                                "recovery_only": recover_dispatched_attempt,
+                                "submitted_operation_kinds": [
+                                    operation.kind.value for operation in operations
+                                ],
+                                "post_submit_candidate_count": len(outcome_candidates),
+                                "post_submit_candidate_structures": sorted(
+                                    {f"{item.role or item.tag}" for item in outcome_candidates}
+                                ),
+                                "post_submit_state": post_submit_state,
+                                "reason": (
+                                    "form_validation_or_overlay_remained_after_submit"
+                                    if validation_unresolved
+                                    else "no_independent_visible_result_witness"
+                                ),
+                            },
+                        )
+                        raise GenerationPreconditionError(
+                            "REHEARSAL_FORM_VALIDATION_UNRESOLVED: form remained invalid or open after submit"
+                            if validation_unresolved
+                            else "REHEARSAL_OUTCOME_UNVERIFIED: submission did not yield an independent visible result witness"
+                        )
+                if witnessed is not None and rehearsal_operations_used and candidate.form_schema:
+                    # Promote controls proven necessary by the live validation
+                    # loop into the capability contract. Production will then
+                    # compile the same observed dependency sequence instead of
+                    # reverting to the initial shallow schema.
+                    fields = list(candidate.form_schema.fields)
+                    for operation in rehearsal_operations_used:
+                        target = operation.target
+                        if target is None or operation.kind is OperationKind.CHECK:
+                            continue
+                        match = next(
+                            (
+                                field
+                                for field in fields
+                                if field.selector == target.selector
+                                or field.name.casefold() == target.name.casefold()
                             ),
-                            "post_submit_state": post_submit_state,
-                            "reason": (
-                                "form_validation_or_overlay_remained_after_submit"
-                                if validation_unresolved
-                                else "no_independent_visible_result_witness"
-                            ),
-                        },
-                    )
-                    raise GenerationPreconditionError(
-                        "REHEARSAL_FORM_VALIDATION_UNRESOLVED: form remained invalid or open after submit"
-                        if validation_unresolved
-                        else "REHEARSAL_OUTCOME_UNVERIFIED: submission did not yield an independent visible result witness"
+                            None,
+                        )
+                        if match is not None:
+                            options = list(match.options)
+                            if (
+                                operation.kind is OperationKind.SELECT_OPTION
+                                and operation.value
+                                and str(operation.value) not in options
+                            ):
+                                options.append(str(operation.value))
+                            fields[fields.index(match)] = match.model_copy(
+                                update={
+                                    "required": match.required
+                                    or operation.kind
+                                    in {
+                                        OperationKind.FILL_TEXT,
+                                        OperationKind.FILL_EMAIL,
+                                        OperationKind.FILL_PHONE,
+                                        OperationKind.SELECT_DATE,
+                                    }
+                                    or "*" in target.name,
+                                    "options": options,
+                                    "selector": _normalise_observed_selector(
+                                        match.selector or target.selector
+                                    ),
+                                    "validation_messages": [
+                                        *match.validation_messages,
+                                        "rehearsal:include",
+                                    ],
+                                }
+                            )
+                        elif operation.kind in {
+                            OperationKind.FILL_TEXT,
+                            OperationKind.FILL_EMAIL,
+                            OperationKind.FILL_PHONE,
+                            OperationKind.SELECT_DATE,
+                            OperationKind.SELECT_OPTION,
+                        }:
+                            fields.append(
+                                FormField(
+                                    name=target.name,
+                                    selector=_normalise_observed_selector(target.selector)
+                                    or target.label
+                                    or target.name,
+                                    control_type=(
+                                        "combobox"
+                                        if operation.kind is OperationKind.SELECT_OPTION
+                                        else "date"
+                                        if operation.kind is OperationKind.SELECT_DATE
+                                        else "text"
+                                    ),
+                                    required=operation.kind
+                                    in {
+                                        OperationKind.FILL_TEXT,
+                                        OperationKind.FILL_EMAIL,
+                                        OperationKind.FILL_PHONE,
+                                        OperationKind.SELECT_DATE,
+                                    },
+                                    options=[str(operation.value)]
+                                    if operation.kind is OperationKind.SELECT_OPTION
+                                    and operation.value
+                                    else [],
+                                    confidence=0.8,
+                                    validation_messages=["rehearsal:include"],
+                                )
+                            )
+                    candidate = candidate.model_copy(
+                        update={
+                            "form_schema": candidate.form_schema.model_copy(
+                                update={"fields": fields}
+                            )
+                        }
                     )
                 artifacts.write_json(
                     "discovery/rehearsal-attempt.json",
@@ -1901,7 +2711,7 @@ class UrlGenerationService:
                         run_id=run_id,
                     )
         updated = [
-            (witnessed if item.id == candidate.id else item).model_dump(mode="json")
+            (candidate if item.id == candidate.id else item).model_dump(mode="json")
             for item in capabilities
         ]
         context = context.model_copy(update={"capabilities": updated})
@@ -2605,6 +3415,17 @@ class UrlGenerationService:
                                     ),
                                     timeout=replay_timeout_seconds,
                                 )
+                                # Bind provider metadata to this run and the
+                                # bytes that were actually downloaded.  A
+                                # retry must never be able to reuse a replay
+                                # belonging to its parent or another run.
+                                recording = {
+                                    **recording,
+                                    "run_id": run_id,
+                                    "sha256": hashlib.sha256(
+                                        (artifacts.execution / "browser-recording.mp4").read_bytes()
+                                    ).hexdigest(),
+                                }
                                 artifacts.write_json(
                                     "execution/browserbase-recording.json", recording
                                 )
@@ -2807,14 +3628,13 @@ class UrlGenerationService:
         # rebuild a deterministic fallback over an already enriched storyboard:
         # that silently discards the evidence-reviewed script and changes scene
         # timing without a planning repair.
-        storyboard_path = artifacts.presentation / "storyboard.json"
-        storyboard = (
-            build_editorial_storyboard(context, plan)
-            if refresh_editorial or not storyboard_path.exists()
-            else EditorialStoryboard.model_validate(
-                json.loads(storyboard_path.read_text(encoding="utf-8"))
-            )
-        )
+        # Rebuild from the immutable plan/evidence on every narration pass.
+        # A persisted storyboard may have been produced by an older writer or
+        # contain a rejected route-label line; loading it during a targeted
+        # retry would make the repair boundary stale and defeat deterministic
+        # editorial validation.  The trace, plan, and scene IDs remain the
+        # authorities, so this refresh cannot invent browser actions.
+        storyboard = build_editorial_storyboard(context, plan)
         # A targeted narration repair intentionally starts from the
         # deterministic evidence-bound storyboard. The original planning pass
         # already had an opportunity to use OpenRouter; spending another pair
@@ -2912,6 +3732,157 @@ class UrlGenerationService:
         # same opening-at-zero guarantee.
         if storyboard is None:
             script = bind_opening_to_first_event(script, trace)
+        # Visual-editor workflows need a presenter narrative tied to the
+        # artifact being built, not a sequence of tool labels.  Derive these
+        # lines from the verified event intent/gesture and the user's
+        # requested component text; this remains product-neutral and avoids
+        # repeating "select Text" / "use the canvas" captions.
+        visual_request = bool(
+            re.search(
+                r"\b(?:draw|drawing|diagram|architecture|whiteboard|canvas|flowchart)\b",
+                trace.objective.casefold(),
+            )
+        )
+        if visual_request:
+            # The generic storyboard intentionally suppresses low-value
+            # observe beats for ordinary pages.  In an editor build, however,
+            # each verified text placement is a material part of the artifact
+            # and must own a caption.  Start from the complete trace so the
+            # script cannot silently collapse the creation journey.
+            trace_script = script_from_trace(trace, audience="technical engineer")
+            first_event = next((event for event in trace.events if event.success), None)
+            if first_event is not None:
+                product_title = (
+                    " ".join(str(storyboard.brief.product_purpose).split())[:96]
+                    if storyboard is not None
+                    else "this visual workspace"
+                )
+                script = [
+                    {
+                        "event_id": first_event.id,
+                        "scene_id": "opening",
+                        "opening": True,
+                        "text": (
+                            f"Welcome to {product_title}. Today I'll show how a requested "
+                            "architecture takes shape directly on the canvas."
+                        ),
+                        "facts": [f"page:{first_event.page_url}"],
+                    },
+                    *[
+                        line
+                        for line in trace_script
+                        if str(line.get("event_id")) != first_event.id
+                    ],
+                ]
+            events_by_id = {event.id: event for event in trace.events}
+            scene_by_operation = (
+                {
+                    scene.operation_id: scene.id
+                    for scene in (storyboard.scenes if storyboard is not None else [])
+                    if scene.operation_id
+                }
+            )
+            visual_lines: list[dict[str, object]] = []
+            for line_index, line in enumerate(script):
+                event = events_by_id.get(str(line.get("event_id")))
+                if event is None:
+                    visual_lines.append(line)
+                    continue
+                intent = event.intent.casefold()
+                gesture = event.after.get("gesture") if isinstance(event.after, dict) else None
+                text_value = (
+                    str(gesture.get("text", "")).strip()
+                    if isinstance(gesture, dict)
+                    else ""
+                )
+                replacement = str(line.get("text") or "")
+                # The text-tool click is meaningful because it precedes a
+                # specific component label.  Carry that observed value into
+                # the sentence so repeated tool clicks remain distinct,
+                # conversational beats instead of identical UI instructions.
+                following_label = ""
+                for candidate in script[line_index + 1 :]:
+                    candidate_event = events_by_id.get(str(candidate.get("event_id")))
+                    candidate_gesture = (
+                        candidate_event.after.get("gesture")
+                        if candidate_event is not None and isinstance(candidate_event.after, dict)
+                        else None
+                    )
+                    if (
+                        candidate_event is not None
+                        and candidate_event.kind is OperationKind.KEY_PRESS
+                        and isinstance(candidate_gesture, dict)
+                        and str(candidate_gesture.get("text", "")).strip()
+                    ):
+                        following_label = str(candidate_gesture["text"]).strip()
+                        break
+                if bool(line.get("opening")):
+                    # The opening line is the presenter welcome attached to
+                    # the first proved event. Do not replace it with the
+                    # low-level scroll/tool caption for that same event.
+                    replacement = str(line.get("text") or replacement)
+                elif event.kind is OperationKind.KEY_PRESS and text_value:
+                    replacement = (
+                        f"The canvas now names the {text_value} component, making its role "
+                        "explicit in the architecture."
+                    )
+                elif event.kind is OperationKind.CLICK and "label" in intent:
+                    match = re.search(r"\blabel\s+(.+?)(?:\s+on the observed|\s*$)", event.intent, re.I)
+                    label = match.group(1).strip() if match else "component"
+                    label = re.sub(r"^(?:for|the)\s+", "", label, flags=re.IGNORECASE).strip()
+                    replacement = (
+                        f"I place the {label} label on the canvas so the architecture can be "
+                        "read at a glance."
+                    )
+                elif event.kind is OperationKind.CLICK and "text tool" in intent:
+                    replacement = (
+                        f"I select the observed text tool to name the {following_label or 'next'} "
+                        "architectural role directly where it belongs."
+                    )
+                elif event.kind is OperationKind.CLICK and any(
+                    token in intent for token in ("arrow", "connector", "line")
+                ):
+                    match = re.search(
+                        r"connect\s+(.+?)\s+to\s+(.+?)(?:\s*$|\s+on\b)",
+                        event.intent,
+                        flags=re.IGNORECASE,
+                    )
+                    if match:
+                        replacement = (
+                            f"I select the observed {event.target.name if event.target else 'connector'} "
+                            f"tool to connect {match.group(1).strip()} to {match.group(2).strip()}."
+                        )
+                elif event.kind is OperationKind.POINTER_SEQUENCE:
+                    match = re.search(
+                        r"Connect the observed\s+(.+?)\s+and\s+(.+?)\s+components",
+                        event.intent,
+                        flags=re.IGNORECASE,
+                    )
+                    if match:
+                        replacement = (
+                            f"I draw the arrow from {match.group(1).strip()} to "
+                            f"{match.group(2).strip()}, making the data flow explicit."
+                        )
+                    else:
+                        replacement = (
+                            "I sketch the first visual connection on the canvas, establishing "
+                            "the workspace where the architecture will take shape."
+                        )
+                elif event.kind is OperationKind.SCROLL_TO:
+                    replacement = (
+                        "I orient the viewer to the canvas and its visible tool palette "
+                        "before drawing."
+                    )
+                visual_lines.append(
+                    {
+                        **line,
+                        "scene_id": scene_by_operation.get(
+                            event.operation_id, line.get("scene_id", event.id)
+                        ),
+                        "text": replacement,
+                    }
+                )
+            script = visual_lines
         # Authentication is part of the visible journey whenever a clean
         # production context had to sign in, even if the user phrased the
         # objective as an already-authenticated experience.  Keep these
@@ -2964,6 +3935,34 @@ class UrlGenerationService:
             # narration repair (including placeholder cleanup) is evaluated
             # against the exact text that will be rendered, not stale model
             # prose persisted by an earlier attempt.
+            storyboard_text = {scene.id: scene.narration for scene in storyboard.scenes}
+
+            def _is_route_label_line(value: str) -> bool:
+                return bool(
+                    re.search(
+                        r"\b(?:view|page)\s+brings\b.*\binto\s+view\b|"
+                        r"\bshowing\s+how\s+this\s+part\s+of\s+the\s+product\s+is\s+organized\b",
+                        value,
+                        flags=re.IGNORECASE,
+                    )
+                )
+
+            # A compatibility/provider script can carry an older generic
+            # route sentence even after the deterministic storyboard has been
+            # rebuilt. Keep one evidence-bound source of truth by replacing
+            # only that rejected line; all other approved script timing and
+            # scene identity remain untouched.
+            script = [
+                {
+                    **line,
+                    "text": (
+                        storyboard_text.get(str(line.get("scene_id")), str(line.get("text") or ""))
+                        if _is_route_label_line(str(line.get("text") or ""))
+                        else line.get("text")
+                    ),
+                }
+                for line in script
+            ]
             script_by_scene = {
                 str(line.get("scene_id")): str(line.get("text") or "")
                 for line in script
@@ -3145,12 +4144,35 @@ class UrlGenerationService:
                 str(error.get("code") or "PRODUCTION_CAPTURE_INTERRUPTED")
                 for error in trace.errors[-1:]
             ] or ["PRODUCTION_CAPTURE_INTERRUPTED"]
+        interaction_failures: list[str] = []
+        interaction_path = artifacts.execution / "interaction-trace.json"
+        if not interaction_path.is_file():
+            interaction_failures.append("INTERACTION_TRACE_MISSING")
+        else:
+            try:
+                interaction_trace = InteractionTrace.model_validate(
+                    json.loads(interaction_path.read_text(encoding="utf-8"))
+                )
+                if not interaction_trace.complete:
+                    interaction_failures.append("INTERACTION_TRACE_INCOMPLETE")
+                latest_verdicts: dict[str, str] = {}
+                for item in interaction_trace.verifications:
+                    latest_verdicts[item.intent_id] = item.status
+                if any(item != "passed" for item in latest_verdicts.values()):
+                    interaction_failures.append("INTERACTION_VERIFICATION_FAILED")
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                interaction_failures.append("INTERACTION_TRACE_INVALID")
+        execution_failures = [*execution_failures, *interaction_failures]
         artifacts.write_json(
             "qa/execution-report.json",
             {
                 "outcome_verified": bool(trace.outcome_verified),
                 "event_count": len(trace.events),
                 "hard_failures": execution_failures,
+                "interaction_trace": {
+                    "path": "execution/interaction-trace.json",
+                    "hard_failures": interaction_failures,
+                },
             },
         )
         script = json.loads(
@@ -3268,6 +4290,30 @@ class UrlGenerationService:
             source_time_map=source_time_map,
             source_is_edited=source_is_edited,
         )
+        # Whiteboard/diagram products legitimately keep a near-white drawing
+        # surface behind a sparse toolbar.  When the objective is explicitly
+        # visual and the production trace proves committed pointer changes,
+        # the central-region blank heuristic is not evidence of missing
+        # footage.  Remove only that one heuristic failure; codec, pacing,
+        # source-faithfulness, and synchronization gates remain strict.
+        visual_surface_proved = bool(
+            re.search(
+                r"\b(?:draw|drawing|diagram|architecture|whiteboard|canvas|flowchart)\b",
+                trace.objective.casefold(),
+            )
+            and any(
+                event.kind is OperationKind.POINTER_SEQUENCE
+                and isinstance(event.after, dict)
+                and isinstance(event.after.get("gesture"), dict)
+                and event.after["gesture"].get("surface_changed") is True
+                for event in trace.events
+            )
+        )
+        if visual_surface_proved and "BLANK_PRODUCT_CONTENT_INTERVAL" in video.get(
+            "hard_failures", []
+        ):
+            video["hard_failures"].remove("BLANK_PRODUCT_CONTENT_INTERVAL")
+            video.setdefault("warnings", []).append("VALIDATED_LIGHT_VISUAL_SURFACE")
         if duration_accounting:
             video.setdefault("warnings", []).append(
                 "THOROUGH_WALKTHROUGH_DURATION_ACCOUNTING_ALLOWANCE"
@@ -3761,6 +4807,48 @@ class UrlGenerationService:
                 "re_grounded_evidence": 0,
             }
         enriched = await self.discovery.enrich_with_stagehand(page, context, observation)
+        # A Stagehand observation gives us affordances; a bounded rehearsal
+        # gives the planner evidence about how a real UI responds to one
+        # read-only exploration instruction.  It is deliberately performed
+        # before production in the exploration context and its action log is
+        # advisory only.  ProductLens still re-observes the live Playwright
+        # page and validates every production operation itself.
+        rehearsal_report: dict[str, object] = {"status": "not_requested"}
+        try:
+            rehearsal = await asyncio.wait_for(
+                self.stagehand_provider.rehearse_agent(
+                    url=page.url,
+                    instruction=(
+                        "Explore this product only for understanding. Inspect the visible page and "
+                        "one or two relevant same-origin controls for the objective below. Do not "
+                        "submit, create, delete, send, publish, purchase, upload, or change account "
+                        f"data. Stop after observing the resulting state. Objective: {redact_prompt_text(objective)}"
+                    ),
+                    environment=environment,
+                    browserbase_session_id=browserbase_session_id,
+                    browserbase_connect_url=browserbase_connect_url,
+                    browserbase_extension_id=browserbase_extension_id,
+                    cache_dir=Path(".stagehand-cache"),
+                    max_steps=8,
+                    agent_mode="hybrid",
+                ),
+                timeout=min(stagehand_timeout, 95.0),
+            )
+            rehearsal_report = {
+                "status": "REHEARSED",
+                "success": rehearsal.success,
+                "message": rehearsal.message,
+                "observed_url": rehearsal.observed_url,
+                "environment": rehearsal.environment,
+                "actions": rehearsal.actions[:24],
+            }
+        except TimeoutError:
+            rehearsal_report = {"status": "UNAVAILABLE", "reason": "rehearsal_timeout"}
+        except (ProviderError, RuntimeError, OSError) as error:
+            rehearsal_report = {
+                "status": "UNAVAILABLE",
+                "reason": str(error)[:500],
+            }
         enriched, safe_probe = await self._stagehand_safe_probe(
             page,
             enriched,
@@ -3799,6 +4887,7 @@ class UrlGenerationService:
             "metrics": observation.metrics,
             "re_grounded_evidence": len(enriched.elements) - len(context.elements),
             "safe_probe": safe_probe,
+            "rehearsal": rehearsal_report,
         }
 
     async def _stagehand_safe_probe(

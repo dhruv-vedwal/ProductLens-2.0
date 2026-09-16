@@ -21,6 +21,7 @@ from productlens.contracts.models import (
 from productlens.video.render import (
     CaptureDurationError,
     NarrationTimingError,
+    RecordingProvenanceError,
     _build_editorial_source,
     _completed_segment_after_timeout,
     _editorial_cut_windows,
@@ -29,6 +30,7 @@ from productlens.video.render import (
     _outro_copy,
     _prepare_remotion_source,
     _presentation_secret_redactions,
+    _validate_recording_provenance,
     _promote_render,
     _recording_space_cursor_paths,
     _remap_trace_for_cuts,
@@ -275,6 +277,66 @@ def test_editorial_cuts_preserve_native_action_and_reveal_edges():
     assert remapped_event.action_at < remapped_event.occurred_at
     assert (remapped_event.action_at - recorded_at).total_seconds() == pytest.approx(5.45)
     assert (remapped_event.occurred_at - recorded_at).total_seconds() == pytest.approx(9.25)
+
+
+def test_editorial_cuts_keep_long_typing_gesture_contiguous():
+    """Typing must remain visible; a delayed DOM witness cannot micro-cut it."""
+    recorded_at = datetime.now(UTC)
+    event = InteractionEvent(
+        operation_id="fill",
+        kind=OperationKind.FILL_TEXT,
+        intent="Type the workflow name",
+        target=Target(name="Workflow name"),
+        action_at=recorded_at + timedelta(seconds=8),
+        occurred_at=recorded_at + timedelta(seconds=18),
+        before={},
+        after={"value": "Create chat"},
+        success=True,
+        duration_ms=10_000,
+    )
+    trace = DemoTrace(
+        run_id="typing-continuity",
+        objective="Demo",
+        started_at=recorded_at,
+        recording_started_at=recorded_at,
+        events=[event],
+    )
+    windows = _editorial_cut_windows(trace, source_seconds=30)
+    # One contiguous retained interval contains the complete 10s type action
+    # and its readable result (rather than action/reveal micro-clips).
+    assert len(windows) == 1
+    assert windows[0][0] <= 7.4
+    assert windows[0][1] >= 20.0
+
+
+def test_recording_provenance_rejects_metadata_from_another_run(tmp_path):
+    artifacts = RunArtifacts(tmp_path, "current-run")
+    raw = artifacts.execution / "browser-recording.mp4"
+    raw.write_bytes(b"evidence")
+    artifacts.write_json(
+        "execution/browserbase-recording.json",
+        {
+            "provider": "browserbase",
+            "native_recording": "completed",
+            "run_id": "other-run",
+            "artifact": str(raw),
+        },
+    )
+    trace = DemoTrace(
+        run_id="current-run", objective="Demo", started_at=datetime.now(UTC), events=[]
+    )
+    with pytest.raises(RecordingProvenanceError, match="belongs to run"):
+        _validate_recording_provenance(trace, artifacts, raw)
+
+
+def test_recording_provenance_allows_local_capture_without_provider_metadata(tmp_path):
+    artifacts = RunArtifacts(tmp_path, "local-run")
+    raw = artifacts.execution / "browser-recording.mp4"
+    raw.write_bytes(b"evidence")
+    trace = DemoTrace(
+        run_id="local-run", objective="Demo", started_at=datetime.now(UTC), events=[]
+    )
+    _validate_recording_provenance(trace, artifacts, raw)
 
 
 def test_editorial_cuts_never_remove_the_middle_of_a_directed_scroll():

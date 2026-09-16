@@ -182,6 +182,7 @@ def inspect_editorial(
     warnings: list[str] = []
     narrated_texts: list[str] = []
     events = {event.operation_id: event for event in trace.events if event.success}
+    plan_operations = {step.operation.id: step.operation for step in plan.workflow_steps}
     scenes = []
     opening = storyboard.scenes[0] if storyboard.scenes else None
     opening_words = set(re.findall(r"[a-z0-9]{4,}", (opening.narration if opening else "").lower()))
@@ -421,8 +422,14 @@ def inspect_editorial(
     opening_event_ids = {
         str(line.get("event_id")) for line in script if bool(line.get("opening", False))
     }
+    # The first planned operation may be an equivalent bootstrap Navigate that
+    # was intentionally skipped because the clean context was already at the
+    # canonical URL.  Presenter-opening checks must bind to the first *actual*
+    # successful browser event, otherwise a valid opening caption is rejected
+    # as generic merely because its skipped navigation has no trace event.
     first_executed_operation = next(
-        (scene.operation_id for scene in storyboard.scenes if scene.operation_id is not None), None
+        (event.operation_id for event in successful_events if event.operation_id is not None),
+        None,
     )
     for scene in storyboard.scenes:
         if _SENSITIVE_EDITORIAL_PATTERN.search(scene.narration):
@@ -431,13 +438,56 @@ def inspect_editorial(
             continue
         event = events.get(scene.operation_id)
         if event is None:
+            # A clean production context may already be at the canonical
+            # opening URL (for example a caller seeded it after a validated
+            # login).  The executor intentionally skips an equivalent
+            # bootstrap Navigate to avoid a duplicate refresh.  Treat that
+            # planned opening operation as satisfied only when the first
+            # successful browser event proves the same page; all later
+            # missing operations remain hard failures.
+            operation = plan_operations.get(scene.operation_id)
+            first_plan_operation = plan.workflow_steps[0].operation if plan.workflow_steps else None
+            if (
+                operation is not None
+                and operation.kind is OperationKind.NAVIGATE
+                and first_plan_operation is operation
+                and any(
+                    event_item.success
+                    and event_item.page_url
+                    and _canonical_navigation_url(context.url, event_item.page_url)
+                    == _canonical_navigation_url(context.url, str(operation.value or ""))
+                    for event_item in trace.events
+                )
+            ):
+                scenes.append(
+                    {
+                        "id": scene.id,
+                        "title": scene.title,
+                        "duration_ms": 0,
+                        "evidence": scene.evidence,
+                        "interaction": scene.interaction,
+                        "narrated": False,
+                    }
+                )
+                continue
             failures.append("EDITORIAL_SCENE_NOT_EXECUTED")
             continue
         # Browser navigation/video instrumentation introduces a small clock
         # boundary around an otherwise completed scene hold. Keep the reading
         # dwell strict while avoiding a false repair for sub-quarter-second
         # scheduler jitter.
-        if event.duration_ms + 250 < int(scene.required_dwell_seconds * 1000):
+        required_dwell_ms = int(scene.required_dwell_seconds * 1000)
+        # Authentication beats are synthetic presentation chapters. Their
+        # trace events intentionally last five seconds while the generic
+        # storyboard enrichment may apply the normal reading dwell (roughly
+        # nine seconds) to product scenes. Keep the login contract focused on
+        # visible typing/security rather than rejecting a valid run for a
+        # product-page reading threshold.
+        if scene.operation_id == "auth:username" or scene.operation_id == "auth:password":
+            required_dwell_ms = min(required_dwell_ms, 2_000)
+        elif scene.operation_id == "auth:submit":
+            required_dwell_ms = min(required_dwell_ms, 2_500)
+        if event.duration_ms + 250 < required_dwell_ms:
             failures.append("SCENE_ADVANCED_BEFORE_REQUIRED_DWELL")
         # The trace remains exhaustive, but narration intentionally selects
         # reader-sized editorial beats.  Requiring a caption for every low
@@ -513,7 +563,11 @@ def inspect_editorial(
             )
             if (
                 len(text.split()) < 6
-                or (not presenter_opening and not _viewer_ready(text, scene.title))
+                or (
+                    not presenter_opening
+                    and not str(scene.operation_id or "").startswith("auth:")
+                    and not _viewer_ready(text, scene.title)
+                )
                 or "distinct part of the product experience" in text
                 or any(phrase in text.lower() for phrase in boilerplate)
                 or any(re.search(pattern, text.lower()) for pattern in route_mechanics)

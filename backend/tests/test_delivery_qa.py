@@ -28,6 +28,7 @@ def test_live_url_delivery_requires_discovery_and_editorial_lineage(tmp_path):
         "page_knowledge",
         "storyboard",
         "coverage_qa",
+        "interaction_trace",
     } <= set(required)
     assert not all(required.values())
 

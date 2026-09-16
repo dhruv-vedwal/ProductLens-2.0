@@ -215,3 +215,45 @@ async def test_stagehand_observed_action_reuses_a_candidate_without_a_free_form_
     assert result.success
     assert result.action == "Open details"
     assert result.observed_url == "https://example.test/page"
+
+
+@pytest.mark.asyncio
+async def test_stagehand_rehearsal_is_bounded_and_never_receives_secrets(
+    monkeypatch, tmp_path: Path
+):
+    bridge = tmp_path / "observe.mjs"
+    bridge.write_text("// bridge")
+
+    class RehearsalProcess(Process):
+        async def communicate(self, payload):
+            body = json.loads(payload)
+            assert body["mode"] == "rehearse_agent"
+            assert body["rehearsal"] is True
+            assert body["agentMode"] == "hybrid"
+            assert body["maxSteps"] == 8
+            assert "password" not in json.dumps(body).lower()
+            response = {
+                "version": 4,
+                "mode": "rehearse_agent",
+                "environment": "LOCAL",
+                "observedUrl": "https://example.test",
+                "result": {
+                    "success": True,
+                    "message": "diagram created",
+                    "actions": [{"type": "drag", "taskCompleted": True}],
+                },
+            }
+            return json.dumps(response).encode(), b""
+
+    async def create(*args, **kwargs):
+        return RehearsalProcess()
+
+    monkeypatch.setattr("productlens.providers.stagehand.asyncio.create_subprocess_exec", create)
+    result = await StagehandProvider(bridge=bridge).rehearse_agent(
+        url="https://example.test",
+        instruction="Create a small architecture diagram",
+        max_steps=8,
+    )
+
+    assert result.success
+    assert result.actions[0]["type"] == "drag"
