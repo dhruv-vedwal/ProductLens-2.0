@@ -1,0 +1,18 @@
+{
+  "name": "@productlens/tutorial-hint",
+  "version": "0.1.0",
+  "description": "Optional TutorialHint markers ProductLens analyzer elevates into the Application Map",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "license": "MIT"
+}

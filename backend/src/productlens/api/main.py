@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -13,6 +14,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 from productlens.artifacts.store import RunArtifacts
+from productlens.auth.deps import bearer_only_factory, bearer_or_query_factory
 from productlens.auth.security import (
     create_access_token,
     decode_access_token,
@@ -21,16 +23,20 @@ from productlens.auth.security import (
 )
 from productlens.config.settings import Settings
 from productlens.contracts.models import UnderstandingPreview
+from productlens.credentials.crypto import encrypt_secret
+from productlens.credentials.service import EnvironmentCredentialService
 from productlens.observability.logging import configure_logging
 from productlens.providers.errors import ProviderError
 from productlens.providers.readiness import provider_readiness
 from productlens.services.preflight import PreflightService
 from productlens.services.runtime import build_job_service
 from productlens.workers.tasks import process_generation_job
+from productlens.video.poster import write_video_poster
 
 configure_logging()
 settings = Settings.from_environment()
 repository, jobs = build_job_service(settings)
+credential_service = EnvironmentCredentialService(auth_secret=settings.auth_secret)
 for provider_type, name, configured, reference in (
     ("llm", "openrouter", bool(settings.openrouter_api_key), "env://OPENROUTER_API_KEY"),
     (
@@ -198,6 +204,21 @@ class KnowledgeInvalidationRequest(BaseModel):
     url: HttpUrl
 
 
+class CredentialCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    username: str = Field(min_length=1, max_length=320)
+    password: str = Field(min_length=1, max_length=320)
+    project_id: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def credential_name_shape(cls, value: str) -> str:
+        normalized = value.strip().lower().replace(" ", "-")
+        if not re.fullmatch(r"[a-z0-9_-]{1,64}", normalized):
+            raise ValueError("credential name must be letters, numbers, underscore, or hyphen")
+        return normalized
+
+
 def public_user(user: dict) -> dict[str, str | None]:
     return {
         "id": user["id"],
@@ -207,24 +228,8 @@ def public_user(user: dict) -> dict[str, str | None]:
     }
 
 
-def current_user(authorization: str | None = Header(default=None)) -> dict:
-    if not settings.auth_required:
-        return {
-            "id": "local-studio",
-            "email": "local@productlens.invalid",
-            "display_name": "Local Studio",
-        }
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="sign in to access your ProductLens workspace")
-    claims = decode_access_token(
-        authorization.removeprefix("Bearer ").strip(), settings.auth_secret
-    )
-    if not claims or not repository.active_session(claims["sid"], claims["sub"]):
-        raise HTTPException(status_code=401, detail="your session has expired; sign in again")
-    try:
-        return repository.get_user(claims["sub"])
-    except KeyError as error:
-        raise HTTPException(status_code=401, detail="account is unavailable") from error
+current_user = bearer_only_factory(repository, lambda: settings)
+current_user_bearer_or_query = bearer_or_query_factory(repository, lambda: settings)
 
 
 def issue_session(user: dict) -> dict[str, object]:
@@ -351,6 +356,69 @@ def readiness() -> dict:
 def providers(_: dict = Depends(current_user)) -> list[dict]:
     """Expose provider wiring metadata only; keys are never an API response."""
     return repository.provider_configs()
+
+
+@app.get("/credentials")
+def list_credentials(user: dict = Depends(current_user)) -> list[dict]:
+    """Opaque credential references from env vault and the user's durable store."""
+    items = credential_service.list_available_references()
+    if settings.auth_required:
+        for row in repository.list_product_credentials_for_user(user["id"]):
+            items.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "reference": row["reference"],
+                    "available": True,
+                    "source": "vault",
+                    "project_id": row.get("project_id"),
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("updated_at"),
+                }
+            )
+    return items
+
+
+@app.post("/credentials", status_code=201)
+def create_credential(
+    payload: CredentialCreateRequest, user: dict = Depends(current_user)
+) -> dict:
+    if not settings.auth_required:
+        raise HTTPException(
+            status_code=409, detail="durable credentials require authenticated mode"
+        )
+    reference = f"secret://productlens/{payload.name}"
+    try:
+        row = repository.create_product_credential(
+            owner_id=user["id"],
+            name=payload.name,
+            reference=reference,
+            username_ciphertext=encrypt_secret(payload.username, settings.auth_secret),
+            password_ciphertext=encrypt_secret(payload.password, settings.auth_secret),
+            project_id=payload.project_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "reference": row["reference"],
+        "available": True,
+        "source": "vault",
+        "project_id": row.get("project_id"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+@app.delete("/credentials/{credential_id}", status_code=204)
+def delete_credential(credential_id: str, user: dict = Depends(current_user)) -> None:
+    if not settings.auth_required:
+        raise HTTPException(status_code=409, detail="durable credentials require authenticated mode")
+    try:
+        repository.delete_product_credential_for_user(credential_id, user["id"])
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="credential not found") from error
 
 
 @app.get("/projects")
@@ -581,7 +649,7 @@ def get_run_stages(run_id: str, user: dict = Depends(current_user)) -> dict:
 
 @app.get("/runs/{run_id}/events")
 async def stream_run_events(
-    run_id: str, request: Request, user: dict = Depends(current_user)
+    run_id: str, request: Request, user: dict = Depends(current_user_bearer_or_query)
 ) -> StreamingResponse:
     """Stream durable run/stage status without client polling.
 
@@ -742,14 +810,46 @@ def get_artifacts(run_id: str, user: dict = Depends(current_user)) -> list[dict[
 
 
 @app.get("/runs/{run_id}/video")
-def get_final_video(run_id: str, user: dict = Depends(current_user)) -> FileResponse:
-    if settings.auth_required:
-        try:
-            repository.get_run_for_user(run_id, user["id"])
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail="run not found") from error
+def get_final_video(
+    run_id: str, user: dict = Depends(current_user_bearer_or_query)
+) -> FileResponse:
+    path = _owned_artifact_path(run_id, user, kind="final_video")
+    return FileResponse(path, media_type="video/mp4", filename=f"productlens-{run_id}.mp4")
+
+
+@app.get("/runs/{run_id}/stream")
+def stream_final_video(
+    run_id: str, user: dict = Depends(current_user_bearer_or_query)
+) -> FileResponse:
+    path = _owned_artifact_path(run_id, user, kind="final_video")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=f"productlens-{run_id}.mp4",
+        content_disposition_type="inline",
+    )
+
+
+@app.get("/runs/{run_id}/poster")
+def get_run_poster(
+    run_id: str, user: dict = Depends(current_user_bearer_or_query)
+) -> FileResponse:
+    try:
+        path = _owned_artifact_path(run_id, user, kind="poster")
+    except HTTPException:
+        video = _owned_artifact_path(run_id, user, kind="final_video")
+        poster = write_video_poster(video, video.parent / "poster.jpg")
+        if poster is None:
+            raise HTTPException(status_code=404, detail="poster is not available") from None
+        repository.save_location(run_id, "poster", str(poster))
+        path = poster
+    return FileResponse(path, media_type="image/jpeg", filename=f"productlens-{run_id}.jpg")
+
+
+def _owned_artifact_path(run_id: str, user: dict, *, kind: str) -> Path:
+    _owned_run_or_404(run_id, user)
     for artifact in repository.locations(run_id):
-        if artifact["kind"] != "final_video":
+        if artifact["kind"] != kind:
             continue
         path = Path(artifact["location"]).resolve()
         try:
@@ -757,5 +857,5 @@ def get_final_video(run_id: str, user: dict = Depends(current_user)) -> FileResp
         except ValueError as error:
             raise HTTPException(status_code=403, detail="invalid artifact location") from error
         if path.exists():
-            return FileResponse(path, media_type="video/mp4", filename=f"productlens-{run_id}.mp4")
-    raise HTTPException(status_code=404, detail="final video is not available")
+            return path
+    raise HTTPException(status_code=404, detail=f"{kind.replace('_', ' ')} is not available")

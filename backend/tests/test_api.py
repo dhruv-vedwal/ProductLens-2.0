@@ -206,6 +206,33 @@ def test_run_events_streams_terminal_status_without_polling():
     assert '"status":"COMPLETE"' in body
 
 
+def test_media_and_events_accept_query_token_and_credentials_stay_opaque():
+    client = TestClient(app)
+    headers, user = account(client, f"media-{uuid4().hex}@example.test")
+    token = headers["Authorization"].removeprefix("Bearer ").strip()
+    project = repository.ensure_user_project(user["id"])
+    request = repository.create_request(str(uuid4()), "fixture://gate-1", "Media", project["id"])
+    run = repository.create_run(request["id"], str(settings.artifact_root))
+    repository.update_run(run["id"], stage="COMPLETE", status="COMPLETE")
+    with client.stream("GET", f"/runs/{run['id']}/events?token={token}") as response:
+        assert response.status_code == 200
+        body = "".join(response.iter_text())
+    assert '"status":"COMPLETE"' in body
+    created = client.post(
+        "/credentials",
+        headers=headers,
+        json={"name": "demo-login", "username": "user@example.test", "password": "not-returned"},
+    )
+    assert created.status_code == 201
+    payload = created.json()
+    assert payload["reference"] == "secret://productlens/demo-login"
+    assert "password" not in payload and "username" not in payload
+    listed = client.get("/credentials", headers=headers)
+    assert listed.status_code == 200
+    assert any(item["reference"] == payload["reference"] for item in listed.json())
+    assert client.delete(f"/credentials/{payload['id']}", headers=headers).status_code == 204
+
+
 def test_knowledge_invalidation_requires_workspace_access():
     client = TestClient(app)
     headers, user = account(client, f"knowledge-{uuid4().hex}@example.test")

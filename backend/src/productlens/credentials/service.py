@@ -9,6 +9,8 @@ from typing import Any
 
 from playwright.async_api import Error as PlaywrightError
 
+from productlens.credentials.crypto import decrypt_secret
+
 
 class CredentialError(RuntimeError):
     pass
@@ -24,6 +26,18 @@ class EnvironmentCredentialService:
     """Resolve only opaque references; credential values never enter run payloads."""
 
     _REFERENCE = re.compile(r"^secret://productlens/([a-zA-Z0-9_-]{1,64})$")
+    _ENV_USERNAME = re.compile(
+        r"^PRODUCTLENS_CREDENTIAL_([A-Z0-9_]+)_USERNAME$", re.IGNORECASE
+    )
+
+    def __init__(
+        self,
+        *,
+        vault_lookup: Callable[[str], BrowserCredentials | None] | None = None,
+        auth_secret: str | None = None,
+    ) -> None:
+        self._vault_lookup = vault_lookup
+        self._auth_secret = auth_secret
 
     @staticmethod
     def _project_environment_value(key: str) -> str | None:
@@ -48,6 +62,51 @@ class EnvironmentCredentialService:
                 return value.strip().strip('"').strip("'")
         return None
 
+    @classmethod
+    def _iter_env_credential_names(cls) -> set[str]:
+        names: set[str] = set()
+        for key in os.environ:
+            match = cls._ENV_USERNAME.fullmatch(key)
+            if match:
+                names.add(match.group(1).upper())
+        source = Path(
+            os.getenv(
+                "PRODUCTLENS_ENV_FILE",
+                Path(__file__).resolve().parents[3] / ".env",
+            )
+        )
+        if source.is_file():
+            for line in source.read_text(encoding="utf-8").splitlines():
+                name, separator, _value = line.partition("=")
+                if not separator:
+                    continue
+                match = cls._ENV_USERNAME.fullmatch(name.strip())
+                if match:
+                    names.add(match.group(1).upper())
+        return names
+
+    def list_available_references(self) -> list[dict[str, object]]:
+        """Return opaque refs only — never usernames or passwords."""
+        items: list[dict[str, object]] = []
+        for name in sorted(self._iter_env_credential_names()):
+            reference = f"secret://productlens/{name.lower().replace('_', '-')}"
+            # Prefer canonical env key form PRODUCTLENS_CREDENTIAL_{NAME}_*
+            env_name = name
+            username_key = f"PRODUCTLENS_CREDENTIAL_{env_name}_USERNAME"
+            password_key = f"PRODUCTLENS_CREDENTIAL_{env_name}_PASSWORD"
+            username = os.getenv(username_key) or self._project_environment_value(username_key)
+            password = os.getenv(password_key) or self._project_environment_value(password_key)
+            # Also try hyphenated reference form used by resolve()
+            items.append(
+                {
+                    "name": name.lower().replace("_", "-"),
+                    "reference": reference,
+                    "available": bool(username and password),
+                    "source": "environment",
+                }
+            )
+        return items
+
     def resolve(self, reference: str) -> BrowserCredentials:
         match = self._REFERENCE.fullmatch(reference)
         if not match:
@@ -57,9 +116,21 @@ class EnvironmentCredentialService:
         password_key = f"PRODUCTLENS_CREDENTIAL_{name}_PASSWORD"
         username = os.getenv(username_key) or self._project_environment_value(username_key)
         password = os.getenv(password_key) or self._project_environment_value(password_key)
-        if not username or not password:
-            raise CredentialError("credential reference is not available to the browser worker")
-        return BrowserCredentials(username=username, password=password)
+        if username and password:
+            return BrowserCredentials(username=username, password=password)
+        if self._vault_lookup is not None:
+            vaulted = self._vault_lookup(reference)
+            if vaulted is not None:
+                return vaulted
+        raise CredentialError("credential reference is not available to the browser worker")
+
+    def decrypt_vault_row(self, row: dict[str, Any]) -> BrowserCredentials:
+        if not self._auth_secret:
+            raise CredentialError("credential vault is not configured")
+        return BrowserCredentials(
+            username=decrypt_secret(row["username_ciphertext"], self._auth_secret),
+            password=decrypt_secret(row["password_ciphertext"], self._auth_secret),
+        )
 
     async def authenticate_if_required(
         self,

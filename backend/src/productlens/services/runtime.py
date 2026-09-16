@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from productlens.config.settings import Settings
+from productlens.credentials.crypto import decrypt_secret
+from productlens.credentials.service import BrowserCredentials, EnvironmentCredentialService
 from productlens.persistence.repository import RunRepository
 from productlens.planning.production import ProductionPlanningService
 from productlens.providers.browserbase import BrowserbaseProvider
@@ -12,6 +14,21 @@ from productlens.providers.stagehand import StagehandProvider
 from productlens.services.generation import UrlGenerationService
 from productlens.services.jobs import DemoJobService
 from productlens.storage import LocalArtifactStorage, S3ArtifactStorage
+
+
+def _vault_credentials(
+    repository: RunRepository, auth_secret: str, reference: str
+) -> BrowserCredentials | None:
+    row = repository.get_product_credential_secrets_by_reference(reference)
+    if row is None:
+        return None
+    try:
+        return BrowserCredentials(
+            username=decrypt_secret(row["username_ciphertext"], auth_secret),
+            password=decrypt_secret(row["password_ciphertext"], auth_secret),
+        )
+    except ValueError:
+        return None
 
 
 def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, DemoJobService]:
@@ -60,6 +77,12 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
                 browserbase_project_id=settings.browserbase_project_id,
                 openrouter_api_key=settings.openrouter_api_key,
                 openrouter_model=settings.openrouter_model,
+            ),
+            credential_service=EnvironmentCredentialService(
+                auth_secret=settings.auth_secret,
+                vault_lookup=lambda reference: _vault_credentials(
+                    repository, settings.auth_secret, reference
+                ),
             ),
             visual_reviewer=visual_reviewer,
             cloud_capture_timeout_seconds=settings.cloud_capture_timeout_seconds,

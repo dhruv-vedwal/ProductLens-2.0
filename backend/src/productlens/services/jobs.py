@@ -44,6 +44,7 @@ from productlens.quality.video import inspect_video
 from productlens.services.generation import UrlGenerationService
 from productlens.services.knowledge import product_knowledge_from_context
 from productlens.services.stage_contracts import stage_lifecycle
+from productlens.video.poster import write_video_poster
 from productlens.video.render import render_remotion
 
 logger = get_logger("productlens.jobs")
@@ -116,6 +117,13 @@ class DemoJobService:
         }
         for checkpoint, status in mapping.get(stage, ()):
             self.repository.update_stage_job(run_id, checkpoint, status=status)
+
+    def _register_final_video(self, run_id: str, video_path: Path) -> None:
+        """Persist the deliverable MP4 and a best-effort library poster frame."""
+        self.repository.save_location(run_id, "final_video", str(video_path))
+        poster = write_video_poster(video_path, video_path.parent / "poster.jpg")
+        if poster is not None:
+            self.repository.save_location(run_id, "poster", str(poster))
 
     async def _heartbeat_stage(self, run_id: str, stage: str) -> None:
         """Keep a long provider/render stage visibly alive for recovery tooling."""
@@ -229,7 +237,7 @@ class DemoJobService:
                 narration_path=narration_path if narration_path.exists() else None,
                 captions=captions,
             )
-            self.repository.save_location(run_id, "final_video", str(output))
+            self._register_final_video(run_id, Path(output))
         elif stage == "VIDEO_QA":
             trace = self._load_trace(artifacts)
             plan = DemoPlan.model_validate(
@@ -531,7 +539,7 @@ class DemoJobService:
             output = self.url_generator.render_stage(
                 run_id=run_id, artifact_root=self.artifact_root
             )
-            self.repository.save_location(run_id, "final_video", str(output))
+            self._register_final_video(run_id, Path(output))
             self.repository.save_video_render(
                 run_id,
                 str(output),
@@ -659,7 +667,10 @@ class DemoJobService:
                 "final_video": artifact_dir / "final" / "demo.mp4",
             }.items():
                 if path.exists():
-                    self.repository.save_location(run_id, kind, str(path))
+                    if kind == "final_video":
+                        self._register_final_video(run_id, path)
+                    else:
+                        self.repository.save_location(run_id, kind, str(path))
             self._record_delivery_assets(run_id, artifact_dir)
             if render:
                 self.repository.update_run(run_id, stage=RunStage.RENDERED, status="RUNNING")

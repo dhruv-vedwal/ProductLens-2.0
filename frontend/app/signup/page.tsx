@@ -1,70 +1,94 @@
 "use client";
+
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth } from "../../components/auth/AuthProvider";
-export default function Signup() {
-  const { signup } = useAuth();
+import { signup } from "@/flows/auth/api";
+import { useAuthStore } from "@/flows/auth/store";
+import { AuthFrame } from "@/components/authFrame";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+
+export default function SignupPage() {
   const router = useRouter();
-  const [name, setName] = useState("");
+  const setSession = useAuthStore((s) => s.setSession);
+  const refreshUser = useAuthStore((s) => s.refreshUser);
+  const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  async function submit(e: FormEvent) {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    setError("");
+    setBusy(true);
+    setError(null);
     try {
-      await signup(name, email, password);
-      router.replace("/dashboard");
-    } catch (x) {
-      setError(x instanceof Error ? x.message : "Unable to create account");
+      const data = await signup(email, password, displayName || null);
+      setSession(data);
+      await refreshUser();
+      router.push("/onboarding/welcome");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Signup failed");
+    } finally {
+      setBusy(false);
     }
   }
+
   return (
-    <main className="auth">
-      <Link className="logo" href="/">
-        PRODUCTLENS <i>2.0</i>
-      </Link>
-      <form onSubmit={submit}>
-        <p className="kicker">START CREATING</p>
-        <h1>Make your first demo.</h1>
-        <p>Settle in first. You control when anything is generated.</p>
-        <label>
-          Name
-          <input
-            required
-            value={name}
-            onChange={(e) => setName(e.target.value)}
+    <AuthFrame
+      title="Create your account"
+      subtitle="Email and password. That’s enough to start."
+      footer={
+        <>
+          Already have an account?{" "}
+          <Link href="/login" className="text-foreground underline-offset-2 hover:underline">
+            Log in
+          </Link>
+        </>
+      }
+    >
+      <form onSubmit={onSubmit} className="space-y-4">
+        <div className="space-y-1.5">
+          <Label htmlFor="display">Display name</Label>
+          <Input
+            id="display"
+            data-tour="signup-display-name"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="Optional"
           />
-        </label>
-        <label>
-          Work email
-          <input
-            required
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            data-tour="signup-email"
             type="email"
+            required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
-        </label>
-        <label>
-          Password
-          <input
-            required
-            minLength={10}
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="password">Password</Label>
+          <Input
+            id="password"
+            data-tour="signup-password"
             type="password"
+            minLength={10}
+            required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
-          <small>Use at least 10 characters.</small>
-        </label>
-        {error && <div className="formError">{error}</div>}
-        <button className="button">
-          Create account <span>→</span>
-        </button>
-        <small>
-          Already have an account? <Link href="/login">Sign in</Link>
-        </small>
+          <p className="text-[11px] text-faint">At least 10 characters.</p>
+        </div>
+        {error ? <p className="text-sm text-destructive">{error}</p> : null}
+        <Button type="submit" data-tour="signup-submit" className="w-full" size="lg" disabled={busy}>
+          {busy ? "Creating…" : "Continue"}
+        </Button>
       </form>
-    </main>
+    </AuthFrame>
   );
 }

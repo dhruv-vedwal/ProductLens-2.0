@@ -77,6 +77,18 @@ SCHEMA_SQL = """            CREATE TABLE IF NOT EXISTS demo_requests (
               id TEXT PRIMARY KEY, owner_id TEXT REFERENCES users(id), name TEXT NOT NULL,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS product_credentials (
+              id TEXT PRIMARY KEY,
+              owner_id TEXT NOT NULL REFERENCES users(id),
+              project_id TEXT REFERENCES projects(id),
+              name TEXT NOT NULL,
+              reference TEXT UNIQUE NOT NULL,
+              username_ciphertext TEXT NOT NULL,
+              password_ciphertext TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(owner_id, name)
+            );
             CREATE TABLE IF NOT EXISTS page_knowledge (
               id TEXT PRIMARY KEY, product_knowledge_id TEXT NOT NULL REFERENCES product_knowledge(id),
               url TEXT NOT NULL, evidence_json TEXT NOT NULL, confidence REAL NOT NULL, last_verified_at TEXT NOT NULL,
@@ -119,4 +131,6 @@ SCHEMA_SQL = """            CREATE TABLE IF NOT EXISTS demo_requests (
             CREATE INDEX IF NOT EXISTS idx_knowledge_versions_key ON knowledge_versions(product_key, version DESC);
             CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON projects(owner_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_product_credentials_owner_id
+              ON product_credentials(owner_id, updated_at DESC);
 """
