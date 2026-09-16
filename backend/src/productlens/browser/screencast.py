@@ -53,7 +53,8 @@ class CdpScreencastRecorder:
         self._frame_count += 1
         encoded = payload.get("data")
         session_id = payload.get("sessionId")
-        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        raw_metadata: object = payload.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         timestamp = metadata.get("timestamp")
         if not isinstance(encoded, str) or session_id is None:
             return

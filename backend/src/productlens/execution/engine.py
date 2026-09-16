@@ -132,7 +132,7 @@ def _browser_url_matches(actual: str, expected: str) -> bool:
     # route is identical; human-readable slugs remain strict.
     expected_path = expected_parts.path.rstrip("/").split("/")
     actual_path = actual_parts.path.rstrip("/").split("/")
-    if (
+    return (
         not expected_parts.query
         and expected_parts.scheme == actual_parts.scheme
         and expected_parts.netloc == actual_parts.netloc
@@ -143,9 +143,7 @@ def _browser_url_matches(actual: str, expected: str) -> bool:
         and re.fullmatch(r"[a-z0-9_-]{16,}", actual_path[-1], re.IGNORECASE)
         and any(character.isdigit() for character in expected_path[-1])
         and any(character.isdigit() for character in actual_path[-1])
-    ):
-        return True
-    return False
+    )
 
 
 def _value_matches(target_name: str, expected: object, actual: str) -> bool:
@@ -328,7 +326,9 @@ class ExecutionEngine:
                         "text": text,
                         "controls": safe_controls,
                         "focusedControl": focused if isinstance(focused, dict) else None,
-                        "overlays": evidence.get("overlays") if isinstance(evidence.get("overlays"), list) else [],
+                        "overlays": evidence.get("overlays")
+                        if isinstance(evidence.get("overlays"), list)
+                        else [],
                         "dom": str(evidence.get("domSnapshot") or "")[:50_000],
                         "accessibility": str(evidence.get("accessibilitySnapshot") or "")[:20_000],
                     },
@@ -512,7 +512,8 @@ class ExecutionEngine:
                     if (
                         operation.kind is OperationKind.POINTER_SEQUENCE
                         and isinstance(operation.value, dict)
-                        and operation.value.get("pattern") in {
+                        and operation.value.get("pattern")
+                        in {
                             "short_reversible_stroke",
                             "connector_segment",
                         }
@@ -563,10 +564,7 @@ class ExecutionEngine:
                             verification_condition = condition.model_copy(
                                 update={"target": operation.target}
                             )
-                        if (
-                            condition.kind == "surface_changed"
-                            and isinstance(action_result, dict)
-                        ):
+                        if condition.kind == "surface_changed" and isinstance(action_result, dict):
                             observed_surface_change = action_result.get("surface_changed")
                             if observed_surface_change is None:
                                 raise VerificationError(
@@ -587,7 +585,9 @@ class ExecutionEngine:
                             # DOM value. Prefer the clipped surface witness
                             # produced by the adapter over a broad page hash,
                             # which can be unchanged for a transparent canvas.
-                            if bool(action_result["surface_changed"]) is not bool(condition.expected):
+                            if bool(action_result["surface_changed"]) is not bool(
+                                condition.expected
+                            ):
                                 raise VerificationError(
                                     "Expected observable editor surface change="
                                     f"{bool(condition.expected)}, got {bool(action_result['surface_changed'])}"
@@ -1082,12 +1082,16 @@ class ExecutionEngine:
                     option = options.nth(index)
                     if not await option.is_visible():
                         continue
-                    if expected is None or expected.casefold() in (await option.inner_text()).casefold():
+                    if (
+                        expected is None
+                        or expected.casefold() in (await option.inner_text()).casefold()
+                    ):
                         visible = True
                         break
-            if not visible or condition.expected is False:
-                if bool(visible) is not bool(condition.expected):
-                    raise VerificationError("Expected the select options witness to match")
+            if (not visible or condition.expected is False) and bool(visible) is not bool(
+                condition.expected
+            ):
+                raise VerificationError("Expected the select options witness to match")
         elif condition.kind == "overlay_clear":
             blocker = getattr(self.adapter, "blocking_overlay", None)
             if callable(blocker) and await blocker(condition.target) is not None:

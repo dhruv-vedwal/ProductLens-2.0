@@ -37,7 +37,11 @@ def _dependency_priority(field: FormField) -> tuple[int, int]:
         return (0, 0)
     if control in {"select", "combobox"}:
         return (1, 0)
-    if control in {"date", "time"} or "date" in field.name.casefold() or "time" in field.name.casefold():
+    if (
+        control in {"date", "time"}
+        or "date" in field.name.casefold()
+        or "time" in field.name.casefold()
+    ):
         return (3, 0)
     return (2, 0)
 

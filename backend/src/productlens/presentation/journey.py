@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from productlens.contracts.models import DemoTrace, OperationKind
@@ -21,7 +22,11 @@ CLICK_KINDS = {
 CURSOR_KINDS = CLICK_KINDS | {OperationKind.DRAG, OperationKind.POINTER_SEQUENCE}
 
 
-def _has_directed_scroll_motion(path: list[dict]) -> bool:
+def _mapping(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _has_directed_scroll_motion(path: list[dict[str, Any]]) -> bool:
     """Distinguish an already-visible reading beat from a real scroll.
 
     A semantic ``ScrollTo`` is also the planner's safe way to establish that a
@@ -58,7 +63,7 @@ def _page_key(value: str | None) -> str | None:
     )
 
 
-def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
+def build_journey(trace: DemoTrace, scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Direct trace scenes into a page-complete editorial journey.
 
     Navigation is deliberately only an ``enter`` beat.  The final beat of a
@@ -67,9 +72,10 @@ def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
     a successful click as coverage.
     """
     by_event = {event.id: event for event in trace.events if event.success}
-    directed: list[dict] = []
+    directed: list[dict[str, Any]] = []
     for index, scene in enumerate(scenes):
-        event = by_event.get(scene.get("event_id"))
+        event_id = scene.get("event_id")
+        event = by_event.get(str(event_id)) if event_id else None
         if event is None:
             continue
         if index == 0:
@@ -84,9 +90,9 @@ def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
             phase, action_class = "verify", "ESSENTIAL"
         rect = event.target_rect
         page_key = _page_key(event.page_url)
-        existing_camera = scene.get("camera") if isinstance(scene.get("camera"), dict) else {}
-        existing_cursor = scene.get("cursor") if isinstance(scene.get("cursor"), dict) else {}
-        existing_scroll = scene.get("scroll") if isinstance(scene.get("scroll"), dict) else {}
+        existing_camera = _mapping(scene.get("camera"))
+        existing_cursor = _mapping(scene.get("cursor"))
+        existing_scroll = _mapping(scene.get("scroll"))
         scroll_evidence = list(event.scroll_path)
         has_scroll_motion = _has_directed_scroll_motion(scroll_evidence)
         directed.append(
@@ -222,7 +228,7 @@ def build_journey(trace: DemoTrace, scenes: list[dict]) -> list[dict]:
     return directed
 
 
-def inspect_journey(scenes: list[dict]) -> dict:
+def inspect_journey(scenes: list[dict[str, Any]]) -> dict[str, Any]:
     failures: list[str] = []
     if not scenes or scenes[0].get("story_phase") != "context":
         failures.append("JOURNEY_MISSING_CONTEXT")

@@ -7,6 +7,16 @@ from typing import Any
 from productlens.contracts.models import DemoTrace, OperationKind
 
 
+def _mapping(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _mapping_list(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def inspect_visual_state(state: dict[str, Any]) -> dict[str, Any]:
     """Reject a video whose explicit requested theme was not applied."""
     failures: list[str] = []
@@ -25,12 +35,10 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
     warnings: list[str] = []
     screen_frames = int(props.get("screenFrames") or 0)
     frame_rate = int(props.get("frameRate") or 30)
-    beats = props.get("beats") if isinstance(props.get("beats"), list) else []
-    captions = props.get("captions") if isinstance(props.get("captions"), list) else []
-    cursor_paths = props.get("cursorPaths") if isinstance(props.get("cursorPaths"), list) else []
-    event_viewports = (
-        props.get("eventViewports") if isinstance(props.get("eventViewports"), dict) else {}
-    )
+    beats = _mapping_list(props.get("beats"))
+    captions = _mapping_list(props.get("captions"))
+    cursor_paths = _mapping_list(props.get("cursorPaths"))
+    event_viewports = _mapping(props.get("eventViewports"))
     source_width = float(props.get("sourceWidth") or 1920)
     source_height = float(props.get("sourceHeight") or 1080)
     successful_count = sum(event.success for event in trace.events)
@@ -69,9 +77,7 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
         # click.  Likewise, an off-viewport navigation target cannot have a
         # truthful on-canvas cursor geometry; the director intentionally omits
         # those paths rather than drawing a jump outside the frame.
-        viewport = (
-            event_viewports.get(event.id) if isinstance(event_viewports.get(event.id), dict) else {}
-        )
+        viewport = _mapping(event_viewports.get(event.id))
         viewport_width = float(
             viewport.get("width") or (event.viewport.width if event.viewport else source_width)
         )
@@ -90,7 +96,7 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
         if path is None:
             failures.append("MISSING_CURSOR_PATH")
             break
-        destination = path.get("destination") if isinstance(path.get("destination"), dict) else {}
+        destination = _mapping(path.get("destination"))
         # For a drag, ``target_rect`` identifies the source affordance.  The
         # viewer-facing endpoint is the observed browser gesture destination;
         # comparing it with the source center falsely rejected valid canvas
@@ -144,11 +150,11 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
                 ):
                     failures.append("CURSOR_PATH_SOURCE_MISMATCH")
                     break
-        source = path.get("source") if isinstance(path.get("source"), dict) else {}
+        source_point = _mapping(path.get("source"))
         if (
             min(
-                float(source.get("x", -1)),
-                float(source.get("y", -1)),
+                float(source_point.get("x", -1)),
+                float(source_point.get("y", -1)),
                 float(destination.get("x", -1)),
                 float(destination.get("y", -1)),
             )
@@ -157,18 +163,24 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
             failures.append("CURSOR_PATH_OUTSIDE_VIEWPORT")
             break
     previous_end = 0.0
+    effective_frame_rate: float = float(frame_rate)
     if frame_rate < 24:
         failures.append("INVALID_PRESENTATION_FRAME_RATE")
-        frame_rate = 30
-    screen_seconds = screen_frames / frame_rate if screen_frames else 0
+        effective_frame_rate = 30
+    screen_seconds = screen_frames / effective_frame_rate if screen_frames else 0
     for caption in captions:
-        start, end = float(caption.get("start", -1)), float(caption.get("end", -1))
-        if start < previous_end or end <= start or end > screen_seconds + 0.01:
+        caption_start = float(caption.get("start", -1))
+        caption_end = float(caption.get("end", -1))
+        if (
+            caption_start < previous_end
+            or caption_end <= caption_start
+            or caption_end > screen_seconds + 0.01
+        ):
             failures.append("CAPTION_OUTSIDE_PRESENTATION_TIMELINE")
             break
         scene_id = str(caption.get("scene_id", ""))
-        beat = beats_by_id.get(scene_id)
-        if scene_id and beat is None:
+        caption_beat = beats_by_id.get(scene_id)
+        if scene_id and caption_beat is None:
             failures.append("CAPTION_WITHOUT_PRESENTATION_BEAT")
             break
         # A beat is the cursor/action interval.  A caption is bound to the
@@ -178,7 +190,7 @@ def inspect_presentation(trace: DemoTrace, props: dict[str, Any]) -> dict[str, A
         # reintroduces caption-ahead-of-video failures; the shared scene id and
         # monotonic rendered timeline are the applicable synchronization
         # contract.
-        previous_end = end
+        previous_end = caption_end
     # Caption-led delivery is the narration product until TTS is configured.
     # A long walkthrough whose final caption ends near the opening is not a
     # coherent silent demo, even if each individual line is well formed.

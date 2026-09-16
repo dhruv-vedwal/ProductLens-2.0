@@ -44,7 +44,9 @@ async def execute_generation_job(job_id: str) -> None:
     await execute_claimed_generation_job(job, repository=repository, jobs=jobs)
 
 
-async def execute_claimed_generation_job(job: dict[str, Any], *, repository, jobs) -> None:
+async def execute_claimed_generation_job(
+    job: dict[str, Any], *, repository: Any, jobs: Any
+) -> None:
     """Fallback for an unknown job kind; supported jobs use durable stages."""
     if job["kind"] == "fixture":
         return
@@ -58,7 +60,7 @@ async def execute_claimed_generation_job(job: dict[str, Any], *, repository, job
         repository.finish_job(job["id"], status="COMPLETE")
 
 
-def _finish_if_terminal(repository, run_id: str) -> bool:
+def _finish_if_terminal(repository: Any, run_id: str) -> bool:
     stages = repository.stage_jobs(run_id)
     if not stages or any(item["status"] not in {"COMPLETE", "SKIPPED"} for item in stages):
         return False
@@ -72,8 +74,8 @@ async def execute_generation_stage(
     run_id: str,
     stage: str,
     *,
-    repository=None,
-    jobs=None,
+    repository: Any = None,
+    jobs: Any = None,
     schedule_next: bool = True,
     claimed_stage: dict[str, Any] | None = None,
 ) -> None:

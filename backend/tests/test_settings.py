@@ -56,3 +56,20 @@ def test_settings_requires_explicit_multimodal_review_opt_in(monkeypatch, tmp_pa
 
     assert settings.multimodal_review_enabled is True
     assert settings.openrouter_vision_model == "provider/vision"
+
+
+def test_settings_uses_safe_defaults_for_malformed_numeric_values(monkeypatch, tmp_path):
+    source = tmp_path / ".env"
+    source.write_text(
+        "PRODUCTLENS_AUTH_SECRET=0123456789abcdef0123456789abcdef\n"
+        "PRODUCTLENS_SESSION_TTL_SECONDS=not-a-number\n"
+        "PRODUCTLENS_STAGEHAND_OBSERVE_TIMEOUT_SECONDS=also-invalid\n"
+        "BROWSERBASE_SESSION_TIMEOUT_SECONDS=999999\n"
+    )
+    monkeypatch.setenv("PRODUCTLENS_ENV_FILE", str(source))
+
+    settings = Settings.from_environment()
+
+    assert settings.session_ttl_seconds == 604800
+    assert settings.stagehand_observe_timeout_seconds == 105.0
+    assert settings.browserbase_session_timeout_seconds == 1800

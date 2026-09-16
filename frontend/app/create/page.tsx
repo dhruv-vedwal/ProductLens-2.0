@@ -1,4 +1,130 @@
 "use client";
-import { FormEvent,useEffect,useState } from "react"; import { AppShell } from "../../components/studio/AppShell"; import { apiFetch } from "../../services/api";
-type Project={id:string;name:string};
-export default function Create(){const [projects,setProjects]=useState<Project[]>([]),[url,setUrl]=useState(""),[objective,setObjective]=useState(""),[audience,setAudience]=useState("Product prospect"),[project,setProject]=useState(""),[error,setError]=useState(""),[queued,setQueued]=useState("");useEffect(()=>{void apiFetch("/projects").then(r=>r.ok?r.json():[]).then(x=>{setProjects(x);setProject(x[0]?.id??"")})},[]);async function submit(e:FormEvent){e.preventDefault();setError("");const response=await apiFetch("/runs",{method:"POST",body:JSON.stringify({url,objective,audience,project_id:project,render:true,max_pages:4})});const data=await response.json();if(!response.ok){setError(data.detail??"Unable to queue your demo");return}setQueued(data.run_id)}return <AppShell><main className="content"><div className="pageIntro"><div><p className="kicker">NEW DEMO</p><h1>Set the story, not the clicks.</h1><p>A tight objective produces a focused walkthrough. ProductLens will explore only what is relevant.</p></div></div><section className="formLayout"><form className="formPanel" onSubmit={submit}><label>Product URL<input required type="url" value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://app.example.com"/></label><label>What should this demo show?<textarea required value={objective} onChange={e=>setObjective(e.target.value)} placeholder="Show how a sales rep creates a lead and books a follow-up."/></label><label>Audience<select value={audience} onChange={e=>setAudience(e.target.value)}><option>Product prospect</option><option>Sales leader</option><option>Operations team</option><option>Executive buyer</option></select></label><label>Project<select value={project} onChange={e=>setProject(e.target.value)}>{projects.map(x=><option value={x.id} key={x.id}>{x.name}</option>)}</select></label>{error&&<div className="formError">{error}</div>}{queued?<div className="hint">Your demo is queued. You can follow its progress in the demo library.</div>:<button className="button">Create verified demo <span>→</span></button>}</form><aside className="videoPanel"><p className="kicker">A BETTER DEFAULT</p><h1>Clear, calm, and purposeful.</h1><p className="hint">The production run replays a validated workflow. It does not bulk-click the application to fill time.</p><p className="hint">Silent videos stay readable with caption timing and cursor choreography designed for narration later.</p></aside></section></main></AppShell>}
+import { FormEvent, useEffect, useState } from "react";
+import { AppShell } from "../../components/studio/AppShell";
+import { apiFetch } from "../../services/api";
+type Project = { id: string; name: string };
+export default function Create() {
+  const [projects, setProjects] = useState<Project[]>([]),
+    [url, setUrl] = useState(""),
+    [objective, setObjective] = useState(""),
+    [audience, setAudience] = useState("Product prospect"),
+    [project, setProject] = useState(""),
+    [error, setError] = useState(""),
+    [queued, setQueued] = useState("");
+  useEffect(() => {
+    void apiFetch("/projects")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((x) => {
+        setProjects(x);
+        setProject(x[0]?.id ?? "");
+      });
+  }, []);
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    const response = await apiFetch("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        url,
+        objective,
+        audience,
+        project_id: project,
+        render: true,
+        max_pages: 4,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.detail ?? "Unable to queue your demo");
+      return;
+    }
+    setQueued(data.run_id);
+  }
+  return (
+    <AppShell>
+      <main className="content">
+        <div className="pageIntro">
+          <div>
+            <p className="kicker">NEW DEMO</p>
+            <h1>Set the story, not the clicks.</h1>
+            <p>
+              A tight objective produces a focused walkthrough. ProductLens will
+              explore only what is relevant.
+            </p>
+          </div>
+        </div>
+        <section className="formLayout">
+          <form className="formPanel" onSubmit={submit}>
+            <label>
+              Product URL
+              <input
+                required
+                type="url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="https://app.example.com"
+              />
+            </label>
+            <label>
+              What should this demo show?
+              <textarea
+                required
+                value={objective}
+                onChange={(e) => setObjective(e.target.value)}
+                placeholder="Show how a sales rep creates a lead and books a follow-up."
+              />
+            </label>
+            <label>
+              Audience
+              <select
+                value={audience}
+                onChange={(e) => setAudience(e.target.value)}
+              >
+                <option>Product prospect</option>
+                <option>Sales leader</option>
+                <option>Operations team</option>
+                <option>Executive buyer</option>
+              </select>
+            </label>
+            <label>
+              Project
+              <select
+                value={project}
+                onChange={(e) => setProject(e.target.value)}
+              >
+                {projects.map((x) => (
+                  <option value={x.id} key={x.id}>
+                    {x.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {error && <div className="formError">{error}</div>}
+            {queued ? (
+              <div className="hint">
+                Your demo is queued. You can follow its progress in the demo
+                library.
+              </div>
+            ) : (
+              <button className="button">
+                Create verified demo <span>→</span>
+              </button>
+            )}
+          </form>
+          <aside className="videoPanel">
+            <p className="kicker">A BETTER DEFAULT</p>
+            <h1>Clear, calm, and purposeful.</h1>
+            <p className="hint">
+              The production run replays a validated workflow. It does not
+              bulk-click the application to fill time.
+            </p>
+            <p className="hint">
+              Silent videos stay readable with caption timing and cursor
+              choreography designed for narration later.
+            </p>
+          </aside>
+        </section>
+      </main>
+    </AppShell>
+  );
+}

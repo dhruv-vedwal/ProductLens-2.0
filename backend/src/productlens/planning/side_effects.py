@@ -55,10 +55,11 @@ def side_effect_decision(operation: SemanticOperation) -> str:
     if operation.side_effect_policy == "read_only" and operation.kind in MUTATING_KINDS:
         return "blocked_external"
     if operation.kind in REVERSIBLE_GESTURE_KINDS:
-        if not any(condition.kind in {"changed", "test_state", "text", "visible"} for condition in operation.postconditions):
-            raise SideEffectPolicyError(
-                "Reversible gesture requires an observable postcondition"
-            )
+        if not any(
+            condition.kind in {"changed", "test_state", "text", "visible"}
+            for condition in operation.postconditions
+        ):
+            raise SideEffectPolicyError("Reversible gesture requires an observable postcondition")
         return "allowed_reversible"
     if operation.kind not in MUTATING_KINDS:
         return "read_only"

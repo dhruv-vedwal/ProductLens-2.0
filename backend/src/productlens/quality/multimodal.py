@@ -26,13 +26,16 @@ def build_review_packet(
     """Create a non-secret packet that an optional visual model may inspect."""
     if not video.is_file() or video.stat().st_size == 0:
         raise FileNotFoundError(video)
-    events = trace.get("events") if isinstance(trace.get("events"), list) else []
+    raw_events: object = trace.get("events")
+    events = raw_events if isinstance(raw_events, list) else []
+    raw_scenes: object = (storyboard or {}).get("scenes", [])
+    scenes = raw_scenes if isinstance(raw_scenes, list) else []
     return {
         "run_id": run_id,
         "video_path": str(video),
         "sample_seconds": [float(value) for value in (sample_seconds or [])],
         "event_count": len(events),
-        "scene_count": len((storyboard or {}).get("scenes", [])),
+        "scene_count": len(scenes),
         "checks": [
             "frame_composition",
             "readability",

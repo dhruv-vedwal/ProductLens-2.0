@@ -5,6 +5,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from playwright.async_api import Error as PlaywrightError
 
@@ -62,7 +63,7 @@ class EnvironmentCredentialService:
 
     async def authenticate_if_required(
         self,
-        page,
+        page: Any,
         reference: str | None,
         *,
         action_observer: Callable[[str, str, str, str], Awaitable[None]] | None = None,

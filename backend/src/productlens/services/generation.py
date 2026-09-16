@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -40,9 +39,7 @@ from productlens.contracts.models import (
     ObservedElement,
     OperationKind,
     Postcondition,
-    PresentationPlan,
     ProductContext,
-    ProductKnowledge,
     Rect,
     ReplanDecision,
     SemanticOperation,
@@ -112,37 +109,30 @@ from productlens.quality.repair import classify_repair
 from productlens.quality.story import inspect_story
 from productlens.quality.synchronization import inspect_synchronization, secure_transition_intervals
 from productlens.quality.video import inspect_video
-from productlens.urls import canonical_product_url
-from productlens.video.render import CaptureDurationError, render_remotion
+from productlens.services.generation_policy import (
+    canonical_url as _canonical_url,
+)
+from productlens.services.generation_policy import (
+    normalise_observed_selector as _normalise_observed_selector,
+)
+from productlens.services.generation_policy import (
+    production_duration_envelope as _production_duration_envelope,
+)
+from productlens.services.generation_policy import (
+    recording_frame_rate as _recording_frame_rate,
+)
+from productlens.services.generation_policy import safe_render_error
+from productlens.services.knowledge import product_knowledge_payload
+from productlens.services.render_stage import render_run
 
 
 class GenerationPreconditionError(RuntimeError):
     pass
 
 
-def _normalise_observed_selector(selector: str | None) -> str | None:
-    """Repair only mechanically truncated attribute selectors from DOM probes."""
-    if not selector:
-        return selector
-    if selector.startswith("[") and selector.count("]") < selector.count("["):
-        return selector + "]" * (selector.count("[") - selector.count("]"))
-    return selector
-
-
-def _safe_render_error(message: str, *, limit: int = 2000) -> str:
-    """Return a durable render diagnostic with credential-like values removed."""
-    text = " ".join((message or "").split())
-    text = re.sub(
-        r"(?i)(\bauthorization\b\s*[:=]\s*(?:bearer\s+)?)([^\s,;]+)",
-        r"\1[REDACTED]",
-        text,
-    )
-    text = re.sub(
-        r"(?i)(\b(?:api[_-]?key|access[_-]?key|token|password|passcode|secret|authorization)\b\s*[:=]\s*)([^\s,;]+)",
-        r"\1[REDACTED]",
-        text,
-    )
-    return text[-limit:] if len(text) > limit else text
+# Keep the legacy import surface stable for local tools and existing callers;
+# render-stage code uses the canonical helper directly.
+_safe_render_error = safe_render_error
 
 
 def _narration_script_contract(
@@ -198,40 +188,6 @@ def _narration_script_contract(
         timing_owner="measured_audio" if mode == "tts" else "scene",
         segments=segments,
     )
-
-
-def _recording_frame_rate(path: Path) -> float | None:
-    """Read the native capture frame rate without making it a render guess."""
-    if not path.is_file() or path.stat().st_size == 0:
-        return None
-    try:
-        probe = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=avg_frame_rate",
-                "-of",
-                "json",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        payload = json.loads(probe.stdout or "{}")
-        value = (payload.get("streams") or [{}])[0].get("avg_frame_rate")
-        if isinstance(value, str) and "/" in value:
-            numerator, denominator = value.split("/", 1)
-            rate = float(numerator) / float(denominator)
-        else:
-            rate = float(value)
-        return rate if rate > 0 else None
-    except (OSError, ValueError, TypeError, ZeroDivisionError, json.JSONDecodeError):
-        return None
 
 
 def _relevance_graph(context: ProductContext) -> dict[str, object]:
@@ -311,62 +267,11 @@ def _relevance_graph(context: ProductContext) -> dict[str, object]:
 logger = get_logger("productlens.generation")
 
 
-def _product_knowledge_payload(context: ProductContext, *, project_id: str | None = None) -> dict:
-    """Materialize the canonical reusable knowledge checkpoint from discovery.
-
-    Discovery is also a public service boundary (used by local validation and
-    resumable workers), so persistence cannot depend on the job orchestrator
-    remembering to add a second write.  The payload is content-fingerprinted
-    and contains only observed, non-secret evidence.
-    """
-    identity = {
-        "url": context.url,
-        "title": context.title,
-        "routes": sorted(context.relevant_routes),
-        "pages": sorted(page.url for page in context.page_knowledge),
-        "sections": sorted(
-            section for page in context.page_knowledge for section in page.visible_sections
-        ),
-        "relationships": sorted(
-            (item.source, item.target, item.relation)
-            for item in getattr(context, "relationships", [])
-        ),
-    }
-    fingerprint = hashlib.sha256(
-        json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
-    form_schemas = []
-    for raw in context.capabilities:
-        try:
-            capability = ActionCapability.model_validate(raw)
-        except (TypeError, ValueError):
-            continue
-        if capability.form_schema is not None:
-            form_schemas.append(capability.form_schema)
-    knowledge = ProductKnowledge(
-        project_id=project_id,
-        product_fingerprint=fingerprint,
-        version=fingerprint[:16],
-        application_type=context.application_type,
-        navigation=context.navigation,
-        routes=context.relevant_routes,
-        feature_map=context.feature_knowledge,
-        relationships=getattr(context, "relationships", []),
-        page_knowledge=context.page_knowledge,
-        workflow_knowledge=context.candidate_demo_flows,
-        form_schemas=form_schemas,
-        capabilities=context.capabilities,
-        capability_resolutions=getattr(context, "capability_resolutions", []),
-        known_blockers=context.blockers,
-        successful_actions=context.successful_action_hints,
-    )
-    return {
-        **knowledge.model_dump(mode="json"),
-        # Legacy cache readers still consume these aliases.  Keep them at the
-        # artifact boundary while the typed contract remains canonical.
-        "relevant_routes": context.relevant_routes,
-        "successful_actions": context.successful_action_hints,
-    }
+def _product_knowledge_payload(
+    context: ProductContext, *, project_id: str | None = None
+) -> dict[str, object]:
+    """Compatibility alias for the canonical knowledge materializer."""
+    return product_knowledge_payload(context, project_id=project_id)
 
 
 async def _rehearsal_outcome_candidates(
@@ -878,33 +783,6 @@ async def _wait_for_rehearsal_outcome(
         await page.wait_for_timeout(700)
         return await collect()
     return candidates
-
-
-def _production_duration_envelope(plan: DemoPlan) -> tuple[int | None, dict[str, object] | None]:
-    """Return the bounded native-edit envelope used by the production path.
-
-    The plan's maximum remains the product requirement.  A thorough walkthrough
-    also has a small, explicit accounting allowance for the independently
-    rendered title/close and timestamp/encoder quantisation.  Low-level render
-    and QA functions keep their strict defaults; only this orchestration layer
-    may opt into the documented allowance, and it persists the accounting so a
-    few seconds cannot be hidden as an arbitrary speed-up.
-    """
-    maximum = plan.maximum_duration_seconds
-    if maximum is None or plan.target_duration_seconds < 180:
-        return maximum, None
-    allowance = 6
-    return maximum + allowance, {
-        "requested_maximum_seconds": maximum,
-        "effective_maximum_seconds": maximum + allowance,
-        "allowance_seconds": allowance,
-        "reason": "bounded native-speed editorial/title-close accounting for thorough walkthrough",
-    }
-
-
-def _canonical_url(value: str) -> str:
-    """Compare browser states, not incidental redirect spelling."""
-    return canonical_product_url(value)
 
 
 async def _apply_requested_visual_state(page, objective: str) -> dict[str, object]:
@@ -3768,20 +3646,14 @@ class UrlGenerationService:
                         ),
                         "facts": [f"page:{first_event.page_url}"],
                     },
-                    *[
-                        line
-                        for line in trace_script
-                        if str(line.get("event_id")) != first_event.id
-                    ],
+                    *[line for line in trace_script if str(line.get("event_id")) != first_event.id],
                 ]
             events_by_id = {event.id: event for event in trace.events}
-            scene_by_operation = (
-                {
-                    scene.operation_id: scene.id
-                    for scene in (storyboard.scenes if storyboard is not None else [])
-                    if scene.operation_id
-                }
-            )
+            scene_by_operation = {
+                scene.operation_id: scene.id
+                for scene in (storyboard.scenes if storyboard is not None else [])
+                if scene.operation_id
+            }
             visual_lines: list[dict[str, object]] = []
             for line_index, line in enumerate(script):
                 event = events_by_id.get(str(line.get("event_id")))
@@ -3791,9 +3663,7 @@ class UrlGenerationService:
                 intent = event.intent.casefold()
                 gesture = event.after.get("gesture") if isinstance(event.after, dict) else None
                 text_value = (
-                    str(gesture.get("text", "")).strip()
-                    if isinstance(gesture, dict)
-                    else ""
+                    str(gesture.get("text", "")).strip() if isinstance(gesture, dict) else ""
                 )
                 replacement = str(line.get("text") or "")
                 # The text-tool click is meaningful because it precedes a
@@ -3827,7 +3697,11 @@ class UrlGenerationService:
                         "explicit in the architecture."
                     )
                 elif event.kind is OperationKind.CLICK and "label" in intent:
-                    match = re.search(r"\blabel\s+(.+?)(?:\s+on the observed|\s*$)", event.intent, re.I)
+                    match = re.search(
+                        r"\blabel\s+(.+?)(?:\s+on the observed|\s*$)",
+                        event.intent,
+                        re.IGNORECASE,
+                    )
                     label = match.group(1).strip() if match else "component"
                     label = re.sub(r"^(?:for|the)\s+", "", label, flags=re.IGNORECASE).strip()
                     replacement = (
@@ -4042,94 +3916,7 @@ class UrlGenerationService:
         }
 
     def render_stage(self, *, run_id: str, artifact_root: Path) -> Path:
-        artifacts = RunArtifacts(artifact_root, run_id)
-        trace = self._load_trace(artifacts)
-        plan = self._load_plan(artifacts)
-        presentation = PresentationPlan.model_validate(
-            json.loads(
-                (artifacts.presentation / "presentation-plan.json").read_text(encoding="utf-8")
-            )
-        )
-        captions = json.loads(
-            (artifacts.presentation / "captions.json").read_text(encoding="utf-8")
-        )
-        scenes_path = artifacts.presentation / "validated-scene-plan.json"
-        scenes = (
-            json.loads(scenes_path.read_text(encoding="utf-8"))
-            if scenes_path.exists()
-            else build_scene_plan(trace)
-        )
-        storyboard_path = artifacts.presentation / "storyboard.json"
-        storyboard = (
-            EditorialStoryboard.model_validate(
-                json.loads(storyboard_path.read_text(encoding="utf-8"))
-            )
-            if storyboard_path.exists()
-            else None
-        )
-        effective_maximum, duration_accounting = _production_duration_envelope(plan)
-        if duration_accounting:
-            artifacts.write_json("presentation/duration-accounting.json", duration_accounting)
-        audio = artifacts.root / "audio" / "narration.mp3"
-        artifacts.write_json(
-            "render/status.json",
-            {
-                "status": "RUNNING",
-                "run_id": run_id,
-                "target_duration_seconds": plan.target_duration_seconds,
-                "started_at": datetime.now(UTC).isoformat(),
-                "resume_from": "execution/trace.json",
-                "candidate_location": str(artifacts.root / "render" / "demo.candidate.mp4"),
-            },
-        )
-        started = perf_counter()
-        try:
-            output = render_remotion(
-                trace,
-                presentation,
-                artifacts,
-                narration_path=audio if audio.exists() else None,
-                captions=captions,
-                scenes=scenes,
-                target_duration_seconds=plan.target_duration_seconds,
-                maximum_duration_seconds=effective_maximum,
-                storyboard=storyboard,
-            )
-        except Exception as error:
-            failure = (
-                "CAPTURE_DURATION_EXCEEDS_OBJECTIVE_MAXIMUM"
-                if isinstance(error, CaptureDurationError)
-                else type(error).__name__
-            )
-            artifacts.write_json(
-                "render/status.json",
-                {
-                    "status": "FAILED",
-                    "run_id": run_id,
-                    "error_code": failure,
-                    # Preserve a bounded, provider-safe diagnostic so a
-                    # resumable worker can identify the owning render layer
-                    # without requiring a live log tail. Never persist values
-                    # that look like credentials or bearer tokens.
-                    "error_message": _safe_render_error(str(error)),
-                },
-            )
-            artifacts.write_json(
-                "qa/repair-decision.json",
-                classify_repair([failure]).model_dump(mode="json"),
-            )
-            raise
-        artifacts.write_json(
-            "render/status.json",
-            {
-                "status": "COMPLETE",
-                "run_id": run_id,
-                "location": str(output),
-                "duration_ms": int((perf_counter() - started) * 1000),
-                "completed_at": datetime.now(UTC).isoformat(),
-            },
-        )
-        return output
+        return render_run(run_id=run_id, artifact_root=artifact_root)
 
     def qa_stage(self, *, run_id: str, artifact_root: Path) -> dict:
         artifacts = RunArtifacts(artifact_root, run_id)

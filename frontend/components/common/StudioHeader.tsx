@@ -11,11 +11,19 @@ const links = [
 ];
 
 export function StudioHeader({ label }: StudioHeaderProps) {
-  return <header className="top">
-    <Link className="brand" href="/">PRODUCTLENS <span>2.0</span></Link>
-    <nav aria-label="Studio navigation">
-      {links.map(link => <Link key={link.href} href={link.href}>{link.label}</Link>)}
-    </nav>
-    <p>{label}</p>
-  </header>;
+  return (
+    <header className="top">
+      <Link className="brand" href="/">
+        PRODUCTLENS <span>2.0</span>
+      </Link>
+      <nav aria-label="Studio navigation">
+        {links.map((link) => (
+          <Link key={link.href} href={link.href}>
+            {link.label}
+          </Link>
+        ))}
+      </nav>
+      <p>{label}</p>
+    </header>
+  );
 }

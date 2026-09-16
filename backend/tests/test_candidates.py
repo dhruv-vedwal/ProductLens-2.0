@@ -525,9 +525,24 @@ def test_visual_editor_does_not_fabricate_connectors_without_observed_geometry()
         ),
         page_knowledge=[page],
         elements=[
-            ObservedElement(tag="button", name="Text", selector="#text", source_url=root, actionable=True),
-            ObservedElement(tag="button", name="Arrow", selector="#arrow", source_url=root, actionable=True, text="A"),
-            ObservedElement(tag="canvas", name="canvas workspace", selector="canvas", source_url=root, actionable=True),
+            ObservedElement(
+                tag="button", name="Text", selector="#text", source_url=root, actionable=True
+            ),
+            ObservedElement(
+                tag="button",
+                name="Arrow",
+                selector="#arrow",
+                source_url=root,
+                actionable=True,
+                text="A",
+            ),
+            ObservedElement(
+                tag="canvas",
+                name="canvas workspace",
+                selector="canvas",
+                source_url=root,
+                actionable=True,
+            ),
         ],
     )
     proposal = build_page_complete_proposal(

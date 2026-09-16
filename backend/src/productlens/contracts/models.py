@@ -259,6 +259,10 @@ class ActionIntent(BaseModel):
         }[self.gesture]
         value = self.value
         if self.gesture == "drag":
+            if self.destination is None:
+                # Keep the invariant explicit for callers constructing an
+                # instance through a non-standard Pydantic path.
+                raise ValueError("drag gestures require a grounded destination")
             value = {**self.parameters, "destination": self.destination.model_dump(mode="json")}
         elif self.parameters:
             value = {**self.parameters, **({"value": self.value} if self.value is not None else {})}

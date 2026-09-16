@@ -100,17 +100,14 @@ def value_for(
     for attempt in range(128):
         candidate = _candidate_value(field, seed=seed, attempt=attempt)
         normalized = _comparable(candidate)
-        calendar_field = "date" in field or "time" in field or bool(
-            re.search(r"\b(?:dd|mm|yyyy)[-/]", field)
+        calendar_field = (
+            "date" in field or "time" in field or bool(re.search(r"\b(?:dd|mm|yyyy)[-/]", field))
         )
         if normalized and (
             calendar_field
             or not any(
                 normalized == value
-                or (
-                    len(value) >= 8
-                    and (normalized in value or value in normalized)
-                )
+                or (len(value) >= 8 and (normalized in value or value in normalized))
                 for value in forbidden
             )
         ):

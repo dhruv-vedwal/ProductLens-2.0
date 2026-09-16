@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from productlens.contracts.models import DemoPlan, DemoTrace
 
 
@@ -20,7 +22,7 @@ def _words(value: str) -> set[str]:
     }
 
 
-def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
+def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict[str, Any]:
     """Prove that each promised viewer-facing outcome was actually reached."""
     evidence = "\n".join(
         " ".join(
@@ -73,7 +75,7 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict:
     # that chapter completed. This is stronger than fuzzy text matching and
     # avoids rejecting a fully recorded page merely because the editorial
     # wording changed between planning and execution.
-    page_contracts: list[list] = []
+    page_contracts: list[list[Any]] = []
     seen_pages: set[str] = set()
     for step in plan.workflow_steps:
         operation = step.operation

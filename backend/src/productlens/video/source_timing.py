@@ -113,10 +113,10 @@ def align_trace_to_recording(
         # strict perceptual matching for clicks/forms/state changes, while
         # allowing a temporally aligned scroll witness to carry the clock.
         temporal_confidence = max(0.0, 1.0 - min(1.0, abs(source_second - expected) / 20.0))
-        event = event_by_id.get(event_id)
+        matched_event = event_by_id.get(event_id)
         confidence = (
             max(visual_confidence, temporal_confidence)
-            if event is not None and event.kind is OperationKind.SCROLL_TO
+            if matched_event is not None and matched_event.kind is OperationKind.SCROLL_TO
             else visual_confidence
         )
         confidence_values.append(confidence)

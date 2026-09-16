@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +12,7 @@ from uuid import uuid4
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
+from productlens.persistence.schema import SCHEMA_SQL
 from productlens.urls import canonical_product_url
 
 
@@ -30,7 +31,7 @@ class _DatabaseRow(Mapping[str, Any]):
     def __getitem__(self, key: str | int) -> Any:
         return self._ordered[key] if isinstance(key, int) else self._values[key]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[str]:
         return iter(self._values)
 
     def __len__(self) -> int:
@@ -40,7 +41,7 @@ class _DatabaseRow(Mapping[str, Any]):
 class _DatabaseResult:
     def __init__(self, result: Any):
         self._result = result
-        self.rowcount = result.rowcount
+        self.rowcount: int = int(result.rowcount)
 
     def fetchone(self) -> _DatabaseRow | None:
         row = self._result.fetchone()
@@ -69,7 +70,9 @@ class _PostgresConnection:
         self._connection = self.engine.connect()
 
     @staticmethod
-    def _statement(statement: str, parameters: tuple[Any, ...] | dict[str, Any] | None):
+    def _statement(
+        statement: str, parameters: tuple[Any, ...] | dict[str, Any] | None
+    ) -> tuple[Any, dict[str, Any]]:
         if not isinstance(parameters, tuple):
             return text(statement), parameters or {}
         binds: dict[str, Any] = {}
@@ -83,11 +86,15 @@ class _PostgresConnection:
             rendered.extend((f":{name}", part))
         return text("".join(rendered)), binds
 
-    def execute(self, statement: str, parameters: tuple[Any, ...] | dict[str, Any] | None = None):
+    def execute(
+        self, statement: str, parameters: tuple[Any, ...] | dict[str, Any] | None = None
+    ) -> _DatabaseResult:
         query, binds = self._statement(statement, parameters)
         return _DatabaseResult(self._connection.execute(query, binds))
 
-    def executemany(self, statement: str, parameters: list[tuple[Any, ...] | dict[str, Any]]):
+    def executemany(
+        self, statement: str, parameters: list[tuple[Any, ...] | dict[str, Any]]
+    ) -> _DatabaseResult | None:
         if not parameters:
             return None
         query, _first = self._statement(statement, parameters[0])
@@ -97,7 +104,9 @@ class _PostgresConnection:
                 _, binds = self._statement(statement, values)
                 rendered.append(binds)
             return _DatabaseResult(self._connection.execute(query, rendered))
-        return _DatabaseResult(self._connection.execute(query, parameters))
+        # SQLAlchemy's runtime accepts a list of mappings here, but its type
+        # overload is narrower than the SQLite-compatible repository surface.
+        return _DatabaseResult(self._connection.execute(query, parameters))  # type: ignore[arg-type]
 
     def executescript(self, script: str) -> None:
         for statement in script.split(";"):
@@ -120,143 +129,30 @@ class RunRepository:
         self.dialect = (
             "postgresql" if database_url.startswith(("postgresql", "postgres://")) else "sqlite"
         )
+        self.connection: _PostgresConnection | sqlite3.Connection
         if self.dialect == "postgresql":
             self.connection = _PostgresConnection(database_url)
         else:
             database_path = Path(database_url.removeprefix("sqlite:///"))
             database_path.parent.mkdir(parents=True, exist_ok=True)
-            self.connection = sqlite3.connect(database_path, check_same_thread=False)
-            self.connection.row_factory = sqlite3.Row
-            self.connection.execute("PRAGMA foreign_keys = ON")
-            self.connection.execute("PRAGMA journal_mode = WAL")
-            self.connection.execute("PRAGMA busy_timeout = 5000")
-        self.connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS demo_requests (
-              id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL, url TEXT NOT NULL,
-              objective TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
-              project_id TEXT
-            );
-            CREATE TABLE IF NOT EXISTS demo_runs (
-              id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES demo_requests(id),
-              stage TEXT NOT NULL, status TEXT NOT NULL, artifact_root TEXT NOT NULL,
-              error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS demo_attempts (
-              id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), ordinal INTEGER NOT NULL,
-              stage TEXT NOT NULL, status TEXT NOT NULL, failure_code TEXT, created_at TEXT NOT NULL,
-              UNIQUE(run_id, ordinal)
-            );
-            CREATE TABLE IF NOT EXISTS product_knowledge (
-              id TEXT PRIMARY KEY, product_key TEXT UNIQUE NOT NULL, version INTEGER NOT NULL,
-              evidence_json TEXT NOT NULL, confidence REAL NOT NULL, last_verified_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS knowledge_versions (
-              id TEXT PRIMARY KEY, product_key TEXT NOT NULL, version INTEGER NOT NULL,
-              fingerprint TEXT NOT NULL, evidence_json TEXT NOT NULL, confidence REAL NOT NULL,
-              captured_at TEXT NOT NULL, UNIQUE(product_key, version)
-            );
-            CREATE TABLE IF NOT EXISTS demo_plans (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS workflow_steps (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), ordinal INTEGER NOT NULL, payload_json TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS browser_sessions (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), provider TEXT NOT NULL, external_session_id TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS run_lineage (parent_run_id TEXT NOT NULL REFERENCES demo_runs(id), retry_run_id TEXT PRIMARY KEY REFERENCES demo_runs(id), created_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS interaction_events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), ordinal INTEGER NOT NULL, payload_json TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS presentation_plans (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS narration_scripts (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS quality_reports (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id), kind TEXT NOT NULL, location TEXT NOT NULL, created_at TEXT NOT NULL);
-            -- A compact, queryable mirror of the architectural JSON evidence.
-            -- Files remain the immutable renderer inputs; this ledger makes a
-            -- crashed/resumed run inspectable without scanning its directory.
-            CREATE TABLE IF NOT EXISTS run_artifact_documents (
-              id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id),
-              kind TEXT NOT NULL, payload_json TEXT NOT NULL, source_path TEXT NOT NULL,
-              sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL, created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL, UNIQUE(run_id, kind)
-            );
-            CREATE TABLE IF NOT EXISTS provider_configs (
-              id TEXT PRIMARY KEY, provider_type TEXT NOT NULL, name TEXT NOT NULL,
-              credential_reference TEXT, active INTEGER NOT NULL, priority INTEGER NOT NULL,
-              settings_json TEXT NOT NULL, updated_at TEXT NOT NULL,
-              UNIQUE(provider_type, name)
-            );
-            CREATE TABLE IF NOT EXISTS generation_jobs (
-              id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES demo_runs(id),
-              kind TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL,
-              delivery_attempts INTEGER NOT NULL DEFAULT 0, error_code TEXT,
-              queued_at TEXT NOT NULL, claimed_at TEXT, completed_at TEXT
-            );
-            CREATE TABLE IF NOT EXISTS generation_stage_jobs (
-              id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id),
-              stage TEXT NOT NULL, ordinal INTEGER NOT NULL, status TEXT NOT NULL,
-              error_code TEXT, delivery_attempts INTEGER NOT NULL DEFAULT 0, claimed_at TEXT,
-              started_at TEXT, completed_at TEXT, heartbeat_at TEXT, updated_at TEXT NOT NULL,
-              UNIQUE(run_id, stage), UNIQUE(run_id, ordinal)
-            );
-            CREATE TABLE IF NOT EXISTS users (
-              id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, display_name TEXT, password_hash TEXT,
-              theme_preference TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, updated_at TEXT
-            );
-            CREATE TABLE IF NOT EXISTS auth_sessions (
-              id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL,
-              revoked_at TEXT, created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS projects (
-              id TEXT PRIMARY KEY, owner_id TEXT REFERENCES users(id), name TEXT NOT NULL,
-              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS page_knowledge (
-              id TEXT PRIMARY KEY, product_knowledge_id TEXT NOT NULL REFERENCES product_knowledge(id),
-              url TEXT NOT NULL, evidence_json TEXT NOT NULL, confidence REAL NOT NULL, last_verified_at TEXT NOT NULL,
-              UNIQUE(product_knowledge_id, url)
-            );
-            CREATE TABLE IF NOT EXISTS understanding_previews (
-              id TEXT PRIMARY KEY, product_key TEXT NOT NULL, prompt_hash TEXT NOT NULL,
-              payload_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-              UNIQUE(product_key, prompt_hash)
-            );
-            CREATE TABLE IF NOT EXISTS form_schemas (
-              id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id),
-              payload_json TEXT NOT NULL, created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS synthetic_datasets (
-              id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id),
-              payload_json TEXT NOT NULL, created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS audio_assets (
-              id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id),
-              location TEXT NOT NULL, duration_seconds REAL, provider TEXT, created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS video_renders (
-              id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES demo_runs(id),
-              location TEXT NOT NULL, status TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS provider_calls (
-              id TEXT PRIMARY KEY, run_id TEXT REFERENCES demo_runs(id), provider TEXT NOT NULL,
-              operation TEXT NOT NULL, status TEXT NOT NULL, duration_ms INTEGER, error_code TEXT,
-              model TEXT, cost_class TEXT, created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_demo_runs_created_at ON demo_runs(created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_demo_runs_request_id ON demo_runs(request_id);
-            CREATE INDEX IF NOT EXISTS idx_demo_requests_project_id ON demo_requests(project_id);
-            CREATE INDEX IF NOT EXISTS idx_demo_attempts_run_id ON demo_attempts(run_id, ordinal);
-            CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id, created_at);
-            CREATE INDEX IF NOT EXISTS idx_run_artifact_documents_run_id ON run_artifact_documents(run_id, updated_at);
-            CREATE INDEX IF NOT EXISTS idx_generation_jobs_status ON generation_jobs(status, queued_at);
-            CREATE INDEX IF NOT EXISTS idx_provider_calls_run_id ON provider_calls(run_id, created_at);
-            CREATE INDEX IF NOT EXISTS idx_knowledge_versions_key ON knowledge_versions(product_key, version DESC);
-            CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON projects(owner_id, updated_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id, expires_at);
-            """
-        )
+            # A local worker pool may briefly contend on the compare-and-set
+            # claim update.  Let SQLite wait for the owning transaction rather
+            # than surfacing a transient "database is locked" failure.
+            sqlite_connection = sqlite3.connect(
+                database_path, check_same_thread=False, timeout=30.0
+            )
+            sqlite_connection.row_factory = sqlite3.Row
+            sqlite_connection.execute("PRAGMA foreign_keys = ON")
+            sqlite_connection.execute("PRAGMA journal_mode = WAL")
+            sqlite_connection.execute("PRAGMA busy_timeout = 30000")
+            self.connection = sqlite_connection
+        self.connection.executescript(SCHEMA_SQL)
         if self.dialect == "sqlite":
             self._upgrade_sqlite_schema()
         self.connection.commit()
 
     def _upgrade_sqlite_schema(self) -> None:
-        columns = {
-            row["name"] for row in self.connection.execute("PRAGMA table_info(demo_requests)")
-        }
+        columns = {row["name"] for row in self._fetchall("PRAGMA table_info(demo_requests)")}
         if "project_id" not in columns:
             self.connection.execute("ALTER TABLE demo_requests ADD COLUMN project_id TEXT")
             self.connection.execute(
@@ -264,7 +160,7 @@ class RunRepository:
             )
         stage_columns = {
             row["name"]
-            for row in self.connection.execute("PRAGMA table_info(generation_stage_jobs)")
+            for row in self._fetchall("PRAGMA table_info(generation_stage_jobs)")
         }
         # Keep direct SQLite bootstrapping compatible with databases created by
         # releases before the stage-delivery migration. Alembic performs the
@@ -279,7 +175,7 @@ class RunRepository:
             self.connection.execute(
                 "ALTER TABLE generation_stage_jobs ADD COLUMN heartbeat_at TEXT"
             )
-        user_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(users)")}
+        user_columns = {row["name"] for row in self._fetchall("PRAGMA table_info(users)")}
         if "password_hash" not in user_columns:
             self.connection.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
         if "theme_preference" not in user_columns:
@@ -289,7 +185,7 @@ class RunRepository:
         if "updated_at" not in user_columns:
             self.connection.execute("ALTER TABLE users ADD COLUMN updated_at TEXT")
         provider_columns = {
-            row["name"] for row in self.connection.execute("PRAGMA table_info(provider_calls)")
+            row["name"] for row in self._fetchall("PRAGMA table_info(provider_calls)")
         }
         if provider_columns and "model" not in provider_columns:
             self.connection.execute("ALTER TABLE provider_calls ADD COLUMN model TEXT")
@@ -300,11 +196,33 @@ class RunRepository:
         """Release SQLite handles for short-lived workers and test processes."""
         self.connection.close()
 
+    def _fetchone(
+        self, statement: str, parameters: tuple[Any, ...] | dict[str, Any] | None = None
+    ) -> Any:
+        """Return one row through the portable SQLite/PostgreSQL boundary."""
+        cursor = (
+            self.connection.execute(statement)
+            if parameters is None
+            else self.connection.execute(statement, parameters)
+        )
+        return cursor.fetchone()
+
+    def _fetchall(
+        self, statement: str, parameters: tuple[Any, ...] | dict[str, Any] | None = None
+    ) -> list[Any]:
+        """Return all rows through the portable connection boundary."""
+        cursor = (
+            self.connection.execute(statement)
+            if parameters is None
+            else self.connection.execute(statement, parameters)
+        )
+        return list(cursor.fetchall())
+
     def start_attempt(self, run_id: str, stage: str) -> int:
         ordinal = int(
-            self.connection.execute(
+            self._fetchone(
                 "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM demo_attempts WHERE run_id=?", (run_id,)
-            ).fetchone()[0]
+            )[0]
         )
         self.connection.execute(
             "INSERT INTO demo_attempts VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -674,11 +592,7 @@ class RunRepository:
             (identifier, request_id, url, objective, "QUEUED", now, project_id),
         )
         self.connection.commit()
-        return dict(
-            self.connection.execute(
-                "SELECT * FROM demo_requests WHERE id = ?", (identifier,)
-            ).fetchone()
-        )
+        return dict(self._fetchone("SELECT * FROM demo_requests WHERE id = ?", (identifier,)))
 
     def create_project(self, name: str, *, owner_id: str | None = None) -> dict[str, Any]:
         normalized = name.strip()
@@ -1311,7 +1225,7 @@ class RunRepository:
             (now, now),
         )
         self.connection.commit()
-        return cursor.rowcount
+        return int(cursor.rowcount)
 
     def recover_stale_jobs(self, max_running_seconds: int = 1_800) -> int:
         """Make abandoned worker claims visible for an explicit, auditable retry."""
@@ -1334,7 +1248,7 @@ class RunRepository:
                 (datetime.now(UTC).isoformat(),),
             )
         self.connection.commit()
-        return cursor.rowcount
+        return int(cursor.rowcount)
 
     def finish_job(self, job_id: str, *, status: str, error_code: str | None = None) -> None:
         if status not in {"COMPLETE", "FAILED", "RETRYING"}:
@@ -1610,10 +1524,10 @@ class RunRepository:
         self, product_key: str, max_age_seconds: int = 86_400
     ) -> dict[str, Any] | None:
         product_key = _canonical_product_key(product_key)
-        row = self.connection.execute(
+        row = self._fetchone(
             "SELECT evidence_json, confidence, last_verified_at FROM product_knowledge WHERE product_key=?",
             (product_key,),
-        ).fetchone()
+        )
         if not row:
             return None
         verified = datetime.fromisoformat(row["last_verified_at"])
@@ -1623,9 +1537,9 @@ class RunRepository:
             "evidence": json.loads(row["evidence_json"]),
             "confidence": row["confidence"],
             "last_verified_at": row["last_verified_at"],
-            "version": self.connection.execute(
+            "version": self._fetchone(
                 "SELECT version FROM product_knowledge WHERE product_key=?", (product_key,)
-            ).fetchone()["version"],
+            )["version"],
         }
 
     def knowledge_versions(self, product_key: str, *, limit: int = 20) -> list[dict[str, Any]]:

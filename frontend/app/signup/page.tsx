@@ -1,3 +1,70 @@
 "use client";
-import Link from "next/link"; import { FormEvent, useState } from "react"; import { useRouter } from "next/navigation"; import { useAuth } from "../../components/auth/AuthProvider";
-export default function Signup(){const {signup}=useAuth();const router=useRouter();const [name,setName]=useState("");const [email,setEmail]=useState("");const [password,setPassword]=useState("");const [error,setError]=useState("");async function submit(e:FormEvent){e.preventDefault();setError("");try{await signup(name,email,password);router.replace("/dashboard")}catch(x){setError(x instanceof Error?x.message:"Unable to create account")}}return <main className="auth"><Link className="logo" href="/">PRODUCTLENS <i>2.0</i></Link><form onSubmit={submit}><p className="kicker">START CREATING</p><h1>Make your first demo.</h1><p>Settle in first. You control when anything is generated.</p><label>Name<input required value={name} onChange={e=>setName(e.target.value)} /></label><label>Work email<input required type="email" value={email} onChange={e=>setEmail(e.target.value)} /></label><label>Password<input required minLength={10} type="password" value={password} onChange={e=>setPassword(e.target.value)} /><small>Use at least 10 characters.</small></label>{error&&<div className="formError">{error}</div>}<button className="button">Create account <span>→</span></button><small>Already have an account? <Link href="/login">Sign in</Link></small></form></main>}
+import Link from "next/link";
+import { FormEvent, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "../../components/auth/AuthProvider";
+export default function Signup() {
+  const { signup } = useAuth();
+  const router = useRouter();
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    try {
+      await signup(name, email, password);
+      router.replace("/dashboard");
+    } catch (x) {
+      setError(x instanceof Error ? x.message : "Unable to create account");
+    }
+  }
+  return (
+    <main className="auth">
+      <Link className="logo" href="/">
+        PRODUCTLENS <i>2.0</i>
+      </Link>
+      <form onSubmit={submit}>
+        <p className="kicker">START CREATING</p>
+        <h1>Make your first demo.</h1>
+        <p>Settle in first. You control when anything is generated.</p>
+        <label>
+          Name
+          <input
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </label>
+        <label>
+          Work email
+          <input
+            required
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </label>
+        <label>
+          Password
+          <input
+            required
+            minLength={10}
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <small>Use at least 10 characters.</small>
+        </label>
+        {error && <div className="formError">{error}</div>}
+        <button className="button">
+          Create account <span>→</span>
+        </button>
+        <small>
+          Already have an account? <Link href="/login">Sign in</Link>
+        </small>
+      </form>
+    </main>
+  );
+}

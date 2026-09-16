@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from contextlib import suppress
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 from productlens.artifacts.store import RunArtifacts
 from productlens.benchmark.fixture_planning import FixturePlanningService
@@ -42,13 +42,14 @@ from productlens.quality.presentation import attach_presentation_qa, inspect_pre
 from productlens.quality.synchronization import inspect_synchronization, secure_transition_intervals
 from productlens.quality.video import inspect_video
 from productlens.services.generation import UrlGenerationService
+from productlens.services.knowledge import product_knowledge_from_context
 from productlens.services.stage_contracts import stage_lifecycle
 from productlens.video.render import render_remotion
 
 logger = get_logger("productlens.jobs")
 
 
-def _form_schemas_for_context(context):
+def _form_schemas_for_context(context: Any) -> list[Any]:
     """Prefer active-form capability evidence over broad page control dumps."""
     schemas = []
     for raw_capability in getattr(context, "capabilities", []):
@@ -61,42 +62,11 @@ def _form_schemas_for_context(context):
     return schemas or [infer_form_schema(getattr(context, "elements", []), context.url)]
 
 
-def _product_knowledge_for_context(context, *, project_id: str | None = None) -> ProductKnowledge:
-    """Materialize the reusable knowledge contract from one grounded discovery."""
-    identity = {
-        "url": context.url,
-        "title": getattr(context, "title", ""),
-        "routes": sorted(getattr(context, "relevant_routes", [])),
-        "pages": sorted(
-            getattr(page, "url", "") for page in getattr(context, "page_knowledge", [])
-        ),
-        "sections": sorted(
-            section
-            for page in getattr(context, "page_knowledge", [])
-            for section in getattr(page, "visible_sections", [])
-        ),
-    }
-    fingerprint = hashlib.sha256(
-        json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
-    return ProductKnowledge(
-        project_id=project_id,
-        product_fingerprint=fingerprint,
-        # The fingerprint is content-derived, so a changed route/section set
-        # naturally creates a new knowledge version while the repository's
-        # integer revision remains available for operational ordering.
-        version=fingerprint[:16],
-        application_type=getattr(context, "application_type", "web_application"),
-        navigation=getattr(context, "navigation", []),
-        routes=getattr(context, "relevant_routes", []),
-        feature_map=getattr(context, "feature_knowledge", []),
-        relationships=getattr(context, "relationships", []),
-        page_knowledge=getattr(context, "page_knowledge", []),
-        workflow_knowledge=getattr(context, "candidate_demo_flows", []),
-        capabilities=getattr(context, "capabilities", []),
-        known_blockers=getattr(context, "blockers", []),
-        successful_actions=getattr(context, "successful_action_hints", []),
-    )
+def _product_knowledge_for_context(
+    context: Any, *, project_id: str | None = None
+) -> ProductKnowledge:
+    """Compatibility alias for the canonical knowledge materializer."""
+    return product_knowledge_from_context(context, project_id=project_id)
 
 
 class DemoJobService:
@@ -277,8 +247,8 @@ class DemoJobService:
             presentation_props = json.loads(
                 (artifacts.presentation / "remotion-props.json").read_text(encoding="utf-8")
             )
-            presentation = inspect_presentation(trace, presentation_props)
-            video = attach_presentation_qa(video, presentation)
+            presentation_report = inspect_presentation(trace, presentation_props)
+            video = attach_presentation_qa(video, presentation_report)
             synchronization = inspect_synchronization(
                 trace,
                 script_payload["script"],
@@ -291,7 +261,7 @@ class DemoJobService:
             artifacts.write_json("qa/coverage-report.json", coverage)
             story = json.loads((artifacts.qa / "story-report.json").read_text(encoding="utf-8"))
             artifacts.write_json("qa/video-report.json", video)
-            artifacts.write_json("qa/presentation-report.json", presentation)
+            artifacts.write_json("qa/presentation-report.json", presentation_report)
             artifacts.write_json("qa/synchronization-report.json", synchronization)
             report = delivery_report(
                 artifacts=artifacts.required_delivery_artifacts(),
@@ -321,7 +291,7 @@ class DemoJobService:
             json.loads((artifacts.execution / "trace.json").read_text(encoding="utf-8"))
         )
 
-    async def run_url_stage(self, run_id: str, stage: str, *, payload: dict) -> None:
+    async def run_url_stage(self, run_id: str, stage: str, *, payload: dict[str, Any]) -> None:
         """Run one durable stage and terminally classify any unhandled failure."""
         # Direct supervisors and broker workers can observe the same queued
         # stage concurrently (for example after a shell timeout).  Claim the
@@ -367,7 +337,9 @@ class DemoJobService:
             with suppress(asyncio.CancelledError):
                 await heartbeat
 
-    async def _run_url_stage_impl(self, run_id: str, stage: str, *, payload: dict) -> None:
+    async def _run_url_stage_impl(
+        self, run_id: str, stage: str, *, payload: dict[str, Any]
+    ) -> None:
         """Execute one URL-generation stage from persisted artifacts only."""
         if self.url_generator is None:
             raise RuntimeError("OpenRouter structured planning provider is not configured")
@@ -732,7 +704,7 @@ class DemoJobService:
         allow_external_side_effects: bool,
         render: bool,
         cloud_discovery: bool,
-        budget=None,
+        budget: DiscoveryBudget | None = None,
         stagehand_assist: bool = False,
         credential_reference: str | None = None,
         audience: str = "product prospect",
@@ -801,7 +773,7 @@ class DemoJobService:
         allow_external_side_effects: bool,
         render: bool,
         cloud_discovery: bool,
-        budget=None,
+        budget: DiscoveryBudget | None = None,
         stagehand_assist: bool = False,
         credential_reference: str | None = None,
         audience: str = "product prospect",

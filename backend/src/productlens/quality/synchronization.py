@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from productlens.contracts.models import DemoTrace
 
@@ -17,7 +18,7 @@ def _ordered_subset(items: list[str], expected: list[str]) -> bool:
     return bool(items)
 
 
-def secure_transition_intervals(presentation_props: dict) -> list[tuple[float, float]]:
+def secure_transition_intervals(presentation_props: Mapping[str, Any]) -> list[tuple[float, float]]:
     """Extract renderer-declared credential-card intervals in seconds.
 
     This is intentionally derived from render props, rather than from a page
@@ -38,13 +39,13 @@ def secure_transition_intervals(presentation_props: dict) -> list[tuple[float, f
 
 def inspect_synchronization(
     trace: DemoTrace,
-    script: list[dict],
-    captions: list[dict],
+    script: list[dict[str, Any]],
+    captions: list[dict[str, Any]],
     *,
     narration_requested: bool,
     narration_created: bool,
     explained_intervals: Iterable[tuple[float, float]] = (),
-) -> dict:
+) -> dict[str, Any]:
     """Check synchronization while allowing explicit secure transitions.
 
     A credential-redaction card is deliberately readable visual communication,

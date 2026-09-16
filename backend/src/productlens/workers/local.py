@@ -11,6 +11,7 @@ import asyncio
 import os
 from contextlib import suppress
 from time import monotonic
+from typing import Any
 
 from productlens.observability.logging import get_logger
 from productlens.services.runtime import build_job_service
@@ -35,7 +36,7 @@ def worker_concurrency(value: str | None = None) -> int:
         return 1
 
 
-def next_pending_stage(repository, run_id: str) -> str | None:
+def next_pending_stage(repository: Any, run_id: str) -> str | None:
     """Return the next queued stage for a claimed root job."""
     return next(
         (
@@ -64,7 +65,7 @@ async def run_forever(poll_seconds: float = 0.75) -> None:
     last_recovery = monotonic()
     running: set[asyncio.Task[None]] = set()
 
-    async def execute_stage(stage: dict) -> None:
+    async def execute_stage(stage: dict[str, Any]) -> None:
         """Run one claimed stage in its own task and preserve error isolation."""
         try:
             await execute_generation_stage(

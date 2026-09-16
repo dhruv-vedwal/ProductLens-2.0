@@ -6,6 +6,14 @@ export const metadata: Metadata = {
   description: "Evidence-backed product demo generation",
 };
 
-export default function Layout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body><AuthProvider>{children}</AuthProvider></body></html>;
+export default function Layout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en">
+      <body>
+        <AuthProvider>{children}</AuthProvider>
+      </body>
+    </html>
+  );
 }

@@ -46,7 +46,7 @@ def _recovered_failure_ids(trace: DemoTrace) -> set[str]:
 
 def inspect_story(
     trace: DemoTrace, *, objective: str, script: list[dict[str, Any]] | None = None
-) -> dict:
+) -> dict[str, Any]:
     failures: list[str] = []
     if not trace.outcome_verified:
         failures.append("OBJECTIVE_OUTCOME_UNVERIFIED")

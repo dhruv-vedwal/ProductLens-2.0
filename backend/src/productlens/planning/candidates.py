@@ -2064,13 +2064,28 @@ def build_page_complete_proposal(
             # such control is observed we deliberately do not emit a pointer
             # mutation and the workflow validator can request more discovery.
             visual_tool_terms = {
-                "draw", "drawing", "pen", "pencil", "brush", "line", "arrow",
-                "connector", "rectangle", "square", "ellipse", "circle", "diamond",
-                "shape", "text", "label", "freehand", "select", "eraser",
+                "draw",
+                "drawing",
+                "pen",
+                "pencil",
+                "brush",
+                "line",
+                "arrow",
+                "connector",
+                "rectangle",
+                "square",
+                "ellipse",
+                "circle",
+                "diamond",
+                "shape",
+                "text",
+                "label",
+                "freehand",
+                "select",
+                "eraser",
             }
             tool_candidates = [
-                item for item in tool_candidates
-                if _tokens(item.name) & visual_tool_terms
+                item for item in tool_candidates if _tokens(item.name) & visual_tool_terms
             ]
 
             def tool_score(
@@ -2078,11 +2093,32 @@ def build_page_complete_proposal(
             ) -> tuple[int, int, int, int, int]:
                 words = _tokens(item.name)
                 overlap = len(words & tokens)
-                draw_like = int(bool(words & {"draw", "drawing", "pen", "pencil", "brush", "freehand"}))
-                shape_like = int(bool(words & {"line", "arrow", "connector", "rectangle", "square", "ellipse", "circle", "diamond", "shape", "text", "label"}))
+                draw_like = int(
+                    bool(words & {"draw", "drawing", "pen", "pencil", "brush", "freehand"})
+                )
+                shape_like = int(
+                    bool(
+                        words
+                        & {
+                            "line",
+                            "arrow",
+                            "connector",
+                            "rectangle",
+                            "square",
+                            "ellipse",
+                            "circle",
+                            "diamond",
+                            "shape",
+                            "text",
+                            "label",
+                        }
+                    )
+                )
                 # Selection/eraser controls are useful only when explicitly
                 # requested; they do not create a visible architecture beat.
-                utility_only = int(bool(words & {"select", "eraser", "hand", "pan", "lock", "undo", "redo"}))
+                utility_only = int(
+                    bool(words & {"select", "eraser", "hand", "pan", "lock", "undo", "redo"})
+                )
                 concise = int(len(words) <= 2)
                 return draw_like, shape_like, overlap, concise, -utility_only
 
@@ -2147,9 +2183,7 @@ def build_page_complete_proposal(
                             # snapshot includes a bounded canvas/SVG surface
                             # signature so this condition fails truthfully
                             # when the editor ignored the pointer sequence.
-                            Postcondition(
-                                kind="changed", expected=True, target=destination_target
-                            ),
+                            Postcondition(kind="changed", expected=True, target=destination_target),
                         ],
                         critical=True,
                         story_phase="demonstrate",

@@ -320,7 +320,12 @@ def _prepare_remotion_source(
         not strip_audio
         and stream.get("codec_name") == "h264"
         and stream.get("pix_fmt") in {"yuv420p", "yuvj420p"}
-    ) or (strip_audio and not has_audio and stream.get("codec_name") == "h264" and stream.get("pix_fmt") in {"yuv420p", "yuvj420p"}):
+    ) or (
+        strip_audio
+        and not has_audio
+        and stream.get("codec_name") == "h264"
+        and stream.get("pix_fmt") in {"yuv420p", "yuvj420p"}
+    ):
         shutil.copy2(raw, destination)
         return source_asset
     subprocess.run(
@@ -726,7 +731,10 @@ def _editorial_cut_windows(
             windows.append(
                 (
                     max(0.0, action - (0.35 if compact_tour else 0.6)),
-                    min(source_seconds, max(reveal, action + event.duration_ms / 1000.0) + post_reveal_hold),
+                    min(
+                        source_seconds,
+                        max(reveal, action + event.duration_ms / 1000.0) + post_reveal_hold,
+                    ),
                 )
             )
         elif reveal - action <= 3.8:

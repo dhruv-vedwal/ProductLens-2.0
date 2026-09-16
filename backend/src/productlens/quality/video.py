@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from collections.abc import Mapping
 from itertools import pairwise
 from pathlib import Path
 from statistics import fmean, median
+from typing import Any
 
 
 def inspect_video(
@@ -18,7 +20,7 @@ def inspect_video(
     source_start_offset_seconds: float = 1.5,
     source_time_map: list[tuple[float, float]] | None = None,
     source_is_edited: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Inspect a delivery, including the approved editorial duration envelope.
 
     Duration bounds belong to the objective/validated plan rather than the
@@ -38,7 +40,7 @@ def inspect_video(
         hard_failures.append("WORKFLOW_OUTCOME_UNVERIFIED")
     if not video.exists() or video.stat().st_size < 10_000:
         hard_failures.append("MISSING_OR_EMPTY_RENDER")
-    probe: dict = {}
+    probe: dict[str, Any] = {}
     if not hard_failures:
         completed = subprocess.run(
             [
@@ -265,7 +267,7 @@ def inspect_video(
     }
 
 
-def _probe_video(video: Path) -> dict:
+def _probe_video(video: Path) -> dict[str, Any]:
     """Read source dimensions without allowing a bad probe to crash QA."""
     completed = subprocess.run(
         [
@@ -283,12 +285,15 @@ def _probe_video(video: Path) -> dict:
         check=False,
     )
     try:
-        return json.loads(completed.stdout or "{}")
+        payload = json.loads(completed.stdout or "{}")
+        return payload if isinstance(payload, dict) else {}
     except json.JSONDecodeError:
         return {}
 
 
-def _frame_pacing(stream: dict, duration: float, measured_rate: float) -> dict[str, float]:
+def _frame_pacing(
+    stream: Mapping[str, Any], duration: float, measured_rate: float
+) -> dict[str, float]:
     """Compare encoded frame count with the stream's declared cadence.
 
     This catches accidental timebase/stretch errors that can make a render feel

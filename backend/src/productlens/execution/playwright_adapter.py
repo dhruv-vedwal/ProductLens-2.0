@@ -492,7 +492,9 @@ class PlaywrightAdapter:
                 target_locator, _ = await self.visible_locator(target)
                 box = await target_locator.bounding_box()
                 if box:
-                    target_box = {key: float(box.get(key, 0)) for key in ("x", "y", "width", "height")}
+                    target_box = {
+                        key: float(box.get(key, 0)) for key in ("x", "y", "width", "height")
+                    }
             except (GroundingError, PlaywrightError):
                 # An unavailable target is itself useful evidence below: an
                 # open modal/popover may be intercepting the page.
@@ -610,7 +612,10 @@ class PlaywrightAdapter:
             points = payload.get("points")
             surface = None
             pattern = str(payload.get("pattern", ""))
-            if pattern in {"short_reversible_stroke", "connector_segment"} and operation.target is not None:
+            if (
+                pattern in {"short_reversible_stroke", "connector_segment"}
+                and operation.target is not None
+            ):
                 surface, _ = await self.grounded_locator(operation.target)
             relative_points = payload.get("relative_points")
             if (
@@ -654,7 +659,10 @@ class PlaywrightAdapter:
             surface_structure = None
             surface_box = None
             proof_box = None
-            if pattern in {"short_reversible_stroke", "connector_segment"} and operation.target is not None:
+            if (
+                pattern in {"short_reversible_stroke", "connector_segment"}
+                and operation.target is not None
+            ):
                 # Capture a lightweight, target-local fingerprint before the
                 # gesture.  This is outcome evidence, not a product adapter:
                 # a clipped rendered screenshot is the only portable signal
@@ -785,7 +793,10 @@ class PlaywrightAdapter:
                 await self.page.mouse.up(button=button)
             changed = None
             after_structure = None
-            if pattern in {"short_reversible_stroke", "connector_segment"} and operation.target is not None:
+            if (
+                pattern in {"short_reversible_stroke", "connector_segment"}
+                and operation.target is not None
+            ):
                 try:
                     # Canvas/SVG editors often commit their paint layer on the
                     # next compositor tick after pointerup.  Let that render
@@ -815,16 +826,17 @@ class PlaywrightAdapter:
                         and after_structure != surface_structure
                     )
                     pixel_witness = bool(
-                        surface_fingerprint is not None
-                        and after_fingerprint != surface_fingerprint
+                        surface_fingerprint is not None and after_fingerprint != surface_fingerprint
                     )
                     # Prefer structural proof when an SVG scene graph is
                     # available; transient selection pixels are not a valid
                     # committed drawing.  For canvas-only products, the
                     # clipped pixel witness remains the portable fallback.
-                    changed = structural_witness if (
-                        isinstance(surface_structure, dict) and surface_structure.get("svg")
-                    ) else pixel_witness
+                    changed = (
+                        structural_witness
+                        if (isinstance(surface_structure, dict) and surface_structure.get("svg"))
+                        else pixel_witness
+                    )
                 except PlaywrightError:
                     changed = False
             return {
@@ -832,13 +844,17 @@ class PlaywrightAdapter:
                 "duration_ms": duration_ms,
                 "button": button,
                 **({"surface_changed": changed} if changed is not None else {}),
-                **({
-                    "semantic_evidence": {
-                        "before": surface_structure,
-                        "after": after_structure,
-                        "committed": bool(changed),
+                **(
+                    {
+                        "semantic_evidence": {
+                            "before": surface_structure,
+                            "after": after_structure,
+                            "committed": bool(changed),
+                        }
                     }
-                } if pattern in {"short_reversible_stroke", "connector_segment"} else {}),
+                    if pattern in {"short_reversible_stroke", "connector_segment"}
+                    else {}
+                ),
             }
         if operation.kind is OperationKind.READ_VALUE and operation.target is None:
             return {
@@ -874,9 +890,7 @@ class PlaywrightAdapter:
                     }"""
                 )
                 if not focus_before:
-                    raise GroundingError(
-                        "Keyboard text input requires a focused editable surface"
-                    )
+                    raise GroundingError("Keyboard text input requires a focused editable surface")
                 await self.page.keyboard.type(text, delay=70)
                 await self.page.wait_for_timeout(120)
                 focus = await self.page.evaluate(
@@ -1104,14 +1118,20 @@ class PlaywrightAdapter:
                 ):
                     relative = operation.value["relative"]
                     box = await locator.bounding_box()
-                    if box and 0 <= float(relative.get("x", -1)) <= 1 and 0 <= float(
-                        relative.get("y", -1)
-                    ) <= 1:
+                    if (
+                        box
+                        and 0 <= float(relative.get("x", -1)) <= 1
+                        and 0 <= float(relative.get("y", -1)) <= 1
+                    ):
                         click_position = {
                             "x": float(box["width"]) * float(relative["x"]),
                             "y": float(box["height"]) * float(relative["y"]),
                         }
-                result = await locator.click(position=click_position) if click_position else await locator.click()
+                result = (
+                    await locator.click(position=click_position)
+                    if click_position
+                    else await locator.click()
+                )
             except PlaywrightError:
                 if operation.kind is not OperationKind.OPEN_NAVIGATION_ITEM:
                     raise

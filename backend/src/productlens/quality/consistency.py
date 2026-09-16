@@ -44,10 +44,18 @@ def validate_selected_candidate_consistency(plan: dict[str, Any]) -> list[str]:
         for item in (steps if isinstance(steps, list) else [])
         if isinstance(item, dict) and isinstance(item.get("operation"), dict)
     ]
-    actual_pages = {
-        _canonical_url(page) for operation in operations if (page := _operation_page(operation))
-    }
-    candidate_pages = {_canonical_url(page) for page in candidate.get("page_urls", []) if page}
+    actual_pages: set[str] = set()
+    for operation in operations:
+        if isinstance(operation, dict):
+            page = _operation_page(operation)
+            if page:
+                actual_pages.add(_canonical_url(page))
+    raw_candidate_pages: object = candidate.get("page_urls")
+    candidate_pages = (
+        {_canonical_url(page) for page in raw_candidate_pages if page}
+        if isinstance(raw_candidate_pages, list)
+        else set()
+    )
     if actual_pages and candidate_pages != actual_pages:
         failures.append("SELECTED_CANDIDATE_ARTIFACT_MISMATCH")
 
@@ -60,19 +68,23 @@ def validate_selected_candidate_consistency(plan: dict[str, Any]) -> list[str]:
     if selected_workflow and str(candidate.get("name") or "").strip() != selected_workflow:
         failures.append("SELECTED_CANDIDATE_ARTIFACT_MISMATCH")
 
-    candidate_steps = candidate.get("semantic_steps")
+    candidate_steps: object = candidate.get("semantic_steps")
     if not isinstance(candidate_steps, list) or len(candidate_steps) != len(operations):
         failures.append("SELECTED_CANDIDATE_ARTIFACT_MISMATCH")
 
-    evidence = {
-        str(reference)
-        for operation in operations
-        for reference in operation.get("evidence_refs", [])
-        if reference
-    }
-    candidate_evidence = {
-        str(reference) for reference in candidate.get("evidence_coverage", []) if reference
-    }
+    evidence: set[str] = set()
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        raw_references: object = operation.get("evidence_refs")
+        if isinstance(raw_references, list):
+            evidence.update(str(reference) for reference in raw_references if reference)
+    raw_candidate_evidence: object = candidate.get("evidence_coverage")
+    candidate_evidence = (
+        {str(reference) for reference in raw_candidate_evidence if reference}
+        if isinstance(raw_candidate_evidence, list)
+        else set()
+    )
     if evidence - candidate_evidence:
         failures.append("SELECTED_CANDIDATE_ARTIFACT_MISMATCH")
     return list(dict.fromkeys(failures))

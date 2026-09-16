@@ -1,4 +1,103 @@
 "use client";
-import { useEffect, useState } from "react"; import { AppShell } from "../../components/studio/AppShell"; import { apiFetch } from "../../services/api";
-type Run = { id: string; objective: string; status: string; stage: string; updated_at: string };
-export default function Demos() { const [runs, setRuns] = useState<Run[]>([]), [chosen, setChosen] = useState<Run | null>(null), [video, setVideo] = useState(""); const refresh = () => apiFetch("/runs?limit=50").then(r => r.ok ? r.json() : { items: [] }).then(x => setRuns(x.items)); useEffect(() => { void refresh() }, []); useEffect(() => { let objectUrl = ""; if (chosen?.status === "COMPLETE") void apiFetch(`/runs/${chosen.id}/video`).then(async r => { if (!r.ok) return; objectUrl = URL.createObjectURL(await r.blob()); setVideo(objectUrl) }); else setVideo(""); return () => { if (objectUrl) URL.revokeObjectURL(objectUrl) } }, [chosen]); return <AppShell><main className="content"><section className="sectionHead"><div><p className="kicker">DEMO LIBRARY</p><h2>Every delivery, in one place.</h2></div><button className="textLink" onClick={() => void refresh()}>Refresh</button></section><div className="formLayout"><div className="runGrid">{runs.map(run => <button className="demoCard" key={run.id} onClick={() => setChosen(run)}><b>{run.objective}</b><small>{run.stage.replaceAll("_", " ")}</small><span className={`status ${run.status.toLowerCase()}`}>{run.status}</span></button>)}{!runs.length && <div className="emptyCard">No demos yet. Start with a short, clear objective.</div>}</div><aside className="videoPanel">{!chosen ? <><p className="kicker">SELECT A DELIVERY</p><h1>Review the finished story.</h1></> : chosen.status === "COMPLETE" ? <><p className="kicker">READY TO SHARE</p><h1>{chosen.objective}</h1>{video ? <video controls src={video} /> : <p className="hint">Loading protected video…</p>}<p className="hint">Playback is protected by your workspace session.</p></> : <><p className="kicker">IN PROGRESS</p><h1>{chosen.objective}</h1><p className="hint">This run is {chosen.status.toLowerCase()}. The video becomes available only after delivery QA passes.</p></>}</aside></div></main></AppShell> }
+import { useEffect, useState } from "react";
+import { AppShell } from "../../components/studio/AppShell";
+import { apiFetch } from "../../services/api";
+type Run = {
+  id: string;
+  objective: string;
+  status: string;
+  stage: string;
+  updated_at: string;
+};
+export default function Demos() {
+  const [runs, setRuns] = useState<Run[]>([]),
+    [chosen, setChosen] = useState<Run | null>(null),
+    [video, setVideo] = useState("");
+  const refresh = () =>
+    apiFetch("/runs?limit=50")
+      .then((r) => (r.ok ? r.json() : { items: [] }))
+      .then((x) => setRuns(x.items));
+  useEffect(() => {
+    void refresh();
+  }, []);
+  useEffect(() => {
+    let objectUrl = "";
+    if (chosen?.status === "COMPLETE")
+      void apiFetch(`/runs/${chosen.id}/video`).then(async (r) => {
+        if (!r.ok) return;
+        objectUrl = URL.createObjectURL(await r.blob());
+        setVideo(objectUrl);
+      });
+    else setVideo("");
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [chosen]);
+  return (
+    <AppShell>
+      <main className="content">
+        <section className="sectionHead">
+          <div>
+            <p className="kicker">DEMO LIBRARY</p>
+            <h2>Every delivery, in one place.</h2>
+          </div>
+          <button className="textLink" onClick={() => void refresh()}>
+            Refresh
+          </button>
+        </section>
+        <div className="formLayout">
+          <div className="runGrid">
+            {runs.map((run) => (
+              <button
+                className="demoCard"
+                key={run.id}
+                onClick={() => setChosen(run)}
+              >
+                <b>{run.objective}</b>
+                <small>{run.stage.replaceAll("_", " ")}</small>
+                <span className={`status ${run.status.toLowerCase()}`}>
+                  {run.status}
+                </span>
+              </button>
+            ))}
+            {!runs.length && (
+              <div className="emptyCard">
+                No demos yet. Start with a short, clear objective.
+              </div>
+            )}
+          </div>
+          <aside className="videoPanel">
+            {!chosen ? (
+              <>
+                <p className="kicker">SELECT A DELIVERY</p>
+                <h1>Review the finished story.</h1>
+              </>
+            ) : chosen.status === "COMPLETE" ? (
+              <>
+                <p className="kicker">READY TO SHARE</p>
+                <h1>{chosen.objective}</h1>
+                {video ? (
+                  <video controls src={video} />
+                ) : (
+                  <p className="hint">Loading protected video…</p>
+                )}
+                <p className="hint">
+                  Playback is protected by your workspace session.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="kicker">IN PROGRESS</p>
+                <h1>{chosen.objective}</h1>
+                <p className="hint">
+                  This run is {chosen.status.toLowerCase()}. The video becomes
+                  available only after delivery QA passes.
+                </p>
+              </>
+            )}
+          </aside>
+        </div>
+      </main>
+    </AppShell>
+  );
+}

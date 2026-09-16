@@ -8,7 +8,13 @@ the original ``source``/``destination`` cursor contract.
 
 from __future__ import annotations
 
+from typing import Any
+
 from productlens.contracts.models import CameraDecision, DemoTrace, OperationKind, PresentationPlan
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def build_presentation_plan(
@@ -17,11 +23,11 @@ def build_presentation_plan(
     viewport_width: int = 1440,
     viewport_height: int = 900,
     allow_camera_zoom: bool = False,
-    scene_plan: list[dict] | None = None,
+    scene_plan: list[dict[str, Any]] | None = None,
 ) -> PresentationPlan:
     camera: list[CameraDecision] = []
     cursor_events: list[str] = []
-    cursor_paths: list[dict] = []
+    cursor_paths: list[dict[str, Any]] = []
     previous_point = {"x": viewport_width / 2, "y": viewport_height / 2}
     previous_viewport = (viewport_width, viewport_height)
     scene_by_event = {
@@ -32,8 +38,8 @@ def build_presentation_plan(
     for event in trace.events:
         if not event.success:
             continue
-        gesture = event.after.get("gesture") if isinstance(event.after, dict) else None
-        gesture_points = gesture.get("points") if isinstance(gesture, dict) else None
+        gesture = _mapping(event.after.get("gesture"))
+        gesture_points = gesture.get("points")
         if (
             event.kind is OperationKind.POINTER_SEQUENCE
             and isinstance(gesture_points, list)
@@ -96,11 +102,7 @@ def build_presentation_plan(
             OperationKind.UNCHECK,
         }
         scene = scene_by_event.get(event.id)
-        scene_camera = (
-            scene.get("camera")
-            if isinstance(scene, dict) and isinstance(scene.get("camera"), dict)
-            else {}
-        )
+        scene_camera = _mapping(scene.get("camera")) if scene else {}
         requested_zoom = scene_camera.get("zoom")
         try:
             requested_zoom = float(requested_zoom) if requested_zoom is not None else None
@@ -188,9 +190,9 @@ def build_presentation_plan(
         cursor_events.append(event.id)
         destination = {"x": rect.x + rect.width / 2, "y": rect.y + rect.height / 2}
         if event.kind is OperationKind.DRAG and isinstance(gesture, dict):
-            source = gesture.get("source")
-            drag_destination = gesture.get("destination")
-            if isinstance(source, dict) and isinstance(drag_destination, dict):
+            source = _mapping(gesture.get("source"))
+            drag_destination = _mapping(gesture.get("destination"))
+            if source and drag_destination:
                 source_point = {
                     "x": float(source.get("x", destination["x"])),
                     "y": float(source.get("y", destination["y"])),

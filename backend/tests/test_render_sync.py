@@ -30,12 +30,12 @@ from productlens.video.render import (
     _outro_copy,
     _prepare_remotion_source,
     _presentation_secret_redactions,
-    _validate_recording_provenance,
     _promote_render,
     _recording_space_cursor_paths,
     _remap_trace_for_cuts,
     _render_concurrency,
     _render_timeout_seconds,
+    _validate_recording_provenance,
     render_remotion,
 )
 
@@ -333,9 +333,7 @@ def test_recording_provenance_allows_local_capture_without_provider_metadata(tmp
     artifacts = RunArtifacts(tmp_path, "local-run")
     raw = artifacts.execution / "browser-recording.mp4"
     raw.write_bytes(b"evidence")
-    trace = DemoTrace(
-        run_id="local-run", objective="Demo", started_at=datetime.now(UTC), events=[]
-    )
+    trace = DemoTrace(run_id="local-run", objective="Demo", started_at=datetime.now(UTC), events=[])
     _validate_recording_provenance(trace, artifacts, raw)
 
 

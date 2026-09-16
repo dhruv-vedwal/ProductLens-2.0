@@ -7,6 +7,7 @@ cannot be considered covered simply because its navigation click succeeded.
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from productlens.contracts.models import DemoTrace, EditorialStoryboard, OperationKind, ScenePlan
@@ -23,8 +24,8 @@ def _page_key(url: str | None) -> str:
 
 def build_scene_plan(
     trace: DemoTrace, *, storyboard: EditorialStoryboard | None = None
-) -> list[dict]:
-    scenes: list[dict] = []
+) -> list[dict[str, Any]]:
+    scenes: list[dict[str, Any]] = []
     # A page that has a directed local scroll is content-dense by definition.
     # Its opening/explanation captions must not sit over the lower rows/cards
     # that the following scroll is meant to reveal. This is derived from the
@@ -254,7 +255,7 @@ def build_scene_plan(
     return scenes
 
 
-def inspect_scene_plan(trace: DemoTrace, scenes: list[dict]) -> dict:
+def inspect_scene_plan(trace: DemoTrace, scenes: list[dict[str, Any]]) -> dict[str, Any]:
     failures: list[str] = []
     event_ids = [event.id for event in trace.events if event.success]
     if [scene.get("event_id") for scene in scenes] != event_ids:

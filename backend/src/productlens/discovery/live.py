@@ -556,8 +556,7 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
     primary_entity = (
         None
         if visual_action_objective and not walkthrough_entity
-        else walkthrough_entity
-        or next((word for word in requested if word not in generic), None)
+        else walkthrough_entity or next((word for word in requested if word not in generic), None)
     )
     if primary_entity is None and relationships:
         primary_entity = (

@@ -2,6 +2,12 @@
 
 ProductLens 2.0 is a reliability-first product-demo generation system. It accepts a URL and a natural-language demo objective, understands the visible product, discovers a safe workflow, captures browser evidence, writes an evidence-grounded story, and renders a caption-led demo video. ElevenLabs audio is optional.
 
+For an implementation-focused map of the current code, coupling hotspots, and
+validated refactor boundaries, see [ARCHITECTURE_ASSESSMENT.md](ARCHITECTURE_ASSESSMENT.md)
+and [REFACTOR_REVIEW.md](REFACTOR_REVIEW.md). This README explains the complete
+runtime architecture; those documents distinguish implemented behavior from
+future decomposition work.
+
 This document describes the implementation that exists in this repository. It intentionally distinguishes implemented safeguards from capabilities that still require live validation. A rendered MP4 is not considered proof that an interaction succeeded.
 
 ## Current status
@@ -99,7 +105,7 @@ monolithic generator:
 | Providers | `productlens.providers` | Browserbase, Stagehand, OpenRouter, ElevenLabs boundaries |
 | Planning | `productlens.planning` | capability extraction, candidate flows, scoring, side-effect policy, validation |
 | Interaction | `productlens.interaction`, `productlens.execution` | affordances, semantic targets, browser dispatch, state witnesses |
-| Persistence | `productlens.persistence`, `productlens.artifacts`, `productlens.storage` | database lineage, artifact manifests, knowledge versions |
+| Persistence | `productlens.persistence`, `productlens.artifacts`, `productlens.storage` | database lineage, artifact manifests, knowledge versions; DDL is isolated in `persistence/schema.py` |
 | Presentation | `productlens.presentation` | journey direction, storyboard, captions, camera/cursor plans |
 | Narration | `productlens.narration` | grounded script, caption timing, optional audio segments |
 | Video | `productlens.video` | source timing, native-speed cuts, Remotion/FFmpeg composition |
@@ -107,6 +113,11 @@ monolithic generator:
 
 The frontend in `frontend/` consumes the API and displays this state. It does
 not execute browser actions or make delivery decisions.
+
+The generation coordinator delegates reusable knowledge materialization to
+`services/knowledge.py` and pure URL/media/duration policies to
+`services/generation_policy.py`; these modules contain no browser lifecycle or
+provider calls and are independently testable.
 
 ### Durable lifecycle
 

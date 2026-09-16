@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +49,45 @@ def _project_provider_environment() -> dict[str, str]:
     return values
 
 
+def _setting_value(
+    key: str,
+    environment: Mapping[str, str],
+    default: str | None = None,
+) -> str | None:
+    """Resolve process environment first, then the project-local env file."""
+    return os.getenv(key) or environment.get(key) or default
+
+
+def _boolean_setting(value: str | None, *, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().casefold() not in {"0", "false", "no", "off"}
+
+
+def _bounded_int(
+    value: str | None, *, default: int, minimum: int, maximum: int | None = None
+) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed) if maximum is not None else parsed)
+
+
+def _bounded_float(
+    value: str | None,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float | None = None,
+) -> float:
+    try:
+        parsed = float(value) if value is not None else default
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed) if maximum is not None else parsed)
+
+
 @dataclass(frozen=True)
 class Settings:
     artifact_root: Path
@@ -82,15 +122,16 @@ class Settings:
     @classmethod
     def from_environment(cls) -> Settings:
         project_environment = _project_provider_environment()
-        value = lambda key, default=None: os.getenv(key) or project_environment.get(key) or default
         root = Path(os.getenv("PRODUCTLENS_ARTIFACT_ROOT", "artifacts")).resolve()
-        auth_secret = value("PRODUCTLENS_AUTH_SECRET")
+        auth_secret = _setting_value("PRODUCTLENS_AUTH_SECRET", project_environment)
         if not auth_secret or len(auth_secret) < 32:
             raise RuntimeError(
                 "PRODUCTLENS_AUTH_SECRET must be a private value of at least 32 characters"
             )
-        database_value = value("PRODUCTLENS_DATABASE", str(root / "productlens.sqlite3"))
-        database_url = value("PRODUCTLENS_DATABASE_URL")
+        database_value = _setting_value(
+            "PRODUCTLENS_DATABASE", project_environment, str(root / "productlens.sqlite3")
+        ) or str(root / "productlens.sqlite3")
+        database_url = _setting_value("PRODUCTLENS_DATABASE_URL", project_environment)
         if not database_url:
             database_path = Path(database_value).resolve()
             database_url = f"sqlite:///{database_path.as_posix()}"
@@ -104,44 +145,80 @@ class Settings:
             artifact_root=root,
             database_path=database_path,
             database_url=database_url,
-            openrouter_api_key=value("OPENROUTER_API_KEY"),
-            openrouter_model=value("OPENROUTER_MODEL", "openrouter/free"),
-            openrouter_vision_model=value("OPENROUTER_VISION_MODEL"),
-            multimodal_review_enabled=value(
-                "PRODUCTLENS_MULTIMODAL_REVIEW_ENABLED", "false"
-            ).lower()
-            in {"1", "true", "yes"},
-            elevenlabs_api_key=value("ELEVENLABS_API_KEY"),
-            elevenlabs_voice_id=value("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
-            elevenlabs_tts_model=value("ELEVENLABS_TTS_MODEL", "eleven_multilingual_v2"),
-            browserbase_api_key=value("BROWSERBASE_API_KEY"),
-            browserbase_project_id=value("BROWSERBASE_PROJECT_ID"),
-            stagehand_model=value("STAGEHAND_MODEL"),
-            stagehand_node=value("STAGEHAND_NODE", "node"),
+            openrouter_api_key=_setting_value("OPENROUTER_API_KEY", project_environment),
+            openrouter_model=_setting_value(
+                "OPENROUTER_MODEL", project_environment, "openrouter/free"
+            )
+            or "openrouter/free",
+            openrouter_vision_model=_setting_value("OPENROUTER_VISION_MODEL", project_environment),
+            multimodal_review_enabled=_boolean_setting(
+                _setting_value("PRODUCTLENS_MULTIMODAL_REVIEW_ENABLED", project_environment),
+                default=False,
+            ),
+            elevenlabs_api_key=_setting_value("ELEVENLABS_API_KEY", project_environment),
+            elevenlabs_voice_id=_setting_value(
+                "ELEVENLABS_VOICE_ID", project_environment, "21m00Tcm4TlvDq8ikWAM"
+            )
+            or "21m00Tcm4TlvDq8ikWAM",
+            elevenlabs_tts_model=_setting_value(
+                "ELEVENLABS_TTS_MODEL", project_environment, "eleven_multilingual_v2"
+            )
+            or "eleven_multilingual_v2",
+            browserbase_api_key=_setting_value("BROWSERBASE_API_KEY", project_environment),
+            browserbase_project_id=_setting_value("BROWSERBASE_PROJECT_ID", project_environment),
+            stagehand_model=_setting_value("STAGEHAND_MODEL", project_environment),
+            stagehand_node=_setting_value("STAGEHAND_NODE", project_environment, "node") or "node",
             # Voice is opt-in so unavailable credits never prevent a silent demo.
-            caption_only=value("PRODUCTLENS_CAPTION_ONLY", "true").lower()
-            not in {"0", "false", "no"},
-            broker_url=value("PRODUCTLENS_BROKER_URL"),
-            worker_mode=value("PRODUCTLENS_WORKER_MODE", "polling"),
+            caption_only=_boolean_setting(
+                _setting_value("PRODUCTLENS_CAPTION_ONLY", project_environment), default=True
+            ),
+            broker_url=_setting_value("PRODUCTLENS_BROKER_URL", project_environment),
+            worker_mode=_setting_value("PRODUCTLENS_WORKER_MODE", project_environment, "polling")
+            or "polling",
             auth_secret=auth_secret,
-            auth_required=value("PRODUCTLENS_AUTH_REQUIRED", "true").lower()
-            not in {"0", "false", "no"},
-            session_ttl_seconds=int(value("PRODUCTLENS_SESSION_TTL_SECONDS", "604800")),
-            artifact_storage=value("PRODUCTLENS_ARTIFACT_STORAGE", "local").lower(),
-            s3_bucket=value("PRODUCTLENS_S3_BUCKET"),
-            s3_prefix=value("PRODUCTLENS_S3_PREFIX", "productlens-runs").strip("/"),
-            s3_endpoint_url=value("PRODUCTLENS_S3_ENDPOINT_URL"),
-            s3_region=value("PRODUCTLENS_S3_REGION"),
+            auth_required=_boolean_setting(
+                _setting_value("PRODUCTLENS_AUTH_REQUIRED", project_environment), default=True
+            ),
+            session_ttl_seconds=_bounded_int(
+                _setting_value("PRODUCTLENS_SESSION_TTL_SECONDS", project_environment),
+                default=604800,
+                minimum=60,
+            ),
+            artifact_storage=(
+                _setting_value("PRODUCTLENS_ARTIFACT_STORAGE", project_environment, "local")
+                or "local"
+            ).lower(),
+            s3_bucket=_setting_value("PRODUCTLENS_S3_BUCKET", project_environment),
+            s3_prefix=(
+                _setting_value("PRODUCTLENS_S3_PREFIX", project_environment, "productlens-runs")
+                or "productlens-runs"
+            ).strip("/"),
+            s3_endpoint_url=_setting_value("PRODUCTLENS_S3_ENDPOINT_URL", project_environment),
+            s3_region=_setting_value("PRODUCTLENS_S3_REGION", project_environment),
             # Leave time to flush the CDP screencast and download the native
             # Browserbase recording before a provider's 15-minute session cap.
             cloud_capture_timeout_seconds=max(
-                30, int(value("PRODUCTLENS_CLOUD_CAPTURE_TIMEOUT_SECONDS", "840"))
+                30,
+                _bounded_int(
+                    _setting_value(
+                        "PRODUCTLENS_CLOUD_CAPTURE_TIMEOUT_SECONDS", project_environment
+                    ),
+                    default=840,
+                    minimum=30,
+                ),
             ),
-            browserbase_session_timeout_seconds=max(
-                60, min(1800, int(value("BROWSERBASE_SESSION_TIMEOUT_SECONDS", "1800")))
+            browserbase_session_timeout_seconds=_bounded_int(
+                _setting_value("BROWSERBASE_SESSION_TIMEOUT_SECONDS", project_environment),
+                default=1800,
+                minimum=60,
+                maximum=1800,
             ),
-            stagehand_observe_timeout_seconds=max(
-                30.0,
-                min(180.0, float(value("PRODUCTLENS_STAGEHAND_OBSERVE_TIMEOUT_SECONDS", "105"))),
+            stagehand_observe_timeout_seconds=_bounded_float(
+                _setting_value(
+                    "PRODUCTLENS_STAGEHAND_OBSERVE_TIMEOUT_SECONDS", project_environment
+                ),
+                default=105.0,
+                minimum=30.0,
+                maximum=180.0,
             ),
         )

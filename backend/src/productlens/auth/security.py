@@ -77,6 +77,6 @@ def decode_access_token(token: str, secret: str) -> dict[str, Any] | None:
             return None
         if int(payload.get("exp", 0)) <= int(time.time()):
             return None
-        return payload
+        return payload if isinstance(payload, dict) else None
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
