@@ -10,7 +10,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Verify migrated dependencies before handing control to supervisors.
-python -m productlens.operations.startup --require-ready --skip-migrations
+python -m app.operations.startup --require-ready --skip-migrations
 if ($LASTEXITCODE -ne 0) {
   throw "ProductLens dependency readiness check failed with exit code $LASTEXITCODE"
 }

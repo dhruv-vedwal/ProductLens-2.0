@@ -1,4 +1,4 @@
-from productlens.contracts.models import (
+from app.contracts.models import (
     CandidateDemoFlow,
     ObjectiveSpec,
     ObservedElement,
@@ -10,7 +10,7 @@ from productlens.contracts.models import (
     Target,
     WorkflowProposal,
 )
-from productlens.planning.candidates import (
+from app.planning.candidates import (
     _page_landmarks,
     _page_story_subject,
     build_page_complete_proposal,

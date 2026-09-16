@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from productlens.providers.stagehand import (
+from app.providers.stagehand import (
     StagehandCandidate,
     StagehandProvider,
     _origin_label,
@@ -72,7 +72,7 @@ async def test_stagehand_observation_is_normalized_without_execution(monkeypatch
         assert kwargs["env"]
         return Process()
 
-    monkeypatch.setattr("productlens.providers.stagehand.asyncio.create_subprocess_exec", create)
+    monkeypatch.setattr("app.providers.stagehand.asyncio.create_subprocess_exec", create)
     observation = await StagehandProvider(model="openai/gpt-4o", bridge=bridge).observe(
         url="https://example.test", instruction="find invite"
     )
@@ -106,7 +106,7 @@ async def test_stagehand_keeps_observed_actions_when_advisory_extraction_fails(
     async def create(*args, **kwargs):
         return PartialProcess()
 
-    monkeypatch.setattr("productlens.providers.stagehand.asyncio.create_subprocess_exec", create)
+    monkeypatch.setattr("app.providers.stagehand.asyncio.create_subprocess_exec", create)
     observation = await StagehandProvider(bridge=bridge).observe(
         url="https://example.test", instruction="find details"
     )
@@ -135,7 +135,7 @@ async def test_cloud_observation_forwards_existing_cdp_endpoint(monkeypatch, tmp
     async def create(*args, **kwargs):
         return CloudProcess()
 
-    monkeypatch.setattr("productlens.providers.stagehand.asyncio.create_subprocess_exec", create)
+    monkeypatch.setattr("app.providers.stagehand.asyncio.create_subprocess_exec", create)
     observation = await StagehandProvider(
         bridge=bridge, browserbase_api_key="test-key", browserbase_project_id="project-1"
     ).observe(
@@ -166,7 +166,7 @@ async def test_stagehand_rejects_observation_that_leaves_requested_origin(
     async def create(*args, **kwargs):
         return WrongOriginProcess()
 
-    monkeypatch.setattr("productlens.providers.stagehand.asyncio.create_subprocess_exec", create)
+    monkeypatch.setattr("app.providers.stagehand.asyncio.create_subprocess_exec", create)
     with pytest.raises(Exception, match="invalid observation"):
         await StagehandProvider(bridge=bridge, browserbase_api_key="test-key").observe(
             url="https://example.test", instruction="observe", environment="BROWSERBASE"
@@ -204,7 +204,7 @@ async def test_stagehand_observed_action_reuses_a_candidate_without_a_free_form_
     async def create(*args, **kwargs):
         return ActionProcess()
 
-    monkeypatch.setattr("productlens.providers.stagehand.asyncio.create_subprocess_exec", create)
+    monkeypatch.setattr("app.providers.stagehand.asyncio.create_subprocess_exec", create)
     result = await StagehandProvider(bridge=bridge).act_observed(
         url="https://example.test",
         candidate=StagehandCandidate(
@@ -248,7 +248,7 @@ async def test_stagehand_rehearsal_is_bounded_and_never_receives_secrets(
     async def create(*args, **kwargs):
         return RehearsalProcess()
 
-    monkeypatch.setattr("productlens.providers.stagehand.asyncio.create_subprocess_exec", create)
+    monkeypatch.setattr("app.providers.stagehand.asyncio.create_subprocess_exec", create)
     result = await StagehandProvider(bridge=bridge).rehearse_agent(
         url="https://example.test",
         instruction="Create a small architecture diagram",

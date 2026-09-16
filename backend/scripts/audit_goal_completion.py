@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from productlens.urls import canonical_product_url
+from app.urls import canonical_product_url
 
 
 def _exists(root: Path, *relative: str) -> bool:
@@ -139,8 +139,8 @@ def build_audit(root: Path) -> dict[str, Any]:
     add(
         "versioned contracts and persistence",
         (
-            "src/productlens/contracts/models.py",
-            "src/productlens/persistence/repository.py",
+            "app/contracts/models.py",
+            "app/persistence/repository.py",
             "alembic/versions",
         ),
         note="Contracts, database facade, and migration history must all be present.",
@@ -148,38 +148,38 @@ def build_audit(root: Path) -> dict[str, Any]:
     add(
         "targeted exploration and product knowledge",
         (
-            "src/productlens/discovery/live.py",
-            "src/productlens/services/preflight.py",
-            "src/productlens/providers/stagehand.py",
+            "app/discovery/live",
+            "app/services/preflight.py",
+            "app/providers/stagehand.py",
         ),
         note="Discovery and the non-recording product scan are separate boundaries.",
     )
     add(
         "generic observation and interaction kernel",
         (
-            "src/productlens/execution/engine.py",
-            "src/productlens/execution/playwright_adapter.py",
-            "src/productlens/execution/state_diff.py",
-            "src/productlens/execution/spatial_index.py",
+            "app/execution/engine.py",
+            "app/execution/playwright_adapter.py",
+            "app/execution/state_diff.py",
+            "app/execution/spatial_index.py",
         ),
         note="Execution owns semantic grounding, browser events, verification, and state evidence.",
     )
     add(
         "workflow planning and adaptive replanning",
         (
-            "src/productlens/planning/production.py",
-            "src/productlens/planning/candidates.py",
-            "src/productlens/planning/evidence_graph.py",
-            "src/productlens/services/generation.py",
+            "app/planning/production",
+            "app/planning/candidates",
+            "app/planning/evidence_graph.py",
+            "app/services/generation",
         ),
         note="Planning selects evidence-backed flows; runtime recovery replaces only failed suffixes.",
     )
     add(
         "directed presentation and synchronized narration",
         (
-            "src/productlens/presentation/director.py",
-            "src/productlens/presentation/editorial.py",
-            "src/productlens/video/render.py",
+            "app/presentation/director.py",
+            "app/presentation/editorial",
+            "app/video/render",
             "video/remotion/src/root.tsx",
         ),
         note="Camera, cursor, scroll, captions, and native source footage share scene evidence.",
@@ -187,21 +187,21 @@ def build_audit(root: Path) -> dict[str, Any]:
     add(
         "layered quality and targeted repair",
         (
-            "src/productlens/quality/delivery.py",
-            "src/productlens/quality/multimodal.py",
-            "src/productlens/quality/repair.py",
-            "src/productlens/evaluation/completion_audit.py",
+            "app/quality/delivery.py",
+            "app/quality/multimodal.py",
+            "app/quality/repair.py",
+            "app/evaluation/completion_audit.py",
         ),
         note="Delivery requires independent execution, story, visual, synchronization, and evidence checks.",
     )
     add(
         "workers, leases, idempotency, and status streaming",
         (
-            "src/productlens/services/jobs.py",
-            "src/productlens/workers/local.py",
-            "src/productlens/workers/tasks.py",
-            "src/productlens/services/stage_contracts.py",
-            "src/productlens/api/main.py",
+            "app/services/jobs.py",
+            "app/workers/local.py",
+            "app/workers/tasks.py",
+            "app/services/stage_contracts.py",
+            "app/api/main.py",
         ),
         note="Durable stages and SSE are implementation evidence; deployment still requires operational validation.",
     )

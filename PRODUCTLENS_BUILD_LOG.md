@@ -18,7 +18,7 @@ The long-term reliability-first architecture is partially implemented; documenta
 
 ## 2. Product Vision
 
-Repository-supported vision: a user supplies a URL plus a walkthrough/workflow request. `ObjectiveSpec`, `ProductContext`, `PageKnowledge`, `FeatureKnowledge`, `CandidateDemoFlow`, `DemoPlan`, `DemoTrace`, `EditorialStoryboard`, and quality reports in `backend/src/productlens/contracts/models.py` model an evidence-grounded pipeline.
+Repository-supported vision: a user supplies a URL plus a walkthrough/workflow request. `ObjectiveSpec`, `ProductContext`, `PageKnowledge`, `FeatureKnowledge`, `CandidateDemoFlow`, `DemoPlan`, `DemoTrace`, `EditorialStoryboard`, and quality reports in `backend/app/contracts/models.py` model an evidence-grounded pipeline.
 
 Inputs: URL, objective, audience, duration, safe-side-effect policy, optional credential reference, and cloud/Stagehand options (API request models in `api/main.py`). Expected behavior: discover only relevant pages, prefer visible navigation, produce a human-paced story, and persist artifacts. Expected output: final MP4, captions, trace, plans, and QA reports.
 
@@ -45,7 +45,7 @@ Working MVP: a user can provide an unfamiliar standard application and natural-l
 | Component | Responsibility / files | Status |
 |---|---|---|
 | Frontend | Next 15/React 19 app in `frontend/app/`, shared studio shell and local-storage auth session in `components/` / `services/api.ts` | Present and wired to API-shaped routes, but not accepted as a complete production UX. The create page currently submits a fixed `max_pages: 4`, which conflicts with the backend's adaptive/full-walkthrough ambition. |
-| API | FastAPI routes/models in `backend/src/productlens/api/main.py` | Implemented. |
+| API | FastAPI routes/models in `backend/app/api/main.py` | Implemented. |
 | Contracts | Pydantic models in `contracts/models.py` | Central and actively used. |
 | Discovery | `discovery/live.py` gathers DOM text, headings, cards, controls, screenshots, page knowledge | Implemented; limited safe interaction probing. |
 | Planning | `planning/candidates.py`, `production.py` score/compile evidence-backed flows | Implemented with deterministic fallbacks. |
@@ -329,13 +329,13 @@ The plan and code therefore disagree in one important sense: the plan describes 
 |---|---|---|
 | `README.md` | Project overview | Documentation; verify against code. |
 | `productlens_revised_reliability_first_implementation_plan.md` | Target architecture | Plan, not proof of completion. |
-| `backend/src/productlens/services/generation.py` | Staged URL pipeline | Core implementation. |
-| `backend/src/productlens/contracts/models.py` | Shared typed contracts | Core implementation. |
-| `backend/src/productlens/discovery/` | Evidence collection | Implemented. |
-| `backend/src/productlens/planning/` | Candidate/production plans | Implemented, evolving. |
-| `backend/src/productlens/execution/` | Playwright semantic execution | Implemented, live constrained. |
-| `backend/src/productlens/presentation/` | Story/journey/camera/captions | Implemented, live quality unproven. |
-| `backend/src/productlens/quality/` | Delivery gates | Implemented. |
+| `backend/app/services/generation.py` | Staged URL pipeline | Core implementation. |
+| `backend/app/contracts/models.py` | Shared typed contracts | Core implementation. |
+| `backend/app/discovery/` | Evidence collection | Implemented. |
+| `backend/app/planning/` | Candidate/production plans | Implemented, evolving. |
+| `backend/app/execution/` | Playwright semantic execution | Implemented, live constrained. |
+| `backend/app/presentation/` | Story/journey/camera/captions | Implemented, live quality unproven. |
+| `backend/app/quality/` | Delivery gates | Implemented. |
 | `backend/alembic/` | Persistent schema evolution | Implemented. |
 | `backend/tests/` | Regression/integration coverage | Extensive; not live proof. |
 | `productlens-test-htmls/` | Fixture applications | Core test support. |
@@ -381,17 +381,17 @@ The repository also cannot prove the actual visual appearance of every previousl
 - A fresh Browserbase + Stagehand DemoQA attempt (`3e6d83e9-1a92-4f24-81c6-6d94e4f910d6`) reached planning but was correctly rejected before production because a pagination control had been promoted to a scroll scene and failed readable-local-evidence QA. The pagination-landmark fix above addresses that generic failure; the rejected run remains preserved as evidence and was not misreported as a video.
 
 **Relevant files:**
-- `backend/src/productlens/contracts/models.py`
-- `backend/src/productlens/execution/engine.py`
-- `backend/src/productlens/execution/playwright_adapter.py`
-- `backend/src/productlens/services/generation.py`
-- `backend/src/productlens/presentation/director.py`
+- `backend/app/contracts/models.py`
+- `backend/app/execution/engine.py`
+- `backend/app/execution/playwright_adapter.py`
+- `backend/app/services/generation.py`
+- `backend/app/presentation/director.py`
 - `backend/video/remotion/src/root.tsx`
 - `backend/tests/test_contracts.py`
 - `backend/tests/test_execution_plan.py`
 - `backend/tests/test_presentation.py`
-- `backend/src/productlens/persistence/repository.py`
-- `backend/src/productlens/services/jobs.py`
+- `backend/app/persistence/repository.py`
+- `backend/app/services/jobs.py`
 - `backend/alembic/versions/20260913_08_stage_heartbeats.py`
 
 ### 2026-09-13
@@ -415,13 +415,13 @@ The repository also cannot prove the actual visual appearance of every previousl
 - Older polling left overlapping local resume processes; stale compositor processes were stopped and the newest render was retained. No production browser evidence was discarded.
 
 **Relevant files:**
-- `backend/src/productlens/presentation/editorial.py`
-- `backend/src/productlens/quality/editorial.py`
+- `backend/app/presentation/editorial.py`
+- `backend/app/quality/editorial.py`
 - `backend/tests/test_editorial.py`
-- `backend/src/productlens/services/generation.py`
+- `backend/app/services/generation.py`
 - `backend/tests/test_generation_urls.py`
 - `backend/video/remotion/src/root.tsx`
-- `backend/src/productlens/video/render.py`
+- `backend/app/video/render.py`
 
 ### 2026-09-13 â€” Shared URL identity and run acceptance audit
 

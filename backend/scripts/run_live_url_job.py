@@ -14,10 +14,10 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from productlens.config.settings import Settings
-from productlens.contracts.models import DiscoveryBudget
-from productlens.orchestration.lifecycle import RunStage
-from productlens.services.runtime import build_job_service
+from app.config.settings import Settings
+from app.contracts.models import DiscoveryBudget
+from app.orchestration.lifecycle import RunStage
+from app.services.runtime import build_job_service
 
 
 def parse_args() -> argparse.Namespace:

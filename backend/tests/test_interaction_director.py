@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.contracts.models import Affordance, InteractionIntent, InteractionSnapshot
-from productlens.interaction import InteractionDirector, InteractionKernel
+from app.contracts.models import Affordance, InteractionIntent, InteractionSnapshot
+from app.interaction import InteractionDirector, InteractionKernel
 
 
 def _snapshot() -> InteractionSnapshot:

@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.credentials.service import CredentialError, EnvironmentCredentialService
-from productlens.observability.logging import redact_prompt_text
+from app.credentials.service import CredentialError, EnvironmentCredentialService
+from app.observability.logging import redact_prompt_text
 
 
 def test_provider_prompt_redaction_keeps_objective_shape_without_secrets():

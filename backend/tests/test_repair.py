@@ -1,4 +1,4 @@
-from productlens.quality.repair import classify_repair
+from app.quality.repair import classify_repair
 
 
 def test_repair_decision_names_the_earliest_safe_repair_boundary():

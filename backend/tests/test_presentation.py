@@ -1,8 +1,8 @@
 from datetime import UTC, datetime
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind, Rect, Target
-from productlens.presentation.director import build_presentation_plan
-from productlens.presentation.scenes import build_scene_plan
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind, Rect, Target
+from app.presentation.director import build_presentation_plan
+from app.presentation.scenes import build_scene_plan
 
 
 def test_small_target_keeps_native_scale_by_default():

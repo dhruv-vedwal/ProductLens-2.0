@@ -21,7 +21,7 @@ storage variables, then run the migration job exactly once before scaling API or
 worker processes:
 
 ```powershell
-python -m productlens.operations.startup --require-ready
+python -m app.operations.startup --require-ready
 ```
 
 It runs `alembic upgrade head`, verifies `SELECT 1`, declares a RabbitMQ queue,

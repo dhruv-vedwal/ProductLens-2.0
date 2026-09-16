@@ -1,4 +1,4 @@
-from productlens.providers.limits import provider_limit
+from app.providers.limits import provider_limit
 
 
 def test_provider_limits_are_bounded_and_configurable(monkeypatch):

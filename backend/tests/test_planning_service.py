@@ -1,4 +1,4 @@
-from productlens.benchmark.fixture_planning import FixturePlanningService
+from app.benchmark.fixture_planning import FixturePlanningService
 
 
 def test_planning_service_excludes_irrelevant_sections():

@@ -19,12 +19,12 @@ from pathlib import Path
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
-from productlens.config.settings import Settings
-from productlens.contracts.models import ActionCapability
-from productlens.credentials.service import EnvironmentCredentialService
-from productlens.planning.capabilities import compile_rehearsal_operations
-from productlens.planning.synthetic import hydrate_operations
-from productlens.providers.browserbase import BrowserbaseProvider
+from app.config.settings import Settings
+from app.contracts.models import ActionCapability
+from app.credentials.service import EnvironmentCredentialService
+from app.planning.capabilities import compile_rehearsal_operations
+from app.planning.synthetic import hydrate_operations
+from app.providers.browserbase import BrowserbaseProvider
 
 
 def parse_args() -> argparse.Namespace:

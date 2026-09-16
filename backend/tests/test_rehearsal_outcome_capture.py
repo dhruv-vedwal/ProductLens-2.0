@@ -1,9 +1,9 @@
 import pytest
 from playwright.async_api import async_playwright
 
-from productlens.contracts.models import ActionCapability, FormSchema, Target
-from productlens.planning.rehearsal import derive_outcome_witness
-from productlens.services.generation import (
+from app.contracts.models import ActionCapability, FormSchema, Target
+from app.planning.rehearsal import derive_outcome_witness
+from app.services.generation import (
     _rehearsal_outcome_candidates,
     _rehearsal_post_submit_state,
 )

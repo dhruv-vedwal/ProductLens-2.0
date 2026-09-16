@@ -15,7 +15,7 @@ This is the dependency-safe cleanup manifest for the AI-native demo-engine migra
 
 | Area | Reason |
 |---|---|
-| `backend/src/productlens/persistence/`, Alembic, jobs, workers | Durable run lineage, async execution, migration and audit foundations remain required. |
+| `backend/app/persistence/`, Alembic, jobs, workers | Durable run lineage, async execution, migration and audit foundations remain required. |
 | `contracts/`, `artifacts/`, `browser/`, `credentials/`, `auth/` | Evidence, trace, secret handling and safe execution are core reliability boundaries. |
 | Browserbase and Playwright providers/executor | The new engine will use these as cloud browser infrastructure and deterministic action authority. |
 | Remotion/FFmpeg rendering path | The target architecture still renders layered real-footage presentations. |

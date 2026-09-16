@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from productlens.artifacts.store import RunArtifacts
-from productlens.benchmark.fixtures import file_url
-from productlens.contracts.models import (
+from app.artifacts.store import RunArtifacts
+from app.benchmark.fixtures import file_url
+from app.contracts.models import (
     ActionCapability,
     DemoTrace,
     FormField,
@@ -22,11 +22,11 @@ from productlens.contracts.models import (
     Target,
     WorkflowProposal,
 )
-from productlens.planning.capabilities import compile_rehearsal_operations
-from productlens.planning.production import PlanningValidationError, ProductionPlanningService
-from productlens.planning.synthetic import hydrate_operations
-from productlens.providers.errors import ProviderError
-from productlens.services.generation import UrlGenerationService
+from app.planning.capabilities import compile_rehearsal_operations
+from app.planning.production import PlanningValidationError, ProductionPlanningService
+from app.planning.synthetic import hydrate_operations
+from app.providers.errors import ProviderError
+from app.services.generation import UrlGenerationService
 
 
 class EvidenceAwarePlanner:
@@ -400,7 +400,7 @@ async def test_url_generation_rejects_a_short_render_that_cannot_satisfy_its_sto
             text=True,
         )
 
-    from productlens.video import render as render_module
+    from app.video import render as render_module
 
     original_segment_renderer = render_module._run_remotion_segment
     render_module._run_remotion_segment = render_intentionally_short_candidate

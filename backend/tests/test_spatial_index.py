@@ -1,5 +1,5 @@
-from productlens.contracts.models import Rect
-from productlens.execution.spatial_index import SpatialIndex
+from app.contracts.models import Rect
+from app.execution.spatial_index import SpatialIndex
 
 
 def test_spatial_index_queries_intersections_without_duplicate_entries():

@@ -1,4 +1,4 @@
-from productlens.presentation.title import concise_demo_title
+from app.presentation.title import concise_demo_title
 
 
 def test_presentation_title_is_concise_and_objective_backed():

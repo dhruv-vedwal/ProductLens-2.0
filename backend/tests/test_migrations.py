@@ -37,7 +37,7 @@ def test_postgresql_offline_migration_sql_keeps_project_foreign_key():
 
 
 def test_postgresql_runtime_url_uses_installed_psycopg_v3(monkeypatch):
-    from productlens.persistence.repository import _PostgresConnection
+    from app.persistence.repository import _PostgresConnection
 
     captured = {}
 
@@ -56,6 +56,6 @@ def test_postgresql_runtime_url_uses_installed_psycopg_v3(monkeypatch):
         captured["url"] = url
         return Engine()
 
-    monkeypatch.setattr("productlens.persistence.repository.create_engine", fake_create_engine)
+    monkeypatch.setattr("app.persistence.db.create_engine", fake_create_engine)
     _PostgresConnection("postgresql://user:password@db.invalid/productlens")
     assert captured["url"].startswith("postgresql+psycopg://")

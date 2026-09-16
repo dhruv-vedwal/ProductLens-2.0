@@ -1,6 +1,6 @@
-from productlens.contracts.models import ObservedElement, ProductContext
-from productlens.planning.capability_resolution import resolve_capabilities
-from productlens.planning.evidence_graph import EvidenceEdge, EvidenceGraph
+from app.contracts.models import ObservedElement, ProductContext
+from app.planning.capability_resolution import resolve_capabilities
+from app.planning.evidence_graph import EvidenceEdge, EvidenceGraph
 
 
 def _context(elements: list[ObservedElement]) -> ProductContext:

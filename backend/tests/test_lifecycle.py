@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.contracts.models import FailureCode
-from productlens.orchestration.lifecycle import RunStage, retry_stage, validate_transition
+from app.contracts.models import FailureCode
+from app.orchestration.lifecycle import RunStage, retry_stage, validate_transition
 
 
 def test_lifecycle_rejects_skipping_validation():

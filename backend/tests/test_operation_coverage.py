@@ -1,8 +1,8 @@
 import pytest
 
-from productlens.benchmark.domain_fixture_operations import DomainTargetMap, create_lead
-from productlens.contracts.models import OperationKind, SemanticOperation, Target
-from productlens.execution.playwright_adapter import PlaywrightAdapter
+from app.benchmark.domain_fixture_operations import DomainTargetMap, create_lead
+from app.contracts.models import OperationKind, SemanticOperation, Target
+from app.execution.playwright_adapter import PlaywrightAdapter
 
 
 class Locator:

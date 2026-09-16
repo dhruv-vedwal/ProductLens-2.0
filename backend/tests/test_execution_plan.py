@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from productlens.artifacts.store import RunArtifacts
-from productlens.contracts.models import (
+from app.artifacts.store import RunArtifacts
+from app.contracts.models import (
     ActionIntent,
     DemoPlan,
     DemoTrace,
@@ -17,8 +17,8 @@ from productlens.contracts.models import (
     Viewport,
     WorkflowStep,
 )
-from productlens.execution.engine import ExecutionEngine, VerificationError, _browser_url_matches
-from productlens.execution.playwright_adapter import GroundingError
+from app.execution.engine import ExecutionEngine, VerificationError, _browser_url_matches
+from app.execution.playwright_adapter import GroundingError
 
 
 class Adapter:

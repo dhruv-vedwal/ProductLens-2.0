@@ -1,4 +1,4 @@
-from productlens.observability.logging import redact_value, safe_url
+from app.observability.logging import redact_value, safe_url
 
 
 def test_log_redaction_matches_secret_boundary():

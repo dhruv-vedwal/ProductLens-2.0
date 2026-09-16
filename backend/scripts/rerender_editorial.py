@@ -7,10 +7,10 @@ import asyncio
 import logging
 from pathlib import Path
 
-from productlens.artifacts.store import RunArtifacts
-from productlens.config.settings import Settings
-from productlens.persistence.repository import RunRepository
-from productlens.services.generation import UrlGenerationService
+from app.artifacts.store import RunArtifacts
+from app.config.settings import Settings
+from app.persistence.repository import RunRepository
+from app.services.generation import UrlGenerationService
 
 logger = logging.getLogger(__name__)
 

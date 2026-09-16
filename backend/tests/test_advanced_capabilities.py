@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from playwright.async_api import async_playwright
 
-from productlens.contracts.models import (
+from app.contracts.models import (
     DemoTrace,
     DiscoveryBudget,
     OperationKind,
@@ -12,10 +12,10 @@ from productlens.contracts.models import (
     SemanticOperation,
     Target,
 )
-from productlens.discovery.live import LiveDiscovery
-from productlens.execution.engine import ExecutionEngine
-from productlens.execution.playwright_adapter import PlaywrightAdapter
-from productlens.planning.capability_resolution import resolve_capabilities
+from app.discovery.live import LiveDiscovery
+from app.execution.engine import ExecutionEngine
+from app.execution.playwright_adapter import PlaywrightAdapter
+from app.planning.capability_resolution import resolve_capabilities
 
 
 @pytest.mark.asyncio

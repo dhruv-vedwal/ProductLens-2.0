@@ -1,5 +1,5 @@
-from productlens.contracts.models import OperationKind, Postcondition, SemanticOperation, Target
-from productlens.planning.production import ProductionPlanningService
+from app.contracts.models import OperationKind, Postcondition, SemanticOperation, Target
+from app.planning.production import ProductionPlanningService
 
 
 def test_route_transition_discards_stale_source_page_visibility_assertion():
@@ -16,7 +16,7 @@ def test_route_transition_discards_stale_source_page_visibility_assertion():
     )
     # The compiler's postcondition rule is independent of provider execution;
     # call the small grounding path with a matching observed anchor.
-    from productlens.contracts.models import ObservedElement, ProductContext, WorkflowProposal
+    from app.contracts.models import ObservedElement, ProductContext, WorkflowProposal
 
     context = ProductContext(
         url="https://example.test/",

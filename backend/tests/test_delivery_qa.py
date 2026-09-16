@@ -1,4 +1,4 @@
-from productlens.quality.delivery import delivery_report
+from app.quality.delivery import delivery_report
 
 
 def test_delivery_requires_all_artifacts_and_quality():
@@ -10,7 +10,7 @@ def test_delivery_requires_all_artifacts_and_quality():
 
 
 def test_required_delivery_artifacts_include_presentation_qa(tmp_path):
-    from productlens.artifacts.store import RunArtifacts
+    from app.artifacts.store import RunArtifacts
 
     required = RunArtifacts(tmp_path, "qa").required_delivery_artifacts()
     assert "presentation_qa" in required
@@ -18,7 +18,7 @@ def test_required_delivery_artifacts_include_presentation_qa(tmp_path):
 
 
 def test_live_url_delivery_requires_discovery_and_editorial_lineage(tmp_path):
-    from productlens.artifacts.store import RunArtifacts
+    from app.artifacts.store import RunArtifacts
 
     required = RunArtifacts(tmp_path, "url-run").required_url_delivery_artifacts()
 
@@ -34,7 +34,7 @@ def test_live_url_delivery_requires_discovery_and_editorial_lineage(tmp_path):
 
 
 def test_isolated_creation_delivery_requires_rehearsal_outcome_artifact(tmp_path):
-    from productlens.artifacts.store import RunArtifacts
+    from app.artifacts.store import RunArtifacts
 
     artifacts = RunArtifacts(tmp_path, "creation-run")
     artifacts.write_json("objective.json", {"permitted_mutations": ["create_isolated_record"]})
@@ -44,7 +44,7 @@ def test_isolated_creation_delivery_requires_rehearsal_outcome_artifact(tmp_path
 
 
 def test_browserbase_native_recording_satisfies_live_trace_evidence(tmp_path):
-    from productlens.artifacts.store import RunArtifacts
+    from app.artifacts.store import RunArtifacts
 
     artifacts = RunArtifacts(tmp_path, "cloud-run")
     artifacts.execution.joinpath("browser-recording.mp4").write_bytes(b"native")

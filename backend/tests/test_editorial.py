@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from productlens.contracts.models import (
+from app.contracts.models import (
     DemoTrace,
     EditorialBrief,
     EditorialNarrationDraft,
@@ -20,9 +20,9 @@ from productlens.contracts.models import (
     Target,
     WorkflowProposal,
 )
-from productlens.narration.script import bind_opening_to_first_event
-from productlens.planning.production import ProductionPlanningService
-from productlens.presentation.editorial import (
+from app.narration.script import bind_opening_to_first_event
+from app.planning.production import ProductionPlanningService
+from app.presentation.editorial import (
     _caption_length_bound,
     _distinct_editorial_narration,
     _label_reference,
@@ -86,7 +86,7 @@ def test_placeholder_editor_verify_uses_document_identity_not_starter_heading():
 
 
 def test_generic_accessibility_labels_are_not_presented_as_opening_sections():
-    from productlens.presentation.editorial import _meaningful_section_label
+    from app.presentation.editorial import _meaningful_section_label
 
     assert _meaningful_section_label("Heading") == ""
     assert _meaningful_section_label("Description") == ""
@@ -879,7 +879,7 @@ def test_editorial_script_preserves_the_approved_opening_instead_of_rebuilding_i
         target=Target(name="Activity", text="Account activity", source_url=context.url),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="explain",
@@ -887,7 +887,7 @@ def test_editorial_script_preserves_the_approved_opening_instead_of_rebuilding_i
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=operation.intent, operation=operation
             )
         ],
@@ -943,12 +943,12 @@ def test_editorial_script_does_not_cut_opening_mid_sentence():
     assert not script[0]["text"].endswith("before we.")
 
 
-from productlens.presentation.editorial import (
+from app.presentation.editorial import (
     _readable_fact,
     build_editorial_storyboard,
     enrich_editorial_storyboard,
 )
-from productlens.quality.editorial import inspect_editorial, inspect_editorial_preflight
+from app.quality.editorial import inspect_editorial, inspect_editorial_preflight
 
 
 class Planner:
@@ -1190,7 +1190,7 @@ async def test_editorial_model_cannot_shift_grounded_copy_between_scene_ids():
         ],
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -1201,10 +1201,10 @@ async def test_editorial_model_cannot_shift_grounded_copy_between_scene_ids():
         viewport_strategy="native",
         stop_conditions=["done"],
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=first.intent, operation=first
             ),
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="two", intent=second.intent, operation=second
             ),
         ],
@@ -1340,14 +1340,14 @@ def test_editorial_storyboard_uses_observed_content_not_route_labels():
         ],
         expected_outcomes=["Today"],
     )
-    plan = __import__("productlens.contracts.models", fromlist=["DemoPlan"]).DemoPlan(
+    plan = __import__("app.contracts.models", fromlist=["DemoPlan"]).DemoPlan(
         objective="Full walkthrough",
         narrative_goal="demo",
         audience="prospect",
         target_duration_seconds=90,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent="Explain Today", operation=proposal.steps[0]
             )
         ],
@@ -1374,7 +1374,7 @@ def test_editorial_storyboard_preserves_the_approved_feature_duration_floor():
         target=Target(name="Workspace"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="Show the workspace",
         narrative_goal="demo",
@@ -1384,7 +1384,7 @@ def test_editorial_storyboard_preserves_the_approved_feature_duration_floor():
         maximum_duration_seconds=180,
         selected_workflow="workspace",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one",
                 intent=operation.intent,
                 operation=operation,
@@ -1423,7 +1423,7 @@ def test_editorial_storyboard_extracts_a_readable_opening_fact_not_a_dom_dump():
         target=Target(name="Identity", source_url=context.url),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -1431,7 +1431,7 @@ def test_editorial_storyboard_extracts_a_readable_opening_fact_not_a_dom_dump():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=operation.intent, operation=operation
             )
         ],
@@ -1477,13 +1477,13 @@ def test_opening_keeps_objective_and_exploration_context_when_the_workspace_is_s
         intent="Establish leads",
         value=leads,
         postconditions=[
-            __import__("productlens.contracts.models", fromlist=["Postcondition"]).Postcondition(
+            __import__("app.contracts.models", fromlist=["Postcondition"]).Postcondition(
                 kind="url", expected=leads
             )
         ],
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective=context.objective.raw,
         narrative_goal="demo",
@@ -1494,7 +1494,7 @@ def test_opening_keeps_objective_and_exploration_context_when_the_workspace_is_s
         viewport_strategy="native",
         stop_conditions=["done"],
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="leads", intent=operation.intent, operation=operation
             )
         ],
@@ -1514,7 +1514,7 @@ def test_editorial_preflight_rejects_generic_navigation_before_execution():
     )
     context = ProductContext(url=root, title="Example", application_type="dashboard", confidence=1)
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="Show records",
         narrative_goal="demo",
@@ -1525,7 +1525,7 @@ def test_editorial_preflight_rejects_generic_navigation_before_execution():
         viewport_strategy="native",
         stop_conditions=["done"],
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="records", intent=operation.intent, operation=operation
             )
         ],
@@ -1590,7 +1590,7 @@ def test_editorial_preflight_does_not_treat_other_page_link_as_direct_route_fail
         ],
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="Show the target workspace",
         narrative_goal="explain",
@@ -1601,7 +1601,7 @@ def test_editorial_preflight_does_not_treat_other_page_link_as_direct_route_fail
         viewport_strategy="native",
         stop_conditions=["done"],
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="target", intent=operation.intent, operation=operation
             )
         ],
@@ -1637,7 +1637,7 @@ def test_editorial_preflight_rejects_contact_or_record_data_in_scene_copy():
         kind=OperationKind.READ_VALUE, intent="Read record context", target=Target(name="Records")
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="Show records",
         narrative_goal="demo",
@@ -1648,7 +1648,7 @@ def test_editorial_preflight_rejects_contact_or_record_data_in_scene_copy():
         viewport_strategy="native",
         stop_conditions=["done"],
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="records",
                 intent=operation.intent,
                 operation=operation,
@@ -1700,7 +1700,7 @@ def test_editorial_preflight_counts_uppercase_dom_evidence_case_insensitively():
         ],
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="Review the database stack",
         narrative_goal="explain",
@@ -1711,7 +1711,7 @@ def test_editorial_preflight_counts_uppercase_dom_evidence_case_insensitively():
         viewport_strategy="native",
         stop_conditions=["done"],
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="stack",
                 intent=operation.intent,
                 operation=operation,
@@ -1751,7 +1751,7 @@ def test_editorial_preflight_counts_uppercase_dom_evidence_case_insensitively():
         ],
     )
     # Use the real evidence id so the preflight source lookup is page-local.
-    from productlens.presentation.editorial import _fact_id
+    from app.presentation.editorial import _fact_id
 
     storyboard.scenes[1].evidence[1] = _fact_id(root, context.page_knowledge[0].visible_facts[0])
     report = inspect_editorial_preflight(context=context, plan=plan, storyboard=storyboard)
@@ -1770,7 +1770,7 @@ def test_editorial_brief_title_is_short_even_when_the_browser_title_is_descripti
         kind=OperationKind.SCROLL_TO, intent="Explore overview", target=Target(name="Overview")
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -1778,7 +1778,7 @@ def test_editorial_brief_title_is_short_even_when_the_browser_title_is_descripti
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=operation.intent, operation=operation
             )
         ],
@@ -1803,7 +1803,7 @@ def test_readable_fact_removes_repeated_card_heading_and_never_clips_a_sentence(
 
 
 def test_human_sentence_normalizes_joined_heading_punctuation():
-    from productlens.presentation.editorial import _human_sentence
+    from app.presentation.editorial import _human_sentence
 
     assert _human_sentence("The page opens with rationale,, where the visible design is clear") == (
         "The page opens with rationale, where the visible design is clear."
@@ -1832,7 +1832,7 @@ def test_destination_intro_reframes_highlighted_task_as_presenter_copy():
         visible_facts=[],
         fingerprint="week-6",
     )
-    from productlens.presentation.editorial import _page_intro_from_fact
+    from app.presentation.editorial import _page_intro_from_fact
 
     narration = _page_intro_from_fact(
         page,
@@ -1850,7 +1850,7 @@ def test_destination_intro_does_not_narrate_storage_implementation():
         visible_facts=[],
         fingerprint="progress",
     )
-    from productlens.presentation.editorial import _page_intro_from_fact
+    from app.presentation.editorial import _page_intro_from_fact
 
     narration = _page_intro_from_fact(page, "Saved in SQLite (`data/progress.db`).")
     assert "SQLite" not in narration
@@ -1865,7 +1865,7 @@ def test_destination_intro_explains_numbered_item_instead_of_title_only():
         visible_facts=[],
         fingerprint="problems",
     )
-    from productlens.presentation.editorial import _page_intro_from_fact
+    from app.presentation.editorial import _page_intro_from_fact
 
     narration = _page_intro_from_fact(page, "#141 Linked List Cycle.")
     assert "representative practice item" in narration
@@ -1895,7 +1895,7 @@ def test_repeated_schedule_is_summarised_instead_of_read_verbatim():
         target=Target(name="Weeks", source_url=context.url),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -1903,7 +1903,7 @@ def test_repeated_schedule_is_summarised_instead_of_read_verbatim():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=operation.intent, operation=operation
             )
         ],
@@ -1939,7 +1939,7 @@ def test_short_observed_project_fact_is_viewer_copy_instead_of_a_route_label():
         target=Target(name="Atlas", source_url=context.url),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -1947,7 +1947,7 @@ def test_short_observed_project_fact_is_viewer_copy_instead_of_a_route_label():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="atlas", intent=operation.intent, operation=operation
             )
         ],
@@ -1980,7 +1980,7 @@ def test_scroll_scene_recovers_page_local_content_fact_when_heading_differs():
         covered_content_groups=["Selected work cards"],
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="Full walkthrough",
         narrative_goal="demo",
@@ -1988,7 +1988,7 @@ def test_scroll_scene_recovers_page_local_content_fact_when_heading_differs():
         target_duration_seconds=60,
         selected_workflow="portfolio",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="work",
                 intent=operation.intent,
                 operation=operation,
@@ -2031,12 +2031,12 @@ def test_category_landmark_prefers_descriptive_fact_over_structural_fallback():
         target=Target(name="The Challenge & Bottlenecks", source_url=root),
         covered_content_groups=["The Challenge & Bottlenecks"],
     )
-    step = __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+    step = __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
         id="challenge",
         intent=operation.intent,
         operation=operation,
     )
-    plan = __import__("productlens.contracts.models", fromlist=["DemoPlan"]).DemoPlan(
+    plan = __import__("app.contracts.models", fromlist=["DemoPlan"]).DemoPlan(
         objective="Full walkthrough",
         narrative_goal="demo",
         audience="prospect",
@@ -2095,13 +2095,13 @@ def test_editorial_fallback_uses_destination_page_facts_for_navigation():
         intent="Open Timeline",
         target=Target(name="Timeline", text="Timeline"),
         postconditions=[
-            __import__("productlens.contracts.models", fromlist=["Postcondition"]).Postcondition(
+            __import__("app.contracts.models", fromlist=["Postcondition"]).Postcondition(
                 kind="url", expected="https://portfolio.test/timeline"
             )
         ],
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="Full walkthrough",
         narrative_goal="demo",
@@ -2109,7 +2109,7 @@ def test_editorial_fallback_uses_destination_page_facts_for_navigation():
         target_duration_seconds=90,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="timeline", intent="Open Timeline", operation=operation
             )
         ],
@@ -2153,13 +2153,13 @@ def test_editorial_navigation_prefers_destination_over_source_page_provenance():
         intent="Open work",
         target=Target(name="Work", source_url=context.url),
         postconditions=[
-            __import__("productlens.contracts.models", fromlist=["Postcondition"]).Postcondition(
+            __import__("app.contracts.models", fromlist=["Postcondition"]).Postcondition(
                 kind="url", expected="https://example.test/work"
             )
         ],
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2167,7 +2167,7 @@ def test_editorial_navigation_prefers_destination_over_source_page_provenance():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="work", intent=operation.intent, operation=operation
             )
         ],
@@ -2219,7 +2219,7 @@ def test_editorial_scene_keeps_a_repeated_heading_on_its_own_page():
         target=Target(name="Project", source_url="https://example.test/second"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2227,10 +2227,10 @@ def test_editorial_scene_keeps_a_repeated_heading_on_its_own_page():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=first.intent, operation=first
             ),
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="two", intent=second.intent, operation=second
             ),
         ],
@@ -2254,7 +2254,7 @@ def test_editorial_qa_rejects_short_scene_and_generic_caption():
         target=Target(name="Progress", text="Progress"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2262,7 +2262,7 @@ def test_editorial_qa_rejects_short_scene_and_generic_caption():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent="Open progress", operation=operation
             )
         ],
@@ -2319,7 +2319,7 @@ def test_editorial_qa_rejects_mechanical_context_boilerplate():
         target=Target(name="Activity", text="Activity"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2327,7 +2327,7 @@ def test_editorial_qa_rejects_mechanical_context_boilerplate():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent="Explore activity", operation=operation
             )
         ],
@@ -2392,7 +2392,7 @@ def test_editorial_qa_rejects_workspace_chapter_without_product_value():
         page_url="https://example.test/bookings",
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2400,7 +2400,7 @@ def test_editorial_qa_rejects_workspace_chapter_without_product_value():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=operation.intent, operation=operation
             )
         ],
@@ -2467,7 +2467,7 @@ def test_editorial_qa_rejects_a_scroll_trace_with_no_actual_motion():
         target=Target(name="Activity", text="Activity"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2475,7 +2475,7 @@ def test_editorial_qa_rejects_a_scroll_trace_with_no_actual_motion():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=operation.intent, operation=operation
             )
         ],
@@ -2534,7 +2534,7 @@ def test_editorial_qa_rejects_raw_dom_caption_even_when_evidence_words_match():
         target=Target(name="Skills Stack", text="Skills Stack"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2542,7 +2542,7 @@ def test_editorial_qa_rejects_raw_dom_caption_even_when_evidence_words_match():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=operation.intent, operation=operation
             )
         ],
@@ -2608,7 +2608,7 @@ def test_editorial_qa_rejects_caption_borrowed_from_a_different_page():
         target=Target(name="Scheduling", source_url="https://example.test/scheduling"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2616,7 +2616,7 @@ def test_editorial_qa_rejects_caption_borrowed_from_a_different_page():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=operation.intent, operation=operation
             )
         ],
@@ -2681,7 +2681,7 @@ def test_editorial_qa_rejects_trace_that_leaves_a_tab_without_local_exploration(
         target=Target(name="Timeline", text="Timeline"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2689,7 +2689,7 @@ def test_editorial_qa_rejects_trace_that_leaves_a_tab_without_local_exploration(
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="nav", intent="Open Timeline", operation=nav
             )
         ],
@@ -2758,7 +2758,7 @@ def test_editorial_qa_accepts_grounded_required_group_without_element_prefix():
         required_content_groups=["Latest guidance"],
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2766,10 +2766,10 @@ def test_editorial_qa_accepts_grounded_required_group_without_element_prefix():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="nav", intent=nav.intent, operation=nav
             ),
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="verify", intent=verify.intent, operation=verify
             ),
         ],
@@ -2855,7 +2855,7 @@ async def test_editorial_writer_can_change_only_grounded_prose_not_scene_contrac
         target=Target(name="Activity", text="Activity"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2863,7 +2863,7 @@ async def test_editorial_writer_can_change_only_grounded_prose_not_scene_contrac
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent="Explore activity", operation=operation
             )
         ],
@@ -2916,7 +2916,7 @@ async def test_editorial_writer_rejects_generic_claim_despite_small_word_overlap
         target=Target(name="Activity", text="Activity"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2924,7 +2924,7 @@ async def test_editorial_writer_rejects_generic_claim_despite_small_word_overlap
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=operation.intent, operation=operation
             )
         ],
@@ -2976,7 +2976,7 @@ async def test_editorial_writer_rejects_reading_dwell_boilerplate():
         target=Target(name="Engineering Notes", text="Engineering Notes"),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -2984,7 +2984,7 @@ async def test_editorial_writer_rejects_reading_dwell_boilerplate():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one",
                 intent=operation.intent,
                 operation=operation,
@@ -3037,7 +3037,7 @@ def test_reentry_narration_is_diversified_only_for_the_same_page():
         target=Target(name="Leads", source_url=root),
     )
     plan = __import__(
-        "productlens.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
+        "app.contracts.models", fromlist=["DemoPlan", "WorkflowStep"]
     ).DemoPlan(
         objective="walkthrough",
         narrative_goal="demo",
@@ -3045,10 +3045,10 @@ def test_reentry_narration_is_diversified_only_for_the_same_page():
         target_duration_seconds=60,
         selected_workflow="demo",
         workflow_steps=[
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="one", intent=first.intent, operation=first
             ),
-            __import__("productlens.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
+            __import__("app.contracts.models", fromlist=["WorkflowStep"]).WorkflowStep(
                 id="two", intent=second.intent, operation=second
             ),
         ],

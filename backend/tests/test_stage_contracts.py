@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.orchestration.lifecycle import RunStage
-from productlens.services.stage_contracts import STAGE_CONTRACTS, stage_contract, stage_lifecycle
+from app.orchestration.lifecycle import RunStage
+from app.services.stage_contracts import STAGE_CONTRACTS, stage_contract, stage_lifecycle
 
 
 def test_all_persisted_stage_names_have_one_lifecycle_boundary():

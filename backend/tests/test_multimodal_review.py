@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from productlens.quality.delivery import delivery_report
-from productlens.quality.multimodal import build_review_packet, review_multimodal
+from app.quality.delivery import delivery_report
+from app.quality.multimodal import build_review_packet, review_multimodal
 
 
 def test_default_visual_review_extracts_real_review_frames(monkeypatch, tmp_path: Path):
@@ -13,7 +13,7 @@ def test_default_visual_review_extracts_real_review_frames(monkeypatch, tmp_path
         output.write_bytes(b"png")
         return type("R", (), {"returncode": 0, "stderr": ""})()
 
-    monkeypatch.setattr("productlens.quality.multimodal.subprocess.run", fake_run)
+    monkeypatch.setattr("app.quality.multimodal.subprocess.run", fake_run)
     packet = build_review_packet(
         video=video, run_id="run", trace={"events": []}, sample_seconds=[1]
     )

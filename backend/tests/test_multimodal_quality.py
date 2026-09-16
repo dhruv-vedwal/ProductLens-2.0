@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from productlens.quality.multimodal import build_review_packet, review_multimodal
+from app.quality.multimodal import build_review_packet, review_multimodal
 
 
 def test_multimodal_packet_is_non_secret_and_provider_neutral(tmp_path: Path):

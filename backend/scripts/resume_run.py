@@ -15,8 +15,8 @@ import json
 import os
 from typing import Any
 
-from productlens.config.settings import Settings
-from productlens.services.runtime import build_job_service
+from app.config.settings import Settings
+from app.services.runtime import build_job_service
 
 STAGES = ("DISCOVERY", "PLANNING", "EXECUTION", "NARRATION", "RENDER", "VIDEO_QA")
 

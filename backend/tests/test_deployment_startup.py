@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from productlens.config.settings import Settings
-from productlens.operations import startup
+from app.config.settings import Settings
+from app.operations import startup
 
 
 def test_replica_scripts_do_not_run_migrations():

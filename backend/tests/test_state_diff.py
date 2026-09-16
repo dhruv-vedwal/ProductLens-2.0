@@ -1,4 +1,4 @@
-from productlens.execution.state_diff import requires_observable_change, state_delta
+from app.execution.state_diff import requires_observable_change, state_delta
 
 
 def test_state_delta_ignores_provider_noise_and_reports_content_change():

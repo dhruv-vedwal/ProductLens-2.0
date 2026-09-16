@@ -1,6 +1,6 @@
 """Audit runtime source for acceptance-project-specific coupling.
 
-The audit intentionally scans only ``src/productlens`` for runtime coupling and
+The audit intentionally scans only ``app`` for runtime coupling and
 reports benchmark fixtures separately.  Fixture names are data for tests; they
 must never become selectors, routes, choreography, or narration rules in the
 product runtime.
@@ -68,7 +68,7 @@ def audit(runtime_root: Path) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--runtime-root", type=Path, default=Path("src/productlens"))
+    parser.add_argument("--runtime-root", type=Path, default=Path("app"))
     parser.add_argument(
         "--output", type=Path, default=Path("artifacts/audits/project-generality.json")
     )

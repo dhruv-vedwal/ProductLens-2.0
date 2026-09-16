@@ -1,4 +1,4 @@
-from productlens.video import rerender
+from app.video import rerender
 
 
 def test_rerender_cli_requires_retained_artifact_identity(monkeypatch):

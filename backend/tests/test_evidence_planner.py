@@ -1,6 +1,6 @@
 import pytest
 
-from productlens.contracts.models import (
+from app.contracts.models import (
     ObjectiveSpec,
     ObservedElement,
     OperationKind,
@@ -10,7 +10,7 @@ from productlens.contracts.models import (
     SemanticOperation,
     WorkflowProposal,
 )
-from productlens.planning.candidates import (
+from app.planning.candidates import (
     _editorial_landmark_groups,
     _page_landmarks,
     _select_representative_groups,
@@ -18,7 +18,7 @@ from productlens.planning.candidates import (
     candidate_flows_from_evidence,
     select_candidate_flow,
 )
-from productlens.planning.production import ProductionPlanningService
+from app.planning.production import ProductionPlanningService
 
 
 def test_complete_walkthrough_regrounds_route_to_visible_navigation_control():
@@ -570,7 +570,7 @@ def test_page_complete_proposal_never_emits_anonymous_form_element_target():
             ObservedElement(tag="input", name="element-40", selector="input", source_url=root),
         ],
     )
-    from productlens.planning.candidates import CandidateDemoFlow
+    from app.planning.candidates import CandidateDemoFlow
 
     proposal = build_page_complete_proposal(
         context,
@@ -586,7 +586,7 @@ def test_page_complete_proposal_never_emits_anonymous_form_element_target():
 
 @pytest.mark.asyncio
 async def test_full_storyboard_reserves_time_for_native_motion_instead_of_five_second_holds():
-    from productlens.presentation.editorial import build_editorial_storyboard
+    from app.presentation.editorial import build_editorial_storyboard
 
     context = _context()
     plan = await ProductionPlanningService(_UnusedProvider()).plan(
@@ -605,7 +605,7 @@ async def test_full_storyboard_reserves_time_for_native_motion_instead_of_five_s
 
 @pytest.mark.asyncio
 async def test_focused_multi_beat_story_allocates_native_reading_time_to_script():
-    from productlens.presentation.editorial import build_editorial_storyboard
+    from app.presentation.editorial import build_editorial_storyboard
 
     context = _context()
     plan = await ProductionPlanningService(_UnusedProvider()).plan(

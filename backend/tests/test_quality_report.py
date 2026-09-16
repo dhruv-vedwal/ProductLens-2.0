@@ -1,9 +1,9 @@
 from datetime import UTC, datetime
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
-from productlens.quality.delivery import delivery_report
-from productlens.quality.repair import classify_repair
-from productlens.quality.synchronization import inspect_synchronization
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind
+from app.quality.delivery import delivery_report
+from app.quality.repair import classify_repair
+from app.quality.synchronization import inspect_synchronization
 
 
 def _trace() -> DemoTrace:

@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
-from productlens.narration.service import NarrationService
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind
+from app.narration.service import NarrationService
 
 
 class StubSpeech:
@@ -20,7 +20,7 @@ class StubSpeech:
 async def test_narration_uses_actual_audio_duration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    monkeypatch.setattr("productlens.narration.service.audio_duration_seconds", lambda _: 4.0)
+    monkeypatch.setattr("app.narration.service.audio_duration_seconds", lambda _: 4.0)
     trace = DemoTrace(
         run_id="run",
         objective="Demo",
@@ -48,14 +48,14 @@ async def test_narration_synthesizes_each_approved_scene_separately(
 ):
     durations = iter([1.0, 2.5, 3.5])
     monkeypatch.setattr(
-        "productlens.narration.service.audio_duration_seconds", lambda _: next(durations)
+        "app.narration.service.audio_duration_seconds", lambda _: next(durations)
     )
 
     def concatenate(command, **_kwargs):
         Path(command[-1]).write_bytes(b"combined-audio")
         return __import__("subprocess").CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr("productlens.narration.service.subprocess.run", concatenate)
+    monkeypatch.setattr("app.narration.service.subprocess.run", concatenate)
     trace = DemoTrace(
         run_id="run",
         objective="Demo",
@@ -93,13 +93,13 @@ async def test_narration_synthesizes_each_approved_scene_separately(
 async def test_narration_aligns_measured_segments_to_trace_events(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    monkeypatch.setattr("productlens.narration.service.audio_duration_seconds", lambda _: 1.5)
+    monkeypatch.setattr("app.narration.service.audio_duration_seconds", lambda _: 1.5)
 
     def compose(command, **_kwargs):
         Path(command[-1]).write_bytes(b"aligned-audio")
         return __import__("subprocess").CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr("productlens.narration.service.subprocess.run", compose)
+    monkeypatch.setattr("app.narration.service.subprocess.run", compose)
     started = datetime.now(UTC)
     trace = DemoTrace(
         run_id="run",

@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from productlens.persistence.repository import RunRepository
-from productlens.providers.errors import ProviderError
-from productlens.workers.local import next_pending_stage, worker_concurrency
-from productlens.workers.selected import run_selected_job
-from productlens.workers.tasks import execute_generation_stage
+from app.persistence.repository import RunRepository
+from app.providers.errors import ProviderError
+from app.workers.local import next_pending_stage, worker_concurrency
+from app.workers.selected import run_selected_job
+from app.workers.tasks import execute_generation_stage
 
 
 @pytest.mark.asyncio

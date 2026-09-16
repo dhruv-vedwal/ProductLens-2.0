@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.contracts.models import Target
-from productlens.execution.playwright_adapter import GroundingError, PlaywrightAdapter
+from app.contracts.models import Target
+from app.execution.playwright_adapter import GroundingError, PlaywrightAdapter
 
 
 class Locator:

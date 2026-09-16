@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from productlens.evaluation.sample_video_benchmark import (
+from app.evaluation.sample_video_benchmark import (
     build_sample_benchmark,
     compare_to_sample_benchmark,
 )
@@ -10,7 +10,7 @@ def test_sample_benchmark_derives_measured_and_editorial_envelopes(monkeypatch, 
     (tmp_path / "one.mp4").write_bytes(b"one")
     (tmp_path / "two.mov").write_bytes(b"two")
     monkeypatch.setattr(
-        "productlens.evaluation.sample_video_benchmark.probe_video",
+        "app.evaluation.sample_video_benchmark.probe_video",
         lambda path: {
             "file": path.name,
             "codec": "h264",
@@ -37,7 +37,7 @@ def test_benchmark_comparison_does_not_claim_editorial_parity_from_media_probe(
     output = tmp_path / "output.mp4"
     output.write_bytes(b"output")
     monkeypatch.setattr(
-        "productlens.evaluation.sample_video_benchmark.probe_video",
+        "app.evaluation.sample_video_benchmark.probe_video",
         lambda _: {
             "file": "output.mp4",
             "codec": "h264",
@@ -77,7 +77,7 @@ def test_benchmark_comparison_rejects_output_below_measured_sample_envelope(
     output = tmp_path / "output.mp4"
     output.write_bytes(b"output")
     monkeypatch.setattr(
-        "productlens.evaluation.sample_video_benchmark.probe_video",
+        "app.evaluation.sample_video_benchmark.probe_video",
         lambda _: {
             "file": "output.mp4",
             "codec": "h264",

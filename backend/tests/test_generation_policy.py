@@ -1,4 +1,4 @@
-from productlens.contracts.models import DemoPlan
+from app.contracts.models import DemoPlan
 
 
 def _plan(*, target: int, maximum: int | None = None) -> DemoPlan:
@@ -22,7 +22,7 @@ def _plan(*, target: int, maximum: int | None = None) -> DemoPlan:
     )
 
 
-from productlens.services.generation_policy import (
+from app.services.generation_policy import (
     canonical_url,
     normalise_observed_selector,
     production_duration_envelope,

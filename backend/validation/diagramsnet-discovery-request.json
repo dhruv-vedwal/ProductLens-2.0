@@ -1,6 +1,0 @@
-{
-  "url": "https://app.diagrams.net/",
-  "objective": "Create a focused, evidence-grounded walkthrough of the public diagram editor: establish the canvas, inspect the visible toolbar and document controls, and demonstrate one safe, reversible drawing interaction with its visible result. Do not export, share, or delete anything.",
-  "target_duration_seconds": 120,
-  "max_pages": 6
-}

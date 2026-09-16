@@ -1,4 +1,4 @@
-from productlens.presentation.title import concise_demo_title
+from app.presentation.title import concise_demo_title
 
 
 def test_title_keeps_visible_destinations_not_execution_purposes():

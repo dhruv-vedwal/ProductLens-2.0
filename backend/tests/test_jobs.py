@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from productlens.artifacts.store import RunArtifacts
-from productlens.contracts.models import (
+from app.artifacts.store import RunArtifacts
+from app.contracts.models import (
     ActionCapability,
     DemoPlan,
     DemoTrace,
@@ -17,9 +17,9 @@ from productlens.contracts.models import (
     Target,
     WorkflowStep,
 )
-from productlens.persistence.repository import RunRepository
-from productlens.providers.errors import ProviderError
-from productlens.services.jobs import (
+from app.persistence.repository import RunRepository
+from app.providers.errors import ProviderError
+from app.services.jobs import (
     DemoJobService,
     _form_schemas_for_context,
     _product_knowledge_for_context,
@@ -133,7 +133,7 @@ async def test_fixture_job_persists_trace_and_artifact_locations(
             ],
         )
 
-    monkeypatch.setattr("productlens.services.jobs.run_fixture_gate", fake_gate)
+    monkeypatch.setattr("app.services.jobs.run_fixture_gate", fake_gate)
     await DemoJobService(repository, tmp_path).run_fixture(run["id"], 2, render=False)
     assert repository.get_run(run["id"])["status"] == "COMPLETE"
     assert (

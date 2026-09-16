@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from productlens.evaluation.concurrency import run_claim_benchmark
+from app.evaluation.concurrency import run_claim_benchmark
 
 
 @pytest.mark.parametrize("runs", [1, 10, 50, 100])

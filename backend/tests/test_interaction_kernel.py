@@ -1,6 +1,6 @@
 import pytest
 
-from productlens.contracts.models import (
+from app.contracts.models import (
     ActionAttempt,
     ActionCandidate,
     ActionIntent,
@@ -10,7 +10,7 @@ from productlens.contracts.models import (
     StateSnapshot,
     Target,
 )
-from productlens.interaction.kernel import InteractionKernel, affordances_for_snapshot
+from app.interaction.kernel import InteractionKernel, affordances_for_snapshot
 
 
 def _intent(*, safety: str = "read_only") -> InteractionIntent:

@@ -1,11 +1,11 @@
-from productlens.contracts.models import (
+from app.contracts.models import (
     CandidateDemoFlow,
     ObjectiveSpec,
     PageKnowledge,
     ProductContext,
 )
-from productlens.planning.brief import build_demo_brief
-from productlens.services.generation import _relevance_graph
+from app.planning.brief import build_demo_brief
+from app.services.generation import _relevance_graph
 
 
 def test_demo_brief_preserves_selected_story_pages_and_supporting_context_without_execution_data():

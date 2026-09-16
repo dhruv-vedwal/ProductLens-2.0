@@ -9,12 +9,12 @@ cd backend
 $env:PRODUCTLENS_ARTIFACT_ROOT = "artifacts"
 alembic upgrade head
 # Terminal 1: consumes the SQLite-backed durable outbox in local development.
-python -m productlens.workers.local
+python -m app.workers.local
 # Terminal 2: serves the API.
-uvicorn productlens.api.main:app --reload --port 8000
+uvicorn app.api.main:app --reload --port 8000
 ```
 
-The database is created at `backend/artifacts/productlens.sqlite3` by default. Override the local path with `PRODUCTLENS_DATABASE`; deploy with a real PostgreSQL URL such as `PRODUCTLENS_DATABASE_URL=postgresql+psycopg://user:password@host:5432/productlens` and run `alembic upgrade head`. SQLite WAL mode is enabled only for the local API/background-job workload. The local worker atomically claims persisted jobs, recovers expired claims, and never uses in-process FastAPI background tasks. In deployment, set `PRODUCTLENS_WORKER_MODE=dramatiq` and `PRODUCTLENS_BROKER_URL=amqp://...`, then run `dramatiq productlens.workers.tasks`.
+The database is created at `backend/artifacts/productlens.sqlite3` by default. Override the local path with `PRODUCTLENS_DATABASE`; deploy with a real PostgreSQL URL such as `PRODUCTLENS_DATABASE_URL=postgresql+psycopg://user:password@host:5432/productlens` and run `alembic upgrade head`. SQLite WAL mode is enabled only for the local API/background-job workload. The local worker atomically claims persisted jobs, recovers expired claims, and never uses in-process FastAPI background tasks. In deployment, set `PRODUCTLENS_WORKER_MODE=dramatiq` and `PRODUCTLENS_BROKER_URL=amqp://...`, then run `dramatiq app.workers.tasks`.
 
 ## Provider configuration
 
@@ -53,8 +53,8 @@ ElevenLabs is optional. When no TTS provider is configured, ProductLens derives 
 The supplied fixtures can be run and rendered without OpenRouter, Browserbase, or ElevenLabs:
 
 ```powershell
-python -m productlens.benchmark.run_gate 3 --render
-python -m productlens.evaluation.run_benchmark --attempts 3 --artifact-root artifacts/benchmark
+python -m app.benchmark.run_gate 3 --render
+python -m app.evaluation.run_benchmark --attempts 3 --artifact-root artifacts/benchmark
 ```
 
 ### Re-render retained evidence
@@ -63,7 +63,7 @@ After a presentation-only change, rebuild an existing verified delivery without
 opening a browser or calling any provider:
 
 ```powershell
-python -m productlens.video.rerender --artifact-root artifacts/<collection> --run-id <run-id> --verify
+python -m app.video.rerender --artifact-root artifacts/<collection> --run-id <run-id> --verify
 ```
 
 Use `--verify-only` to run the provider-free delivery checks for an existing MP4

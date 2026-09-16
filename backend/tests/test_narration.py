@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
-from productlens.narration.script import (
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind
+from app.narration.script import (
     captions_from_audio_duration,
     captions_from_duration,
     captions_from_measured_segments,

@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.contracts.models import FormField
-from productlens.planning.form_dependencies import FormDependencyError, order_form_fields
+from app.contracts.models import FormField
+from app.planning.form_dependencies import FormDependencyError, order_form_fields
 
 
 def test_form_fields_follow_observed_dependencies_stably():

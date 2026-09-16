@@ -28,7 +28,7 @@ storage = ["boto3>=1.35,<2"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = ["integration: runs a real local browser against supplied fixtures"]
-pythonpath = [".", "src"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
@@ -44,35 +44,35 @@ python_version = "3.11"
 strict = true
 ignore_missing_imports = true
 files = [
-  "src/productlens/execution/state_diff.py",
-  "src/productlens/execution/spatial_index.py",
-  "src/productlens/planning/form_dependencies.py",
-  "src/productlens/services/stage_contracts.py",
-  "src/productlens/config/settings.py",
-  "src/productlens/providers/interfaces.py",
-  "src/productlens/services/knowledge.py",
-  "src/productlens/quality/video.py",
-  "src/productlens/quality/synchronization.py",
-  "src/productlens/quality/coverage.py",
-  "src/productlens/quality/story.py",
-  "src/productlens/quality/consistency.py",
-  "src/productlens/quality/multimodal.py",
-  "src/productlens/quality/presentation.py",
-  "src/productlens/presentation/director.py",
-  "src/productlens/presentation/scenes.py",
-  "src/productlens/presentation/journey.py",
-  "src/productlens/auth/security.py",
-  "src/productlens/credentials/service.py",
-  "src/productlens/browser/screencast.py",
-  "src/productlens/video/source_timing.py",
-  "src/productlens/contracts/models.py",
-  "src/productlens/workers/broker.py",
-  "src/productlens/workers/local.py",
-  "src/productlens/workers/tasks.py",
-  "src/productlens/services/jobs.py",
-  "src/productlens/services/render_stage.py",
-  "src/productlens/persistence/repository.py",
+  "app/execution/state_diff.py",
+  "app/execution/spatial_index.py",
+  "app/planning/form_dependencies.py",
+  "app/services/stage_contracts.py",
+  "app/config/settings.py",
+  "app/providers/interfaces.py",
+  "app/services/knowledge.py",
+  "app/quality/video.py",
+  "app/quality/synchronization.py",
+  "app/quality/coverage.py",
+  "app/quality/story.py",
+  "app/quality/consistency.py",
+  "app/quality/multimodal.py",
+  "app/quality/presentation.py",
+  "app/presentation/director.py",
+  "app/presentation/scenes.py",
+  "app/presentation/journey.py",
+  "app/auth/security.py",
+  "app/credentials/service.py",
+  "app/browser/screencast.py",
+  "app/video/source_timing.py",
+  "app/contracts/models.py",
+  "app/workers/broker.py",
+  "app/workers/local.py",
+  "app/workers/tasks.py",
+  "app/services/jobs.py",
+  "app/services/render_stage.py",
+  "app/persistence/repository.py",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/productlens"]
+packages = ["app"]

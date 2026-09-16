@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
-from productlens.video.render import _editorial_cut_windows
-from productlens.video.source_timing import align_trace_to_recording
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind
+from app.video.render import _editorial_cut_windows
+from app.video.source_timing import align_trace_to_recording
 
 
 def test_cloud_source_timing_maps_trace_to_native_recording_evidence(monkeypatch, tmp_path: Path):
@@ -51,11 +51,11 @@ def test_cloud_source_timing_maps_trace_to_native_recording_evidence(monkeypatch
         events=events,
     )
     monkeypatch.setattr(
-        "productlens.video.source_timing._video_hashes",
+        "app.video.source_timing._video_hashes",
         lambda _: [(0.0, 1), (5.0, 2), (10.0, 3), (15.0, 4)],
     )
     monkeypatch.setattr(
-        "productlens.video.source_timing._image_hash",
+        "app.video.source_timing._image_hash",
         lambda path: int(path.stem.rsplit("-", 1)[-1]) + 1,
     )
 
@@ -126,13 +126,13 @@ def test_cloud_scroll_alignment_uses_temporal_witness_when_dispatch_frame_is_spa
         events=[event],
     )
     monkeypatch.setattr(
-        "productlens.video.source_timing._video_hashes",
+        "app.video.source_timing._video_hashes",
         lambda _: [(0.0, 0), (5.0, 0), (10.0, 0), (15.0, 0)],
     )
     # Deliberately unrelated pixels: temporal evidence should still ground
     # the scroll dispatch and reveal in the native recording.
     monkeypatch.setattr(
-        "productlens.video.source_timing._image_hash",
+        "app.video.source_timing._image_hash",
         lambda _: (1 << 575) - 1,
     )
 

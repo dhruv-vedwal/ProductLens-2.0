@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
-from productlens.presentation.journey import build_journey, inspect_journey
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind
+from app.presentation.journey import build_journey, inspect_journey
 
 
 def _event(operation_id: str, kind: OperationKind, page_url: str | None = None) -> InteractionEvent:

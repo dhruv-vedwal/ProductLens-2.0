@@ -1,6 +1,6 @@
 import pytest
 
-from productlens.contracts.models import (
+from app.contracts.models import (
     ActionCapability,
     FormField,
     FormSchema,
@@ -10,20 +10,20 @@ from productlens.contracts.models import (
     ProductContext,
     Target,
 )
-from productlens.planning.capabilities import (
+from app.planning.capabilities import (
     CapabilityCompilationError,
     _field_target,
     compile_read_only_form_inspection,
     compile_record_creation,
     compile_rehearsal_operations,
 )
-from productlens.planning.rehearsal import (
+from app.planning.rehearsal import (
     CapabilitySelectionError,
     derive_outcome_witness,
     select_rehearsal_capability,
 )
-from productlens.planning.side_effects import SideEffectPolicyError, authorize_operation
-from productlens.services.generation import _rehearsal_detail_navigation_witness
+from app.planning.side_effects import SideEffectPolicyError, authorize_operation
+from app.services.generation import _rehearsal_detail_navigation_witness
 
 
 def _capability() -> ActionCapability:

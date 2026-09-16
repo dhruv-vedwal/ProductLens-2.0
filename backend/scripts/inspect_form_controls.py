@@ -16,10 +16,10 @@ from pathlib import Path
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
-from productlens.config.settings import Settings
-from productlens.credentials.service import EnvironmentCredentialService
-from productlens.discovery.live import LiveDiscovery
-from productlens.providers.browserbase import BrowserbaseProvider
+from app.config.settings import Settings
+from app.credentials.service import EnvironmentCredentialService
+from app.discovery.live import LiveDiscovery
+from app.providers.browserbase import BrowserbaseProvider
 
 
 def parse_args() -> argparse.Namespace:

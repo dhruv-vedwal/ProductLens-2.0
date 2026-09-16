@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.contracts.models import OperationKind, SemanticOperation, Target
-from productlens.planning.synthetic import SyntheticDataError, hydrate_operations, value_for
+from app.contracts.models import OperationKind, SemanticOperation, Target
+from app.planning.synthetic import SyntheticDataError, hydrate_operations, value_for
 
 
 def operation(name: str, kind: OperationKind = OperationKind.FILL_TEXT) -> SemanticOperation:

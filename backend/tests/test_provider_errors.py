@@ -1,4 +1,4 @@
-from productlens.providers.errors import ProviderError
+from app.providers.errors import ProviderError
 
 
 def test_provider_credit_failure_is_explicit_and_non_retryable():

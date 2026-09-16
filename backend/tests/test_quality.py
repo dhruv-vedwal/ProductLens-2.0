@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from productlens.quality.video import (
+from app.quality.video import (
     _frame_pacing,
     _mapped_source_second,
     _timestamp_pacing,
@@ -25,7 +25,7 @@ def test_uniform_sampled_frames_are_rejected(monkeypatch, tmp_path: Path):
     video = tmp_path / "demo.mp4"
     video.write_bytes(b"x" * 10_001)
     monkeypatch.setattr(
-        "productlens.quality.video.subprocess.run",
+        "app.quality.video.subprocess.run",
         lambda *args, **kwargs: type(
             "R",
             (),
@@ -36,7 +36,7 @@ def test_uniform_sampled_frames_are_rejected(monkeypatch, tmp_path: Path):
         )(),
     )
     monkeypatch.setattr(
-        "productlens.quality.video._sample_frame_quality", lambda *args: [{"variance": 0.0}]
+        "app.quality.video._sample_frame_quality", lambda *args: [{"variance": 0.0}]
     )
     report = inspect_video(video, execution_verified=True)
     assert "VISUALLY_EMPTY_RENDER" in report["hard_failures"]
@@ -46,7 +46,7 @@ def test_near_white_opening_is_rejected_even_with_compositor_edges(monkeypatch, 
     video = tmp_path / "white-opening.mp4"
     video.write_bytes(b"x" * 10_001)
     monkeypatch.setattr(
-        "productlens.quality.video.subprocess.run",
+        "app.quality.video.subprocess.run",
         lambda *args, **kwargs: type(
             "R",
             (),
@@ -57,7 +57,7 @@ def test_near_white_opening_is_rejected_even_with_compositor_edges(monkeypatch, 
         )(),
     )
     monkeypatch.setattr(
-        "productlens.quality.video._sample_frame_quality",
+        "app.quality.video._sample_frame_quality",
         lambda *args: [
             {"second": 2.2, "mean_luma": 252.0, "variance": 12.0},
             {"second": 5.0, "mean_luma": 120.0, "variance": 12.0},
@@ -71,7 +71,7 @@ def test_sustained_blank_product_region_is_rejected(monkeypatch, tmp_path: Path)
     video = tmp_path / "blank-middle.mp4"
     video.write_bytes(b"x" * 10_001)
     monkeypatch.setattr(
-        "productlens.quality.video.subprocess.run",
+        "app.quality.video.subprocess.run",
         lambda *args, **kwargs: type(
             "R",
             (),
@@ -82,10 +82,10 @@ def test_sustained_blank_product_region_is_rejected(monkeypatch, tmp_path: Path)
         )(),
     )
     monkeypatch.setattr(
-        "productlens.quality.video._sample_frame_quality", lambda *args: [{"variance": 12.0}]
+        "app.quality.video._sample_frame_quality", lambda *args: [{"variance": 12.0}]
     )
     monkeypatch.setattr(
-        "productlens.quality.video._sample_content_quality",
+        "app.quality.video._sample_content_quality",
         lambda *args: [
             {"second": 24.0, "mean_luma": 254.5, "variance": 10.0},
             {"second": 60.0, "mean_luma": 254.2, "variance": 12.0},
@@ -103,7 +103,7 @@ def test_render_is_rejected_when_it_does_not_preserve_any_browser_footage(
     video.write_bytes(b"x" * 10_001)
     source.write_bytes(b"source")
     monkeypatch.setattr(
-        "productlens.quality.video.subprocess.run",
+        "app.quality.video.subprocess.run",
         lambda *args, **kwargs: type(
             "R",
             (),
@@ -114,10 +114,10 @@ def test_render_is_rejected_when_it_does_not_preserve_any_browser_footage(
         )(),
     )
     monkeypatch.setattr(
-        "productlens.quality.video._sample_frame_quality", lambda *args: [{"variance": 12.0}]
+        "app.quality.video._sample_frame_quality", lambda *args: [{"variance": 12.0}]
     )
     monkeypatch.setattr(
-        "productlens.quality.video._source_faithfulness",
+        "app.quality.video._source_faithfulness",
         lambda **kwargs: [{"second": 24.0, "correlation": 0.14}],
     )
 
@@ -134,7 +134,7 @@ def test_render_is_rejected_when_only_one_sample_resembles_browser_evidence(
     video.write_bytes(b"x" * 10_001)
     source.write_bytes(b"source")
     monkeypatch.setattr(
-        "productlens.quality.video.subprocess.run",
+        "app.quality.video.subprocess.run",
         lambda *args, **kwargs: type(
             "R",
             (),
@@ -145,10 +145,10 @@ def test_render_is_rejected_when_only_one_sample_resembles_browser_evidence(
         )(),
     )
     monkeypatch.setattr(
-        "productlens.quality.video._sample_frame_quality", lambda *args: [{"variance": 12.0}]
+        "app.quality.video._sample_frame_quality", lambda *args: [{"variance": 12.0}]
     )
     monkeypatch.setattr(
-        "productlens.quality.video._source_faithfulness",
+        "app.quality.video._source_faithfulness",
         lambda **kwargs: [
             {"second": 24.0, "correlation": 0.20},
             {"second": 60.0, "correlation": 0.93},
@@ -168,7 +168,7 @@ def test_frame_pacing_reports_material_cadence_error():
 
 def test_timestamp_pacing_rejects_a_visible_gap(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
-        "productlens.quality.video.subprocess.run",
+        "app.quality.video.subprocess.run",
         lambda *args, **kwargs: type(
             "R", (), {"stdout": "0.000\n0.033\n0.066\n1.400\n", "stderr": ""}
         )(),
@@ -182,7 +182,7 @@ def test_objective_duration_envelope_is_a_delivery_gate(monkeypatch, tmp_path: P
     video = tmp_path / "demo.mp4"
     video.write_bytes(b"x" * 10_001)
     monkeypatch.setattr(
-        "productlens.quality.video.subprocess.run",
+        "app.quality.video.subprocess.run",
         lambda *args, **kwargs: type(
             "R",
             (),
@@ -193,7 +193,7 @@ def test_objective_duration_envelope_is_a_delivery_gate(monkeypatch, tmp_path: P
         )(),
     )
     monkeypatch.setattr(
-        "productlens.quality.video._sample_frame_quality", lambda *args: [{"variance": 12.0}]
+        "app.quality.video._sample_frame_quality", lambda *args: [{"variance": 12.0}]
     )
     report = inspect_video(
         video,

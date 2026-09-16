@@ -1,4 +1,4 @@
-from productlens.observability.readiness import probe_broker, probe_database, probe_object_storage
+from app.observability.readiness import probe_broker, probe_database, probe_object_storage
 
 
 class Broker:

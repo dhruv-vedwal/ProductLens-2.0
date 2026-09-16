@@ -1,4 +1,4 @@
-from productlens.config.settings import Settings
+from app.config.settings import Settings
 
 
 def test_settings_can_import_only_provider_values_from_new_project_environment(

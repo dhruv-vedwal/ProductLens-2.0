@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from productlens.evaluation.concurrency import run_claim_benchmark
+from app.evaluation.concurrency import run_claim_benchmark
 
 
 def main() -> int:

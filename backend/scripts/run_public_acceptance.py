@@ -16,9 +16,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from productlens.config.settings import Settings
-from productlens.services.runtime import build_job_service
-from productlens.urls import canonical_product_url
+from app.config.settings import Settings
+from app.services.runtime import build_job_service
+from app.urls import canonical_product_url
 
 
 def _target_sets(path: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:

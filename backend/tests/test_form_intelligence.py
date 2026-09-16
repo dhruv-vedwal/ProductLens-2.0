@@ -1,5 +1,5 @@
-from productlens.contracts.models import ObservedElement
-from productlens.planning.forms import infer_form_schema
+from app.contracts.models import ObservedElement
+from app.planning.forms import infer_form_schema
 
 
 def test_form_schema_uses_visible_dom_semantics_only():

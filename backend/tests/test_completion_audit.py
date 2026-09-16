@@ -1,7 +1,7 @@
 import hashlib
 import json
 
-from productlens.evaluation.completion_audit import REQUIRED_ARTIFACTS, audit_run
+from app.evaluation.completion_audit import REQUIRED_ARTIFACTS, audit_run
 
 
 def test_audit_reports_missing_layers_without_inferring_from_video(tmp_path):

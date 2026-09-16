@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from productlens.providers.errors import ProviderError
-from productlens.providers.stagehand import StagehandProvider
+from app.providers.errors import ProviderError
+from app.providers.stagehand import StagehandProvider
 
 
 @pytest.mark.asyncio

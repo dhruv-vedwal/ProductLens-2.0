@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind, Rect, Target
-from productlens.quality.presentation import (
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind, Rect, Target
+from app.quality.presentation import (
     attach_presentation_qa,
     inspect_presentation,
     inspect_visual_state,

@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.contracts.models import OperationKind, Postcondition, SemanticOperation, Target
-from productlens.planning.state_machine import InvalidTransition, WorkflowStateMachine
+from app.contracts.models import OperationKind, Postcondition, SemanticOperation, Target
+from app.planning.state_machine import InvalidTransition, WorkflowStateMachine
 
 
 def test_operation_graph_requires_verified_postconditions_before_advance():

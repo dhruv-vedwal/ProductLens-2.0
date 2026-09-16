@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from productlens.persistence.repository import RunRepository
+from app.persistence.repository import RunRepository
 
 
 def test_request_is_idempotent_and_knowledge_versions(tmp_path: Path):

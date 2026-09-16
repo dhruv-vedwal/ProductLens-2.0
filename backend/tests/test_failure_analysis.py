@@ -1,4 +1,4 @@
-from productlens.quality.failure_analysis import aggregate_failure_reports
+from app.quality.failure_analysis import aggregate_failure_reports
 
 
 def test_failure_analysis_groups_codes_owners_and_retry_boundaries():

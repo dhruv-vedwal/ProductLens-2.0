@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.benchmark.runner import run
-from productlens.contracts.models import WorkflowState
+from app.benchmark.runner import run
+from app.contracts.models import WorkflowState
 
 
 @pytest.mark.integration

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from productlens.contracts.models import (
+from app.contracts.models import (
     DemoPlan,
     DemoTrace,
     InteractionEvent,
@@ -10,7 +10,7 @@ from productlens.contracts.models import (
     Target,
     WorkflowStep,
 )
-from productlens.quality.coverage import inspect_coverage
+from app.quality.coverage import inspect_coverage
 
 
 def test_coverage_requires_all_promised_outcomes():

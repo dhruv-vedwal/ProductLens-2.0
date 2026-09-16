@@ -1,15 +1,15 @@
 import pytest
 
-from productlens.contracts.models import (
+from app.contracts.models import (
     FormField,
     ObservedElement,
     OperationKind,
     SemanticOperation,
     Target,
 )
-from productlens.execution.playwright_adapter import PlaywrightAdapter
-from productlens.planning.capabilities import _operation_for
-from productlens.planning.forms import infer_form_schema
+from app.execution.playwright_adapter import PlaywrightAdapter
+from app.planning.capabilities import _operation_for
+from app.planning.forms import infer_form_schema
 
 
 def test_accessible_combobox_is_a_typed_form_field_and_requires_an_observed_choice():

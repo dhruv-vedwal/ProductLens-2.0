@@ -1,9 +1,9 @@
-from productlens.planning.candidates import _canonical_url as candidate_canonical_url
-from productlens.planning.production import _canonical_url as planning_canonical_url
-from productlens.quality.consistency import _canonical_url as consistency_canonical_url
-from productlens.services.generation import _canonical_url, _safe_render_error
-from productlens.services.preflight import canonical_url as preflight_canonical_url
-from productlens.urls import canonical_product_url
+from app.planning.candidates import _canonical_url as candidate_canonical_url
+from app.planning.production import _canonical_url as planning_canonical_url
+from app.quality.consistency import _canonical_url as consistency_canonical_url
+from app.services.generation import _canonical_url, _safe_render_error
+from app.services.preflight import canonical_url as preflight_canonical_url
+from app.urls import canonical_product_url
 
 
 def test_canonical_url_prevents_redirect_spelling_from_replaying_opening_page():

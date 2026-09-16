@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind, Rect, Viewport
-from productlens.presentation.scenes import build_scene_plan, inspect_scene_plan
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind, Rect, Viewport
+from app.presentation.scenes import build_scene_plan, inspect_scene_plan
 
 
 def test_scene_plan_gives_scroll_a_human_reveal_dwell():

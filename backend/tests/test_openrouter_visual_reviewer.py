@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from productlens.providers.openrouter import OpenRouterVisualReviewer
+from app.providers.openrouter import OpenRouterVisualReviewer
 
 
 def test_visual_reviewer_refuses_to_send_a_request_without_real_frames(tmp_path: Path):

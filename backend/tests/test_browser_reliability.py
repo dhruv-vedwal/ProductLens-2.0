@@ -1,8 +1,8 @@
 import pytest
 
-from productlens.browser.grounding import TargetCandidate, choose_candidate
-from productlens.browser.recovery import RecoveryBudget
-from productlens.contracts.models import FailureCode, Target
+from app.browser.grounding import TargetCandidate, choose_candidate
+from app.browser.recovery import RecoveryBudget
+from app.contracts.models import FailureCode, Target
 
 
 def test_grounding_uses_confidence_threshold():

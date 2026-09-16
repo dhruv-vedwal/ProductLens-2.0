@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
-from productlens.quality.story import inspect_story
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind
+from app.quality.story import inspect_story
 
 
 def test_story_qa_rejects_unverified_outcome():

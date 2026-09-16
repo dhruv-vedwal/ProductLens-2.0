@@ -1,6 +1,6 @@
 import pytest
 
-from productlens.contracts.models import (
+from app.contracts.models import (
     ActionCapability,
     CandidateDemoFlow,
     FormField,
@@ -15,12 +15,12 @@ from productlens.contracts.models import (
     Target,
     WorkflowProposal,
 )
-from productlens.planning.candidates import (
+from app.planning.candidates import (
     _is_control_chrome,
     build_page_complete_proposal,
     select_candidate_flow,
 )
-from productlens.planning.production import PlanningValidationError, ProductionPlanningService
+from app.planning.production import PlanningValidationError, ProductionPlanningService
 
 
 class StubPlanner:

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from productlens.evaluation.benchmark import (
+from app.evaluation.benchmark import (
     GateMeasurement,
     aggregate_reports,
     run_and_write_suite,
@@ -36,7 +36,7 @@ async def test_small_fixture_suite_cannot_claim_the_production_reliability_targe
     async def fake_repeat(gate, attempts, root):
         return GateMeasurement(gate, attempts, attempts)
 
-    monkeypatch.setattr("productlens.evaluation.benchmark.repeat_gate", fake_repeat)
+    monkeypatch.setattr("app.evaluation.benchmark.repeat_gate", fake_repeat)
     report = await run_suite(2, tmp_path, (1, 2))
     assert report["overall_first_pass_rate"] == 1.0
     assert report["reliability_target_eligible"] is False
@@ -58,7 +58,7 @@ async def test_benchmark_report_exposes_execution_metrics(monkeypatch, tmp_path)
             execution_duration_ms=400,
         )
 
-    monkeypatch.setattr("productlens.evaluation.benchmark.repeat_gate", fake_repeat)
+    monkeypatch.setattr("app.evaluation.benchmark.repeat_gate", fake_repeat)
     report = await run_suite(2, tmp_path, (1,))
     assert report["metrics"] == {
         "task_success_rate": 1.0,
@@ -79,7 +79,7 @@ async def test_benchmark_report_is_retained(monkeypatch, tmp_path):
     ):
         return {"overall_first_pass_rate": 1.0, "attempts_per_gate": attempts}
 
-    monkeypatch.setattr("productlens.evaluation.benchmark.run_suite", fake_suite)
+    monkeypatch.setattr("app.evaluation.benchmark.run_suite", fake_suite)
     report = await run_and_write_suite(2, tmp_path)
     assert json.loads((tmp_path / "benchmark-report-all.json").read_text()) == report
 
@@ -89,7 +89,7 @@ async def test_benchmark_checkpoints_after_every_completed_gate(monkeypatch, tmp
     async def fake_repeat(gate, attempts, root):
         return GateMeasurement(gate, attempts, attempts)
 
-    monkeypatch.setattr("productlens.evaluation.benchmark.repeat_gate", fake_repeat)
+    monkeypatch.setattr("app.evaluation.benchmark.repeat_gate", fake_repeat)
     checkpoints = []
     report = await run_suite(2, tmp_path, (1, 2), on_measurement=checkpoints.append)
     assert [item["completed_gates"] for item in checkpoints] == [[1], [1, 2]]
@@ -114,7 +114,7 @@ async def test_benchmark_resumes_a_compatible_checkpoint_without_rerunning_compl
         attempted.append(gate)
         return GateMeasurement(gate, attempts, attempts)
 
-    monkeypatch.setattr("productlens.evaluation.benchmark.repeat_gate", fake_repeat)
+    monkeypatch.setattr("app.evaluation.benchmark.repeat_gate", fake_repeat)
     report = await run_and_write_suite(2, tmp_path, (1, 2))
     assert attempted == [2]
     assert report["completed_gates"] == [1, 2]

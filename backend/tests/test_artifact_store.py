@@ -4,16 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from productlens.artifacts.store import RunArtifacts, materialize_trace_lifecycle
-from productlens.contracts.models import (
+from app.artifacts.store import RunArtifacts, materialize_trace_lifecycle
+from app.contracts.models import (
     DemoTrace,
     InteractionEvent,
     OperationKind,
     Postcondition,
     Target,
 )
-from productlens.storage.local import LocalArtifactStorage
-from productlens.storage.s3 import S3ArtifactStorage
+from app.storage.local import LocalArtifactStorage
+from app.storage.s3 import S3ArtifactStorage
 
 
 def test_json_artifacts_are_replaced_atomically_without_leaking_temp_files(tmp_path):
@@ -39,7 +39,7 @@ def test_json_artifact_write_retries_a_transient_windows_replace_lock(tmp_path, 
         return original_replace(path, target)
 
     monkeypatch.setattr(Path, "replace", locked_once)
-    monkeypatch.setattr("productlens.artifacts.store.time.sleep", lambda _: None)
+    monkeypatch.setattr("app.artifacts.store.time.sleep", lambda _: None)
 
     destination = artifacts.write_json("qa/report.json", {"status": "written"})
 

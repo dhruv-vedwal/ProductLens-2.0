@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from productlens.contracts.models import DemoTrace
+from app.contracts.models import DemoTrace
 
 ROOT = Path(__file__).parents[1] / "validation" / "golden"
 

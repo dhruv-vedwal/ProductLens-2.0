@@ -1,6 +1,6 @@
 import pytest
 
-from productlens.browser.theme import discover_theme_control
+from app.browser.theme import discover_theme_control
 
 
 class _Control:

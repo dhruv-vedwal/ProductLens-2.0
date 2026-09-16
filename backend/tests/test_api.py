@@ -4,8 +4,9 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-import productlens.api.main as api_main
-from productlens.api.main import (
+import app.api.deps_state as api_state
+import app.api.main as api_main
+from app.api.main import (
     GenerationRequest,
     RetryRequest,
     app,
@@ -13,7 +14,7 @@ from productlens.api.main import (
     resolve_cloud_discovery,
     settings,
 )
-from productlens.contracts.models import ObjectiveSpec, UnderstandingPreview
+from app.contracts.models import ObjectiveSpec, UnderstandingPreview
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +29,9 @@ def isolate_api_test_queue(monkeypatch: pytest.MonkeyPatch):
     """
     # The local development profile deliberately allows Swagger without a token.
     # API security tests must still exercise the protected production behaviour.
-    monkeypatch.setattr(api_main, "settings", replace(settings, auth_required=True))
+    # Shared runtime state lives in deps_state; patch there so route handlers see it.
+    monkeypatch.setattr(api_state, "settings", replace(settings, auth_required=True))
+    monkeypatch.setattr(api_main, "settings", api_state.settings)
     yield
     rows = repository.connection.execute(
         """

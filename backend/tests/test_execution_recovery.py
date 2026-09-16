@@ -2,8 +2,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from productlens.contracts.models import DemoTrace, InteractionEvent, OperationKind
-from productlens.execution.recovery import OutcomeRepairError, repair_dispatched_terminal_submit
+from app.contracts.models import DemoTrace, InteractionEvent, OperationKind
+from app.execution.recovery import OutcomeRepairError, repair_dispatched_terminal_submit
 
 
 def _trace() -> DemoTrace:

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from productlens.artifacts.store import RunArtifacts
-from productlens.contracts.models import (
+from app.artifacts.store import RunArtifacts
+from app.contracts.models import (
     DemoTrace,
     EditorialBrief,
     EditorialScene,
@@ -18,7 +18,7 @@ from productlens.contracts.models import (
     Target,
     Viewport,
 )
-from productlens.video.render import (
+from app.video.render import (
     CaptureDurationError,
     NarrationTimingError,
     RecordingProvenanceError,
@@ -38,6 +38,27 @@ from productlens.video.render import (
     _validate_recording_provenance,
     render_remotion,
 )
+from app.video.render import assemble as render_assemble
+from app.video.render import remotion_props as render_remotion_props
+from app.video.render import status as render_status
+
+_RENDER_MODULES = (render_assemble, render_remotion_props, render_status)
+
+
+def _patch_render_subprocess_run(monkeypatch: pytest.MonkeyPatch, value) -> None:
+    # Same shared stdlib binding the former monolith monkeypatch targeted.
+    monkeypatch.setattr(subprocess, "run", value)
+
+
+def _patch_render_shutil_copy2(monkeypatch: pytest.MonkeyPatch, value) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "copy2", value)
+
+
+def _patch_render_audio_duration(monkeypatch: pytest.MonkeyPatch, value) -> None:
+    for module in _RENDER_MODULES:
+        monkeypatch.setattr(module, "audio_duration_seconds", value)
 
 
 def test_frame_rate_parser_preserves_measured_source_cadence():
@@ -56,7 +77,7 @@ def test_prepared_h264_editorial_source_is_copied_without_a_second_encode(
     class Probe:
         stdout = json.dumps({"streams": [{"codec_name": "h264", "pix_fmt": "yuv420p"}]})
 
-    monkeypatch.setattr("productlens.video.render.subprocess.run", lambda *args, **kwargs: Probe())
+    _patch_render_subprocess_run(monkeypatch, lambda *args, **kwargs: Probe())
     asset = _prepare_remotion_source(raw, public, "run")
     assert asset == "run.mp4"
     assert (public / asset).read_bytes() == raw.read_bytes()
@@ -88,10 +109,10 @@ def test_existing_content_addressed_editorial_source_is_reused(monkeypatch, tmp_
         Path(args[-1]).write_bytes(b"x" * 10_001)
         return subprocess.CompletedProcess(args, 0)
 
-    monkeypatch.setattr("productlens.video.render.subprocess.run", initial_encode)
+    _patch_render_subprocess_run(monkeypatch, initial_encode)
     first = _build_editorial_source(raw, render_dir=tmp_path / "render", windows=windows)
-    monkeypatch.setattr(
-        "productlens.video.render.subprocess.run",
+    _patch_render_subprocess_run(
+        monkeypatch,
         lambda *args, **kwargs: pytest.fail("cached source must not invoke ffmpeg"),
     )
     assert _build_editorial_source(raw, render_dir=tmp_path / "render", windows=windows) == first
@@ -632,9 +653,9 @@ def test_render_rejects_narration_that_would_outlast_real_capture(monkeypatch, t
             )
         return Probe()
 
-    monkeypatch.setattr("productlens.video.render.subprocess.run", run)
-    monkeypatch.setattr("productlens.video.render.shutil.copy2", lambda *args: None)
-    monkeypatch.setattr("productlens.video.render.audio_duration_seconds", lambda _: 30.0)
+    _patch_render_subprocess_run(monkeypatch, run)
+    _patch_render_shutil_copy2(monkeypatch, lambda *args: None)
+    _patch_render_audio_duration(monkeypatch, lambda _: 30.0)
     with pytest.raises(NarrationTimingError):
         render_remotion(
             DemoTrace(
@@ -677,8 +698,8 @@ def test_render_rejects_native_capture_that_cannot_fit_approved_duration(
         calls.append(args)
         return Probe()
 
-    monkeypatch.setattr("productlens.video.render.subprocess.run", run)
-    monkeypatch.setattr("productlens.video.render.shutil.copy2", lambda *args: None)
+    _patch_render_subprocess_run(monkeypatch, run)
+    _patch_render_shutil_copy2(monkeypatch, lambda *args: None)
     with pytest.raises(CaptureDurationError):
         render_remotion(
             DemoTrace(run_id="overlong", objective="Demo", started_at=datetime.now(UTC)),
@@ -706,8 +727,8 @@ def test_render_places_beats_using_recording_evidence_time(monkeypatch, tmp_path
             )
         return Probe()
 
-    monkeypatch.setattr("productlens.video.render.subprocess.run", run)
-    monkeypatch.setattr("productlens.video.render.shutil.copy2", lambda *args: None)
+    _patch_render_subprocess_run(monkeypatch, run)
+    _patch_render_shutil_copy2(monkeypatch, lambda *args: None)
     trace = DemoTrace(
         run_id="timed",
         objective="Demo",
@@ -773,8 +794,8 @@ def test_render_uses_action_dispatch_time_for_cursor_beats(monkeypatch, tmp_path
             )
         return Probe()
 
-    monkeypatch.setattr("productlens.video.render.subprocess.run", run)
-    monkeypatch.setattr("productlens.video.render.shutil.copy2", lambda *args: None)
+    _patch_render_subprocess_run(monkeypatch, run)
+    _patch_render_shutil_copy2(monkeypatch, lambda *args: None)
     event = InteractionEvent(
         operation_id="one",
         kind=OperationKind.CLICK,
@@ -820,7 +841,7 @@ def test_caption_waits_for_recorded_visible_result_after_navigation_dispatch(
             )
         return Probe()
 
-    monkeypatch.setattr("productlens.video.render.subprocess.run", run)
+    _patch_render_subprocess_run(monkeypatch, run)
     event = InteractionEvent(
         operation_id="nav",
         kind=OperationKind.OPEN_NAVIGATION_ITEM,
@@ -906,7 +927,7 @@ def test_result_caption_is_not_clamped_to_the_next_cursor_action_beat(monkeypatc
             )
         return Probe()
 
-    monkeypatch.setattr("productlens.video.render.subprocess.run", run)
+    _patch_render_subprocess_run(monkeypatch, run)
     events = [
         InteractionEvent(
             operation_id="first",
@@ -1051,7 +1072,7 @@ def test_render_namespaces_media_asset_to_current_retry_artifact_directory(
             )
         return Probe()
 
-    monkeypatch.setattr("productlens.video.render.subprocess.run", run)
+    _patch_render_subprocess_run(monkeypatch, run)
     # Simulate a cloned trace retaining its historical parent run id.
     trace = DemoTrace(
         run_id="retry-parent",

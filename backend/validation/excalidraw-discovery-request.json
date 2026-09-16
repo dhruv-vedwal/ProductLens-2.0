@@ -1,6 +1,0 @@
-{
-  "url": "https://excalidraw.com/",
-  "objective": "Create an evidence-grounded feature walkthrough of this collaborative drawing workspace: establish the editor canvas and toolbar, inspect the visible shape/text controls, then demonstrate one safe reversible drawing interaction with its visible result. Do not export, share, delete, or invite anyone.",
-  "target_duration_seconds": 120,
-  "max_pages": 4
-}

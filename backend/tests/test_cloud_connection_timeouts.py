@@ -1,16 +1,16 @@
 """Guard browser-provider calls from becoming unbounded worker hangs."""
 
 import ast
-from pathlib import Path
 
 import pytest
 
-from productlens.planning.production import ProductionPlanningService
-from productlens.services.generation import UrlGenerationService
+from app.planning.production import ProductionPlanningService
+from app.services.generation import UrlGenerationService
+from tests.source_utils import package_source
 
 
 def test_every_cloud_cdp_connection_has_a_native_playwright_timeout():
-    source = Path("src/productlens/services/generation.py").read_text(encoding="utf-8")
+    source = package_source("app/services/generation")
     calls = [
         node
         for node in ast.walk(ast.parse(source))
@@ -23,7 +23,7 @@ def test_every_cloud_cdp_connection_has_a_native_playwright_timeout():
 
 
 def test_cloud_discovery_bounds_viewport_navigation_and_authentication_before_exploration():
-    source = Path("src/productlens/services/generation.py").read_text(encoding="utf-8")
+    source = package_source("app/services/generation")
     tree = ast.parse(source)
     bounded_calls = [
         node
@@ -40,7 +40,7 @@ def test_cloud_discovery_bounds_viewport_navigation_and_authentication_before_ex
 
 
 def test_cloud_discovery_bounds_cdp_and_provider_teardown_after_a_failure():
-    source = Path("src/productlens/services/generation.py").read_text(encoding="utf-8")
+    source = package_source("app/services/generation")
     tree = ast.parse(source)
     bounded_source = "\n".join(
         ast.unparse(node)
@@ -55,7 +55,7 @@ def test_cloud_discovery_bounds_cdp_and_provider_teardown_after_a_failure():
 
 
 def test_cloud_replay_assembly_uses_the_configured_capture_deadline():
-    source = Path("src/productlens/services/generation.py").read_text(encoding="utf-8")
+    source = package_source("app/services/generation")
     tree = ast.parse(source)
     calls = [
         node

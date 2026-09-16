@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from productlens.providers.elevenlabs import ElevenLabsProvider
-from productlens.providers.errors import ProviderError
+from app.providers.elevenlabs import ElevenLabsProvider
+from app.providers.errors import ProviderError
 
 
 class Response:
@@ -29,6 +29,6 @@ class Client:
 
 @pytest.mark.asyncio
 async def test_elevenlabs_maps_rejected_synthesis_to_safe_provider_error(monkeypatch):
-    monkeypatch.setattr("productlens.providers.elevenlabs.httpx.AsyncClient", Client)
+    monkeypatch.setattr("app.providers.elevenlabs.httpx.AsyncClient", Client)
     with pytest.raises(ProviderError, match=r"elevenlabs provider failure \(402\)"):
         await ElevenLabsProvider("key", "voice").synthesize("hello")

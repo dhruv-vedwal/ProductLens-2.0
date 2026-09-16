@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from productlens.contracts.models import (
+from app.contracts.models import (
     ActionIntent,
     AudienceProfile,
     DemoPlan,

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from productlens.providers.browserbase import BrowserbaseProvider
+from app.providers.browserbase import BrowserbaseProvider
 
 
 @pytest.mark.asyncio
@@ -25,7 +25,7 @@ async def test_close_session_treats_already_closed_browserbase_session_as_succes
             return Response()
 
     monkeypatch.setattr(
-        "productlens.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
+        "app.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
     )
     await BrowserbaseProvider("test-key").close_session("already-closed")
 
@@ -58,13 +58,13 @@ async def test_close_session_retries_transient_transport_failure(monkeypatch):
 
     client = Client()
     monkeypatch.setattr(
-        "productlens.providers.browserbase.httpx.AsyncClient", lambda **kwargs: client
+        "app.providers.browserbase.httpx.AsyncClient", lambda **kwargs: client
     )
 
     async def no_sleep(_seconds):
         return None
 
-    monkeypatch.setattr("productlens.providers.browserbase.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("app.providers.browserbase.asyncio.sleep", no_sleep)
     await BrowserbaseProvider("test-key").close_session("session-1")
     assert client.attempts == 2
 
@@ -101,7 +101,7 @@ async def test_create_session_uses_only_the_browserbase_api_key(monkeypatch):
             return Response({"id": "session-1", "connectUrl": "wss://example.test/session-1"})
 
     monkeypatch.setattr(
-        "productlens.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
+        "app.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
     )
     session = await BrowserbaseProvider("test-key").create_session_info()
     assert session.session_id == "session-1"
@@ -138,7 +138,7 @@ async def test_create_session_passes_recording_viewport_and_non_secret_metadata(
             return Response({"id": "session-2", "connectUrl": "wss://example.test/session-2"})
 
     monkeypatch.setattr(
-        "productlens.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
+        "app.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
     )
     session = await BrowserbaseProvider("test-key").create_session_info(
         viewport={"width": 1440, "height": 900},
@@ -194,7 +194,7 @@ async def test_native_recording_download_uses_signed_url_without_returning_it(
             )
 
     monkeypatch.setattr(
-        "productlens.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
+        "app.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
     )
     output = tmp_path / "browser-recording.mp4"
     result = await BrowserbaseProvider("test-key").download_native_recording("session-1", output)
@@ -234,9 +234,9 @@ async def test_session_replay_video_assembles_documented_hls_playlist(monkeypatc
         Path(args[0][-1]).write_bytes(b"assembled-mp4")
 
     monkeypatch.setattr(
-        "productlens.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
+        "app.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
     )
-    monkeypatch.setattr("productlens.providers.browserbase.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr("app.providers.browserbase.asyncio.to_thread", fake_to_thread)
     output = tmp_path / "replay.mp4"
     result = await BrowserbaseProvider("test-key").download_session_replay_video(
         "session-1", output
@@ -276,9 +276,9 @@ async def test_session_replay_assembly_respects_long_caller_deadline(monkeypatch
         Path(args[0][-1]).write_bytes(b"assembled-mp4")
 
     monkeypatch.setattr(
-        "productlens.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
+        "app.providers.browserbase.httpx.AsyncClient", lambda **kwargs: Client()
     )
-    monkeypatch.setattr("productlens.providers.browserbase.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr("app.providers.browserbase.asyncio.to_thread", fake_to_thread)
     output = tmp_path / "long-replay.mp4"
     await BrowserbaseProvider("test-key").download_session_replay_video(
         "session-1", output, timeout_seconds=900

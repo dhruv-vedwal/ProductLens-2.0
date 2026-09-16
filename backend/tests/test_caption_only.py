@@ -1,4 +1,4 @@
-from productlens.narration.script import captions_from_duration
+from app.narration.script import captions_from_duration
 
 
 def test_caption_only_timing_is_even_and_includes_all_evidence():

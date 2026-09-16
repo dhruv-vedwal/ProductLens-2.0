@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from productlens.quality.consistency import validate_selected_candidate_consistency
+from app.quality.consistency import validate_selected_candidate_consistency
 
 
 def classify_run(path: Path) -> dict[str, Any]:

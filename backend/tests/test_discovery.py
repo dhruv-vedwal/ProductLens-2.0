@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 from playwright.async_api import async_playwright
 
-from productlens.benchmark.fixture_discovery import FixtureTargetedDiscovery
-from productlens.contracts.models import (
+from app.benchmark.fixture_discovery import FixtureTargetedDiscovery
+from app.contracts.models import (
     DiscoveryBudget,
     FormField,
     FormSchema,
@@ -13,7 +13,7 @@ from productlens.contracts.models import (
     PageKnowledge,
     ProductContext,
 )
-from productlens.discovery.live import (
+from app.discovery.live import (
     LiveDiscovery,
     _bounded_page_navigation,
     _canonical_route,
@@ -29,7 +29,7 @@ from productlens.discovery.live import (
     _route_objective_score,
     adaptive_exploration_budget,
 )
-from productlens.providers.stagehand import StagehandObservation, StagehandPageAnalysis
+from app.providers.stagehand import StagehandObservation, StagehandPageAnalysis
 
 
 def test_invite_does_not_crawl_unrelated_sections():
@@ -686,7 +686,9 @@ def test_interactive_budget_uses_declared_must_show_terms():
 
 
 def test_discovery_does_not_replay_the_opening_url_after_collecting_evidence():
-    source = Path("src/productlens/discovery/live.py").read_text(encoding="utf-8")
+    from tests.source_utils import package_source
+
+    source = package_source("app/discovery/live")
 
     assert 'page.goto(entry_url, wait_until="domcontentloaded")' not in source
 

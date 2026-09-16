@@ -1,7 +1,7 @@
 import pytest
 
-from productlens.contracts.models import OperationKind, SemanticOperation, Target
-from productlens.execution.playwright_adapter import PlaywrightAdapter
+from app.contracts.models import OperationKind, SemanticOperation, Target
+from app.execution.playwright_adapter import PlaywrightAdapter
 
 
 class _TypingLocator:

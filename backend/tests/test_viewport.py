@@ -1,8 +1,8 @@
 import pytest
 from playwright.async_api import async_playwright
 
-from productlens.contracts.models import ObservedElement, PageKnowledge
-from productlens.presentation.viewport import choose_viewport, probe_viewport_candidates
+from app.contracts.models import ObservedElement, PageKnowledge
+from app.presentation.viewport import choose_viewport, probe_viewport_candidates
 
 
 def _element(name: str, tag: str = "button") -> ObservedElement:

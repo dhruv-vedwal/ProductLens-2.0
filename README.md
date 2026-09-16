@@ -98,18 +98,18 @@ monolithic generator:
 
 | Layer | Package | Owns |
 |---|---|---|
-| API/auth | `productlens.api`, `productlens.auth` | HTTP contracts, sessions, account scoping, run commands |
-| Orchestration | `productlens.services`, `productlens.orchestration`, `productlens.workers` | stage ordering, durable jobs, leases, heartbeats, resume/retry |
-| Contracts | `productlens.contracts` | versioned Pydantic models shared by every stage |
-| Discovery | `productlens.discovery` | URL normalization, DOM/accessibility evidence, page knowledge, relevance |
-| Providers | `productlens.providers` | Browserbase, Stagehand, OpenRouter, ElevenLabs boundaries |
-| Planning | `productlens.planning` | capability extraction, candidate flows, scoring, side-effect policy, validation |
-| Interaction | `productlens.interaction`, `productlens.execution` | affordances, semantic targets, browser dispatch, state witnesses |
-| Persistence | `productlens.persistence`, `productlens.artifacts`, `productlens.storage` | database lineage, artifact manifests, knowledge versions; DDL is isolated in `persistence/schema.py` |
-| Presentation | `productlens.presentation` | journey direction, storyboard, captions, camera/cursor plans |
-| Narration | `productlens.narration` | grounded script, caption timing, optional audio segments |
-| Video | `productlens.video` | source timing, native-speed cuts, Remotion/FFmpeg composition |
-| Quality | `productlens.quality`, `productlens.evaluation` | execution/story/visual/sync/delivery gates and repair classification |
+| API/auth | `app.api`, `app.auth` | HTTP contracts, sessions, account scoping, run commands |
+| Orchestration | `app.services`, `app.orchestration`, `app.workers` | stage ordering, durable jobs, leases, heartbeats, resume/retry |
+| Contracts | `app.contracts` | versioned Pydantic models shared by every stage |
+| Discovery | `app.discovery` | URL normalization, DOM/accessibility evidence, page knowledge, relevance |
+| Providers | `app.providers` | Browserbase, Stagehand, OpenRouter, ElevenLabs boundaries |
+| Planning | `app.planning` | capability extraction, candidate flows, scoring, side-effect policy, validation |
+| Interaction | `app.interaction`, `app.execution` | affordances, semantic targets, browser dispatch, state witnesses |
+| Persistence | `app.persistence`, `app.artifacts`, `app.storage` | database lineage, artifact manifests, knowledge versions; DDL is isolated in `persistence/schema.py` |
+| Presentation | `app.presentation` | journey direction, storyboard, captions, camera/cursor plans |
+| Narration | `app.narration` | grounded script, caption timing, optional audio segments |
+| Video | `app.video` | source timing, native-speed cuts, Remotion/FFmpeg composition |
+| Quality | `app.quality`, `app.evaluation` | execution/story/visual/sync/delivery gates and repair classification |
 
 The frontend in `frontend/` consumes the API and displays this state. It does
 not execute browser actions or make delivery decisions.
@@ -528,14 +528,14 @@ cd "ProductLensAI 2.0/backend"
 python -m pip install -e ".[dev]"
 python -m playwright install chromium
 alembic upgrade head
-python -m productlens.workers.local
+python -m app.workers.local
 ```
 
 In another terminal:
 
 ```powershell
 cd "ProductLensAI 2.0/backend"
-uvicorn productlens.api.main:app --reload --port 8000
+uvicorn app.api.main:app --reload --port 8000
 ```
 
 The default artifact root is `backend/artifacts`. Runtime artifacts, recordings, databases, samples, and test HTMLs are ignored by Git. The legacy `ProductLens AI/` project is reference material only; this application does not read its runtime configuration.
@@ -559,7 +559,7 @@ python -m pytest -m integration -q --disable-warnings
 For a fixture gate:
 
 ```powershell
-python -m productlens.benchmark.run_gate 3 --render
+python -m app.benchmark.run_gate 3 --render
 ```
 
 For a provider-backed URL, run discovery/plan first with `render: false`, inspect the persisted plan and trace, and only then render. Use the SSE endpoint for progress instead of an aggressive polling loop.
