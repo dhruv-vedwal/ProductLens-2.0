@@ -1217,6 +1217,12 @@ class RehearseMixin:
                             if validation_unresolved
                             else "REHEARSAL_OUTCOME_UNVERIFIED: submission did not yield an independent visible result witness"
                         )
+                if witnessed is not None:
+                    # The witness is the authoritative promoted capability.
+                    # Keeping the pre-submit candidate here silently discarded
+                    # ``verified``/``outcome_target`` and made planning reject
+                    # every otherwise successful isolated creation rehearsal.
+                    candidate = witnessed
                 if witnessed is not None and rehearsal_operations_used and candidate.form_schema:
                     # Promote controls proven necessary by the live validation
                     # loop into the capability contract. Production will then
