@@ -184,14 +184,30 @@ def audit_run(root: Path) -> dict[str, object]:
                 for event in trace.get("events", [])
                 if event.get("kind") == "Submit" and event.get("success")
             ]
-            proved = any(
-                (witness and witness in json.dumps(event.get("after", {})).casefold())
-                or (
-                    witness_url
-                    and witness_url in str((event.get("after") or {}).get("url", "")).casefold()
-                )
-                for event in submitted
-            )
+            def _event_proves_creation(event: dict[str, object]) -> bool:
+                after = event.get("after") or {}
+                if not isinstance(after, dict):
+                    return False
+                serialized = json.dumps(after).casefold()
+                if witness and witness in serialized:
+                    return True
+                if witness_url and witness_url in str(after.get("url", "")).casefold():
+                    return True
+                # Creation pages commonly receive a server-generated identifier,
+                # so the rehearsal URL is intentionally not stable across runs.
+                # The execution kernel records the independent, visible values
+                # matched on the resulting state; those values plus a changed
+                # route are the authoritative production witness in that case.
+                verified_outcome = after.get("verified_outcome")
+                if not isinstance(verified_outcome, dict):
+                    return False
+                matched_values = verified_outcome.get("matched_form_values")
+                return bool(
+                    after.get("url_changed")
+                    or event.get("state_delta", {}).get("url_changed")
+                ) and isinstance(matched_values, list) and bool(matched_values)
+
+            proved = any(_event_proves_creation(event) for event in submitted)
             if (not witness and not witness_url) or not submitted or not proved:
                 missing.append("production_creation_outcome_proof")
         except (OSError, ValueError, TypeError):

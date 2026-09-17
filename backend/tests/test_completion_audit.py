@@ -128,6 +128,36 @@ def test_creation_audit_accepts_rehearsal_url_witness(tmp_path):
     assert "production_creation_outcome_proof" not in report["missing_layers"]
 
 
+def test_creation_audit_accepts_dynamic_url_with_matched_form_value(tmp_path):
+    (tmp_path / "discovery").mkdir()
+    (tmp_path / "execution").mkdir()
+    (tmp_path / "objective.json").write_text(
+        json.dumps({"permitted_mutations": ["create_isolated_record"]})
+    )
+    (tmp_path / "discovery" / "rehearsal-report.json").write_text(
+        json.dumps({"outcome_target": {"name": "verified created record"}})
+    )
+    (tmp_path / "execution" / "trace.json").write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "kind": "Submit",
+                        "success": True,
+                        "after": {
+                            "url": "https://example.test/leads/server-generated-id",
+                            "verified_outcome": {"matched_form_values": ["Demo Contact"]},
+                        },
+                        "state_delta": {"url_changed": True},
+                    }
+                ]
+            }
+        )
+    )
+    report = audit_run(tmp_path)
+    assert "production_creation_outcome_proof" not in report["missing_layers"]
+
+
 def test_audit_rejects_manifest_that_omits_required_evidence(tmp_path):
     for _, relative in REQUIRED_ARTIFACTS:
         path = tmp_path / relative
