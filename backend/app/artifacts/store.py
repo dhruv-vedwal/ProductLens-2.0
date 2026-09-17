@@ -403,7 +403,10 @@ class RunArtifacts:
         allowed = {
             "DISCOVERY": ("discovery",),
             "PLANNING": ("discovery",),
-            "EXECUTION": ("discovery", "plan.json"),
+            # Execution consumes the validated state graph and certified
+            # script emitted during planning; retaining only plan.json makes
+            # an otherwise safe scene retry fail before opening a browser.
+            "EXECUTION": ("discovery", "planning", "plan.json"),
             "NARRATION": (
                 "discovery",
                 "plan.json",
