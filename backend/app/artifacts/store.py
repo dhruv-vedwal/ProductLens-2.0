@@ -490,3 +490,21 @@ class RunArtifacts:
                 recording_meta.write_text(
                     json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
                 )
+
+        # The immutable interaction trace is copied as execution evidence, but
+        # its envelope still names the parent run. Rebinding that envelope is
+        # required for render provenance checks while preserving every event,
+        # timestamp, and witness exactly as captured.
+        for trace_name in ("trace.json", "interaction-trace.json"):
+            trace_path = retry / "execution" / trace_name
+            if not trace_path.is_file():
+                continue
+            try:
+                trace_payload = json.loads(trace_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                trace_payload = None
+            if isinstance(trace_payload, dict) and "run_id" in trace_payload:
+                trace_payload["run_id"] = retry_run_id
+                trace_path.write_text(
+                    json.dumps(trace_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )

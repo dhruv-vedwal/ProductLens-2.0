@@ -136,6 +136,7 @@ def test_targeted_retry_rebinds_native_recording_provenance_to_child_run(tmp_pat
             "sha256": "stale",
         },
     )
+    parent.write_json("execution/trace.json", {"run_id": "parent", "events": []})
 
     RunArtifacts.clone_for_targeted_retry(tmp_path, "parent", "child", start_stage="RENDER")
 
@@ -145,6 +146,8 @@ def test_targeted_retry_rebinds_native_recording_provenance_to_child_run(tmp_pat
     assert metadata["run_id"] == "child"
     assert metadata["artifact"] == str(tmp_path / "runs" / "child" / "execution" / "browser-recording.mp4")
     assert metadata["sha256"] != "stale"
+    trace = json.loads((tmp_path / "runs" / "child" / "execution" / "trace.json").read_text())
+    assert trace["run_id"] == "child"
 
 
 def test_manifest_excludes_mutable_run_status_checkpoint(tmp_path):
