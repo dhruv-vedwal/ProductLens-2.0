@@ -952,6 +952,28 @@ class PlaywrightAdapter:
                                     (e.isContentEditable || ['input','textarea'].includes(e.tagName.toLowerCase()) ||
                                     e.getAttribute('role') === 'textbox'); }"""
                                 )
+                            if not focus_before and operation.value.get("placement_mode") == "text":
+                                # Canvas editors frequently keep a transient
+                                # textarea/contenteditable outside the drawing
+                                # surface. Discover it by semantics rather
+                                # than a product selector and focus the first
+                                # visible editor created by the placement.
+                                editors = self.page.locator(
+                                    "textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible"
+                                )
+                                for index in range(await editors.count()):
+                                    editor = editors.nth(index)
+                                    try:
+                                        await editor.focus()
+                                        focus_before = await self.page.evaluate(
+                                            """() => { const e=document.activeElement; return e &&
+                                            (e.isContentEditable || ['input','textarea'].includes(e.tagName.toLowerCase()) ||
+                                            e.getAttribute('role') === 'textbox'); }"""
+                                        )
+                                        if focus_before:
+                                            break
+                                    except PlaywrightError:
+                                        continue
                     except (PlaywrightError, GroundingError, ValidationError):
                         focus_before = None
                 if not focus_before:
