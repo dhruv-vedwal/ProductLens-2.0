@@ -917,8 +917,8 @@ def build_page_complete_proposal(
                     ]
                 # Do not synthesize text labels or connector paths from the
                 # wording of the objective.  A fixed grid of normalized points
-                # is not evidence of canvas objects and caused Excalidraw runs
-                # to report successful arrows/labels on an empty canvas.  Text
+                # is not evidence of canvas objects and can report successful
+                # arrows/labels on an empty canvas.  Text
                 # placement and connectors are planned only after exploration
                 # observes concrete object geometry/state and records it as a
                 # capability.  Until then, retain the reversible stroke above
