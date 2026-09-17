@@ -126,15 +126,26 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict[str, Any]:
             ):
                 covered.append(outcome)
                 continue
-        if (
-            "visible content established, explored, explained, demonstrated, and verified"
-            in outcome.lower()
-            and outcome_index < len(page_contracts)
-            and page_contracts[outcome_index]
-            and all(
-                step.operation.id in successful_operation_ids
-                for step in page_contracts[outcome_index]
-            )
+        if "visible content established, explored, explained, demonstrated, and verified" in outcome.lower() and any(
+            # A page-level editorial outcome can follow several concrete
+            # mutation outcomes (labels, rows, created records, etc.). It is
+            # therefore not positional in ``expected_outcomes``. Match the
+            # contract by evidence/page coverage rather than assuming the
+            # outcome index is the page index.
+            contract_steps
+            and all(step.operation.id in successful_operation_ids for step in contract_steps)
+            and {
+                phase
+                for phase in ("establish", "explore", "explain", "demonstrate", "verify")
+                if phase in outcome.casefold()
+            }
+            <= {
+                phase
+                for step in contract_steps
+                for phase in ([step.operation.story_phase] if step.operation.story_phase else [])
+                + list(step.operation.page_contract_phases)
+            }
+            for contract_steps in page_contracts
         ):
             covered.append(outcome)
             continue

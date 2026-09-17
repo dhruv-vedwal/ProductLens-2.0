@@ -99,6 +99,64 @@ def test_coverage_proves_page_complete_outcome_from_verified_phase_operations():
     assert report["hard_failures"] == []
 
 
+def test_page_contract_outcome_is_not_positional_after_concrete_outcomes():
+    phases = ["establish", "explore", "explain", "demonstrate", "verify"]
+    steps = [
+        WorkflowStep(
+            id=f"step-{phase}",
+            intent=phase,
+            page_phase=phase,
+            operation=SemanticOperation(
+                id=f"page-{phase}",
+                kind=OperationKind.VERIFY_STATE,
+                intent=phase,
+                story_phase=phase,
+                page_contract_phases=phases,
+                page_url="https://demo.test/",
+            ),
+        )
+        for phase in phases
+    ]
+    plan = DemoPlan.model_construct(
+        objective="Draw a diagram",
+        narrative_goal="Demonstrate the diagram",
+        audience="tester",
+        target_duration_seconds=60,
+        selected_workflow="diagram",
+        workflow_steps=steps,
+        expected_outcomes=[
+            "visible label: client",
+            "visible connector: client -> service",
+            "Diagram: visible content established, explored, explained, demonstrated, and verified",
+        ],
+        viewport_strategy="native",
+        stop_conditions=["done"],
+    )
+    trace = DemoTrace(
+        run_id="coverage-non-positional",
+        objective="Draw a diagram",
+        started_at=datetime.now(UTC),
+        events=[
+            InteractionEvent(
+                operation_id=step.operation.id,
+                kind=OperationKind.VERIFY_STATE,
+                intent=step.intent,
+                before={},
+                after={},
+                page_url="https://demo.test/",
+                success=True,
+                duration_ms=1,
+            )
+            for step in steps
+        ],
+    )
+    report = inspect_coverage(plan, trace)
+    assert report["covered_outcomes"][-1].startswith("Diagram:")
+    assert "Diagram: visible content established, explored, explained, demonstrated, and verified" not in report[
+        "missing_outcomes"
+    ]
+
+
 def test_coverage_accepts_declared_sparse_page_contract_phases_without_exact_copy():
     operation = SemanticOperation(
         id="opening",
