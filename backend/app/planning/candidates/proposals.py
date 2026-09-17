@@ -678,7 +678,164 @@ def build_page_complete_proposal(
                     text=surface.text or surface.name,
                     source_url=surface.source_url,
                 )
-                steps.append(
+                # When the objective names the artifacts to build (for
+                # example “labeled components … connected with arrows”),
+                # compile those nouns into a generic canvas composition.  The
+                # labels come from the request and the surface/tool targets
+                # come from current evidence; no application or route is
+                # encoded here.  Relative points are resolved against the
+                # observed canvas at execution time, so responsive layouts do
+                # not invalidate the gesture.
+                label_match = re.search(
+                    r"\b(?:components?|nodes?|boxes?|items?)\s+(?:for|including|named|:)?\s*(?P<labels>.+?)(?=\s*(?:,?\s*(?:connect|link|join)\b)|[.;]|$)",
+                    objective_text,
+                    flags=re.IGNORECASE,
+                )
+                labels: list[str] = []
+                if label_match:
+                    raw_labels = re.sub(
+                        r"^(?:such as|including)\s+", "", label_match.group("labels"), flags=re.IGNORECASE
+                    )
+                    raw_labels = re.sub(r"\band\b", ",", raw_labels, flags=re.IGNORECASE)
+                    labels = [
+                        " ".join(item.split())[:80]
+                        for item in raw_labels.split(",")
+                        if 1 <= len(item.split()) <= 6 and item.strip()
+                    ][:8]
+                text_tool = next(
+                    (candidate for candidate in tool_candidates if _tokens(candidate.name) & {"text", "label"}),
+                    None,
+                )
+                connector_tool = next(
+                    (
+                        candidate
+                        for candidate in tool_candidates
+                        if _tokens(candidate.name) & {"arrow", "connector", "line", "link"}
+                    ),
+                    None,
+                )
+                if labels and text_tool:
+                    # A bounded, readable grid is a layout algorithm, not a
+                    # product recipe. It gives every requested label a
+                    # distinct drop point while leaving generous canvas space.
+                    positions = [
+                        (0.22, 0.28), (0.52, 0.28), (0.22, 0.56),
+                        (0.52, 0.56), (0.78, 0.28), (0.78, 0.56),
+                        (0.36, 0.78), (0.64, 0.78),
+                    ]
+                    for index, label in enumerate(labels):
+                        x, y = positions[index]
+                        text_target = Target(
+                            name=text_tool.name,
+                            selector=text_tool.selector,
+                            text=text_tool.text or text_tool.name,
+                            source_url=text_tool.source_url,
+                        )
+                        steps.append(
+                            SemanticOperation(
+                                kind=OperationKind.CLICK,
+                                intent=f"Activate the observed {text_tool.name} tool to place the requested label {label}",
+                                target=text_target,
+                                postconditions=[Postcondition(kind="visible", expected=text_tool.name, target=text_target)],
+                                critical=True,
+                                story_phase="demonstrate",
+                                page_url=page_url,
+                                page_contract_phases=["explain", "demonstrate"],
+                                evidence_refs=[*evidence, f"element:{text_tool.name}", f"objective-label:{label}"],
+                            )
+                        )
+                        steps.append(
+                            SemanticOperation(
+                                kind=OperationKind.POINTER_SEQUENCE,
+                                intent=f"Place the requested {label} label on the observed canvas",
+                                target=destination_target,
+                                value={
+                                    "pattern": "text_placement",
+                                    "relative_points": [{"x": x, "y": y}, {"x": x, "y": y}],
+                                    "duration_ms": 420,
+                                    "press": True,
+                                    "release": True,
+                                },
+                                postconditions=[Postcondition(kind="changed", expected=True, target=destination_target)],
+                                critical=True,
+                                story_phase="demonstrate",
+                                page_url=page_url,
+                                page_contract_phases=["demonstrate", "verify"],
+                                evidence_refs=[*evidence, f"element:{surface.name}", f"objective-label:{label}"],
+                                required_content_groups=[label],
+                                covered_content_groups=[label],
+                            )
+                        )
+                        steps.append(
+                            SemanticOperation(
+                                kind=OperationKind.KEY_PRESS,
+                                intent=f"Type the requested {label} label into the focused canvas editor",
+                                value={"text": label},
+                                postconditions=[Postcondition(kind="changed", expected=True, target=destination_target)],
+                                critical=True,
+                                story_phase="demonstrate",
+                                page_url=page_url,
+                                page_contract_phases=["demonstrate", "verify"],
+                                evidence_refs=[*evidence, f"objective-label:{label}"],
+                                required_content_groups=[label],
+                                covered_content_groups=[label],
+                            )
+                        )
+                    if connector_tool and len(labels) > 1:
+                        connector_target = Target(
+                            name=connector_tool.name,
+                            selector=connector_tool.selector,
+                            text=connector_tool.text or connector_tool.name,
+                            source_url=connector_tool.source_url,
+                        )
+                        steps.append(
+                            SemanticOperation(
+                                kind=OperationKind.CLICK,
+                                intent=f"Activate the observed {connector_tool.name} tool to connect the requested components",
+                                target=connector_target,
+                                postconditions=[Postcondition(kind="visible", expected=connector_tool.name, target=connector_target)],
+                                critical=True,
+                                story_phase="demonstrate",
+                                page_url=page_url,
+                                page_contract_phases=["explain", "demonstrate"],
+                                evidence_refs=[*evidence, f"element:{connector_tool.name}"],
+                            )
+                        )
+                        for index in range(len(labels) - 1):
+                            start = positions[index]
+                            end = positions[index + 1]
+                            steps.append(
+                                SemanticOperation(
+                                    kind=OperationKind.POINTER_SEQUENCE,
+                                    intent=f"Connect the requested {labels[index]} and {labels[index + 1]} components with an observed connector",
+                                    target=destination_target,
+                                    value={
+                                        "pattern": "connector_segment",
+                                        "relative_points": [
+                                            {"x": start[0], "y": start[1]},
+                                            {"x": end[0], "y": end[1]},
+                                        ],
+                                        "duration_ms": 700,
+                                        "press": True,
+                                        "release": True,
+                                    },
+                                    postconditions=[Postcondition(kind="changed", expected=True, target=destination_target)],
+                                    critical=True,
+                                    story_phase="demonstrate",
+                                    page_url=page_url,
+                                    page_contract_phases=["demonstrate", "verify"],
+                                    evidence_refs=[*evidence, f"element:{surface.name}", f"connector:{labels[index]}->{labels[index + 1]}"],
+                                    required_content_groups=[f"{labels[index]}->{labels[index + 1]}"],
+                                    covered_content_groups=[f"{labels[index]}->{labels[index + 1]}"],
+                                )
+                            )
+                    outcomes.extend([f"visible label: {label}" for label in labels])
+                    outcomes.extend(
+                        f"visible connector: {labels[index]} -> {labels[index + 1]}"
+                        for index in range(len(labels) - 1)
+                    )
+                else:
+                    steps.append(
                     SemanticOperation(
                         kind=OperationKind.CLICK,
                         intent=f"Activate the observed {tool.name} drawing tool",

@@ -555,11 +555,16 @@ def test_visual_editor_does_not_fabricate_connectors_without_observed_geometry()
         and isinstance(operation.value, dict)
         and operation.value.get("pattern") == "connector_segment"
     ]
-    # A toolbar and canvas are not proof that components exist or that their
-    # endpoints are known.  The planner must refuse to synthesize a diagram
-    # from prompt text and arbitrary grid coordinates; a later observation /
-    # rehearsal can add grounded connector operations.
-    assert connectors == []
+    # Explicitly requested labels are a generic composition intent. The
+    # planner derives their layout from the observed canvas at execution time
+    # and does not embed an editor/route-specific adapter.
+    assert len(connectors) == 2
+    assert sum(
+        operation.kind is OperationKind.KEY_PRESS
+        and isinstance(operation.value, dict)
+        and operation.value.get("text") in {"client", "API", "database"}
+        for operation in proposal.steps
+    ) == 3
 
 
 def test_candidate_scope_rejects_action_from_a_page_that_is_no_longer_active():

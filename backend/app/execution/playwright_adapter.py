@@ -613,7 +613,7 @@ class PlaywrightAdapter:
             surface = None
             pattern = str(payload.get("pattern", ""))
             if (
-                pattern in {"short_reversible_stroke", "connector_segment"}
+                pattern in {"short_reversible_stroke", "connector_segment", "text_placement"}
                 and operation.target is not None
             ):
                 surface, _ = await self.grounded_locator(operation.target)
