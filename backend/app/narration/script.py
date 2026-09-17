@@ -121,10 +121,51 @@ def script_from_trace(
 def captions_from_duration(
     script: list[dict[str, object]], duration_seconds: float
 ) -> list[dict[str, object]]:
-    """Spread evidence-backed captions across either narration or visible screen time."""
+    """Allocate evidence-backed captions by reading demand, not a flat slice.
+
+    Short action captions should hand off sooner than a long opening sentence.
+    A flat equal split made every scene inherit the longest line's dwell and
+    inflated real browser edits, especially for interaction-heavy products.
+    The requested duration remains the total envelope; each line receives its
+    own minimum readable dwell and any remaining time is distributed evenly.
+    """
     if not script:
         return []
-    step = duration_seconds / len(script)
+    requirements = [
+        max(2.4, len(str(item.get("text", "")).split()) / 3.2 + 0.25)
+        for item in script
+    ]
+    target = max(float(duration_seconds), sum(requirements))
+    extra = (target - sum(requirements)) / len(requirements)
+    cursor = 0.0
+    captions: list[dict[str, object]] = []
+    for index, (item, minimum) in enumerate(zip(script, requirements, strict=True)):
+        end = target if index == len(script) - 1 else cursor + minimum + extra
+        captions.append(
+            {
+                "start": round(cursor, 3),
+                "end": round(end, 3),
+                "text": item["text"],
+                "scene_id": item["event_id"],
+                **({"opening": True} if item.get("opening", False) else {}),
+            }
+        )
+        cursor = end
+    return captions
+
+
+def captions_from_audio_duration(
+    script: list[dict[str, object]], duration_seconds: float
+) -> list[dict[str, object]]:
+    """Keep a measured audio envelope exact for compatibility callers.
+
+    Real TTS uses measured segment durations below; this helper is retained for
+    callers that only know the complete audio length and therefore must not
+    silently extend it to satisfy a silent-reading floor.
+    """
+    if not script:
+        return []
+    step = float(duration_seconds) / len(script)
     return [
         {
             "start": round(index * step, 3),
@@ -135,13 +176,6 @@ def captions_from_duration(
         }
         for index, item in enumerate(script)
     ]
-
-
-def captions_from_audio_duration(
-    script: list[dict[str, object]], duration_seconds: float
-) -> list[dict[str, object]]:
-    """Compatibility alias for callers with a synthesized narration track."""
-    return captions_from_duration(script, duration_seconds)
 
 
 def recommended_caption_duration(
@@ -170,10 +204,10 @@ def recommended_caption_duration(
         )
         for item in script
     ]
-    # ``captions_from_duration`` gives every scene an equal slice.  Therefore
-    # the total must be based on the longest line, not the sum of independent
-    # requirements, otherwise a single long sentence is still under-dwelled.
-    scene_floor = max(per_scene_requirements) * len(script)
+    # ``captions_from_duration`` allocates each scene independently, so the
+    # total floor is the sum of the actual reading requirements rather than the
+    # longest line repeated across every scene.
+    scene_floor = sum(per_scene_requirements)
     transition_seconds = max(0.0, (len(script) - 1) * 0.35)
     return round(max(3.0, scene_floor + transition_seconds), 2)
 

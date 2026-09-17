@@ -507,12 +507,47 @@ def _editorial_cut_windows(
             # keeps typing/click causality intact. Short/local typing remains
             # one contiguous interval so values are visibly entered.
             remote_gap = reveal - action
-            provider_latency = event.duration_ms / 1000.0 > 20.0 and remote_gap > 3.8
+            provider_latency = event.duration_ms / 1000.0 > 20.0 and (
+                remote_gap > 3.8
+                or event.kind
+                in {
+                    OperationKind.POINTER_SEQUENCE,
+                    OperationKind.KEY_PRESS,
+                    OperationKind.CLICK,
+                    OperationKind.OPEN_MODAL,
+                    OperationKind.CLOSE_MODAL,
+                }
+            )
             if provider_latency:
+                # Browserbase/Stagehand latency is not browser footage. Keep
+                # the native gesture itself and a short causal lead-in, then
+                # jump to the measured visible result. A blanket 2.5-second
+                # action window made long canvas tours exceed the approved
+                # editorial envelope even though the pointer/key gesture was
+                # sub-second. Form typing retains the larger default so the
+                # entered value remains readable.
+                action_window = 2.5
+                if event.kind is OperationKind.POINTER_SEQUENCE:
+                    gesture = event.after.get("gesture") if isinstance(event.after, dict) else None
+                    gesture_ms = gesture.get("duration_ms") if isinstance(gesture, dict) else None
+                    action_window = max(
+                        0.85,
+                        min(1.8, float(gesture_ms) / 1000.0 + 0.55)
+                        if isinstance(gesture_ms, (int, float))
+                        else 1.25,
+                    )
+                elif event.kind is OperationKind.KEY_PRESS:
+                    action_window = 1.25
+                elif event.kind in {
+                    OperationKind.CLICK,
+                    OperationKind.OPEN_MODAL,
+                    OperationKind.CLOSE_MODAL,
+                }:
+                    action_window = 1.45
                 windows.append(
                     (
                         max(0.0, action - (0.35 if compact_tour else 0.6)),
-                        min(source_seconds, action + 2.5),
+                        min(source_seconds, action + action_window),
                     )
                 )
                 windows.append(

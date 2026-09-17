@@ -92,7 +92,7 @@ def test_script_adapts_editorial_lens_to_audience():
     )
 
 
-def test_recommended_caption_duration_covers_longest_equal_slice():
+def test_recommended_caption_duration_covers_each_scene_reading_requirement():
     script = [
         {"event_id": "one", "text": "A short line."},
         {
@@ -102,5 +102,8 @@ def test_recommended_caption_duration_covers_longest_equal_slice():
     ]
     duration = recommended_caption_duration(script)
     captions = captions_from_duration(script, duration)
-    longest = max(len(item["text"].split()) / 3.2 + 0.25 for item in script)
-    assert all(item["end"] - item["start"] + 0.02 >= longest for item in captions)
+    requirements = [max(2.4, len(item["text"].split()) / 3.2 + 0.25) for item in script]
+    assert all(
+        caption["end"] - caption["start"] + 0.02 >= requirement
+        for caption, requirement in zip(captions, requirements, strict=True)
+    )

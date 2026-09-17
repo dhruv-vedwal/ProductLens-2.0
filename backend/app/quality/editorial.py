@@ -592,6 +592,37 @@ def inspect_editorial(
                 if operation and operation.target
                 else set()
             )
+            # In visual editors the DOM target is commonly the canvas shell,
+            # while the operation intent carries the semantic label being
+            # placed or connected. Use that grounded intent for the target
+            # evidence check instead of rejecting a correct caption because it
+            # does not repeat the shell's product name.
+            if operation is not None and operation.kind in {
+                OperationKind.KEY_PRESS,
+                OperationKind.POINTER_SEQUENCE,
+            }:
+                semantic_match = re.search(
+                    r"(?:requested|observed)\s+(.+?)\s+label\b",
+                    operation.intent,
+                    flags=re.IGNORECASE,
+                )
+                if semantic_match:
+                    target_words = set(
+                        re.findall(r"[a-z0-9]{4,}", semantic_match.group(1).lower())
+                    ) | {"label"}
+                else:
+                    connector_match = re.search(
+                        r"connect\s+(?:the\s+)?(?:requested|observed)?\s*(.+?)\s+and\s+(.+?)\s+components",
+                        operation.intent,
+                        flags=re.IGNORECASE,
+                    )
+                    if connector_match:
+                        target_words = set(
+                            re.findall(
+                                r"[a-z0-9]{4,}",
+                                f"{connector_match.group(1)} {connector_match.group(2)}",
+                            )
+                        ) | {"connector"}
             fact_words: set[str] = set()
             for page in context.page_knowledge:
                 if f"page:{page.url}" not in scene.evidence:
@@ -613,8 +644,14 @@ def inspect_editorial(
             target_source_words.update(
                 word
                 for evidence in scene.evidence
-                if evidence.startswith("element:")
+                if evidence.startswith(("element:", "objective-label:"))
                 for word in re.findall(r"[a-z0-9]{3,}", evidence.split(":", 1)[1].lower())
+            )
+            semantic_target_explicit = bool(
+                operation is not None
+                and operation.kind
+                in {OperationKind.KEY_PRESS, OperationKind.POINTER_SEQUENCE}
+                and len(target_words & caption_words) >= 2
             )
             if (
                 target_words
@@ -622,6 +659,7 @@ def inspect_editorial(
                 and operation.kind
                 not in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}
                 and not (target_words & target_source_words)
+                and not semantic_target_explicit
             ):
                 failures.append("SCENE_TARGET_EVIDENCE_MISMATCH")
             # A scene can use concise editorial connective language, but its
@@ -649,6 +687,7 @@ def inspect_editorial(
                 and len(target_source_words) >= 3
                 and len(caption_words & target_source_words) < 2
                 and not target_is_explicit
+                and not semantic_target_explicit
             ):
                 failures.append("UNSUPPORTED_OR_WRONG_SCENE_CAPTION")
         scenes.append(
@@ -728,6 +767,26 @@ def inspect_editorial(
             "keeping",
             "details",
             "move",
+            # Visual-editor action scaffolding is intentionally shared across
+            # adjacent scenes; the semantic label/endpoint is the meaningful
+            # payload used to distinguish them.
+            "select",
+            "selected",
+            "text",
+            "tool",
+            "prepare",
+            "prepares",
+            "component",
+            "label",
+            "placing",
+            "place",
+            "canvas",
+            "draw",
+            "draws",
+            "arrow",
+            "data",
+            "flow",
+            "explicit",
         }
         words = {w for w in re.findall(r"[a-z0-9]{4,}", text.lower()) if w not in stop}
         for other in narrated_texts[:index]:

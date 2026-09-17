@@ -843,7 +843,7 @@ def _viewer_ready(text: str, title: str = "") -> bool:
     # ``Here, Product Sections Controls Workspace.``; it can overlap evidence
     # yet still says nothing about what the viewer should understand.
     if not normalized.casefold().startswith("welcome to ") and not re.search(
-        r"\b(?:is|are|was|were|has|have|lets|helps|shows|keeps|brings|groups|gathers|contains|connects|supports|organizes|tracks|lists|offers|provides|explains|uses|creates|draws|draw|moves|opens|captures|gives|makes|enables|demonstrates|appears|remains|becomes|causes|caused|prevents|reduces|handles|processes|integrates|improves|requires|highlights|presents|introduces|focuses|describes|details|documents|covers|summarizes|summarises|includes|preserves|records|selects|adds|completes|can|will)\b",
+        r"\b(?:is|are|was|were|has|have|lets|helps|shows|keeps|brings|groups|gathers|contains|connects|supports|organizes|tracks|lists|offers|provides|explains|uses|creates|draws|draw|moves|opens|captures|gives|makes|enables|demonstrates|appears|remains|becomes|causes|caused|prevents|reduces|handles|processes|integrates|improves|requires|highlights|presents|introduces|focuses|describes|details|documents|covers|summarizes|summarises|includes|preserves|records|selects|select|adds|completes|can|will|names|prepares|places|types|enters|sketches|connects)\b",
         normalized,
         flags=re.IGNORECASE,
     ):

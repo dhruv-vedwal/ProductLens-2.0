@@ -64,6 +64,7 @@ backend/video/remotion/tsconfig.tsbuildinfo
 
 # Logs, temporary files, and editor/OS metadata
 **/*.log
+**/*.log.*
 **/*.tmp
 **/*.temp
 .DS_Store

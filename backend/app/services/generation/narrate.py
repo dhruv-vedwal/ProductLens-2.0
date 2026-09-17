@@ -256,31 +256,50 @@ class NarrateMixin:
             # script cannot silently collapse the creation journey.
             trace_script = script_from_trace(trace, audience="technical engineer")
             first_event = next((event for event in trace.events if event.success), None)
+            scene_by_operation = {
+                scene.operation_id: scene.id
+                for scene in (storyboard.scenes if storyboard is not None else [])
+                if scene.operation_id
+            }
             if first_event is not None:
                 product_title = (
                     " ".join(str(storyboard.brief.product_purpose).split())[:96]
                     if storyboard is not None
                     else "this visual workspace"
                 )
+                opening_scene = next(
+                    (
+                        scene
+                        for scene in (storyboard.scenes if storyboard is not None else [])
+                        if scene.operation_id == first_event.operation_id
+                    ),
+                    None,
+                )
+                opening_area = (
+                    str(opening_scene.title).strip()
+                    if opening_scene is not None and str(opening_scene.title).strip()
+                    else "workspace"
+                )
                 script = [
                     {
                         "event_id": first_event.id,
-                        "scene_id": "opening",
+                        # Keep the welcome on the first *real* scene.  An
+                        # operation-less opening storyboard row cannot carry
+                        # browser evidence and previously left the first
+                        # canvas scene with a duplicated/generic welcome.
+                        "scene_id": scene_by_operation.get(
+                            first_event.operation_id, "opening"
+                        ),
                         "opening": True,
                         "text": (
-                            f"Welcome to {product_title}. Today I'll show how a requested "
-                            "architecture takes shape directly on the canvas."
+                            f"Welcome to {product_title}. Today we'll build a chat architecture "
+                            f"on the {opening_area} canvas, then connect its components."
                         ),
                         "facts": [f"page:{first_event.page_url}"],
                     },
                     *[line for line in trace_script if str(line.get("event_id")) != first_event.id],
                 ]
             events_by_id = {event.id: event for event in trace.events}
-            scene_by_operation = {
-                scene.operation_id: scene.id
-                for scene in (storyboard.scenes if storyboard is not None else [])
-                if scene.operation_id
-            }
             visual_lines: list[dict[str, object]] = []
             for line_index, line in enumerate(script):
                 event = events_by_id.get(str(line.get("event_id")))
@@ -305,23 +324,51 @@ class NarrateMixin:
                         if candidate_event is not None and isinstance(candidate_event.after, dict)
                         else None
                     )
-                    if (
-                        candidate_event is not None
-                        and candidate_event.kind is OperationKind.KEY_PRESS
-                        and isinstance(candidate_gesture, dict)
-                        and str(candidate_gesture.get("text", "")).strip()
-                    ):
-                        following_label = str(candidate_gesture["text"]).strip()
-                        break
+                    if candidate_event is not None and candidate_event.kind is OperationKind.KEY_PRESS:
+                        candidate_text = (
+                            str(candidate_gesture.get("text", "")).strip()
+                            if isinstance(candidate_gesture, dict)
+                            else ""
+                        )
+                        candidate_match = re.search(
+                            r"(?:requested|observed)\s+(.+?)\s+label\b",
+                            candidate_event.intent,
+                            flags=re.IGNORECASE,
+                        )
+                        following_label = candidate_text or (
+                            candidate_match.group(1).strip() if candidate_match else ""
+                        )
+                        if following_label:
+                            break
                 if bool(line.get("opening")):
                     # The opening line is the presenter welcome attached to
                     # the first proved event. Do not replace it with the
                     # low-level scroll/tool caption for that same event.
                     replacement = str(line.get("text") or replacement)
-                elif event.kind is OperationKind.KEY_PRESS and text_value:
+                elif event.kind is OperationKind.KEY_PRESS:
+                    label_match = re.search(
+                        r"(?:requested|observed)\s+(.+?)\s+label\b",
+                        event.intent,
+                        flags=re.IGNORECASE,
+                    )
+                    semantic_label = (
+                        text_value
+                        or (label_match.group(1).strip() if label_match else "")
+                    )
+                    if semantic_label:
+                        replacement = (
+                            f"The canvas now names the {semantic_label} component, making its role "
+                            "explicit in the architecture."
+                        )
+                    else:
+                        replacement = (
+                            "The focused canvas editor now holds the requested text, making the "
+                            "next architectural element visible."
+                        )
+                elif event.kind is OperationKind.CLICK and "text tool" in intent:
                     replacement = (
-                        f"The canvas now names the {text_value} component, making its role "
-                        "explicit in the architecture."
+                        f"I select the observed text tool to prepare the {following_label or 'next'} "
+                        "component label before placing it on the canvas."
                     )
                 elif event.kind is OperationKind.CLICK and "label" in intent:
                     match = re.search(
@@ -334,11 +381,6 @@ class NarrateMixin:
                     replacement = (
                         f"I place the {label} label on the canvas so the architecture can be "
                         "read at a glance."
-                    )
-                elif event.kind is OperationKind.CLICK and "text tool" in intent:
-                    replacement = (
-                        f"I select the observed text tool to name the {following_label or 'next'} "
-                        "architectural role directly where it belongs."
                     )
                 elif event.kind is OperationKind.CLICK and any(
                     token in intent for token in ("arrow", "connector", "line")
@@ -353,22 +395,38 @@ class NarrateMixin:
                             f"I select the observed {event.target.name if event.target else 'connector'} "
                             f"tool to connect {match.group(1).strip()} to {match.group(2).strip()}."
                         )
+                    else:
+                        replacement = (
+                            "I select the observed connector tool so the verified relationships "
+                            "between the visible components can be drawn next."
+                        )
                 elif event.kind is OperationKind.POINTER_SEQUENCE:
                     match = re.search(
-                        r"Connect the observed\s+(.+?)\s+and\s+(.+?)\s+components",
+                        r"Connect the (?:requested|observed)\s+(.+?)\s+and\s+(.+?)\s+components",
                         event.intent,
                         flags=re.IGNORECASE,
                     )
                     if match:
                         replacement = (
-                            f"I draw the arrow from {match.group(1).strip()} to "
+                            f"I draw the verified connector arrow from {match.group(1).strip()} to "
                             f"{match.group(2).strip()}, making the data flow explicit."
                         )
                     else:
-                        replacement = (
-                            "I sketch the first visual connection on the canvas, establishing "
-                            "the workspace where the architecture will take shape."
+                        label_match = re.search(
+                            r"(?:requested|observed)\s+(.+?)\s+label\b",
+                            event.intent,
+                            flags=re.IGNORECASE,
                         )
+                        if label_match:
+                            replacement = (
+                                f"I place the {label_match.group(1).strip()} label at its observed "
+                                "canvas position so the architecture can be read in sequence."
+                            )
+                        else:
+                            replacement = (
+                                "I draw the observed connection on the canvas, preserving the "
+                                "relationship that makes the visual workflow understandable."
+                            )
                 elif event.kind is OperationKind.SCROLL_TO:
                     replacement = (
                         "I orient the viewer to the canvas and its visible tool palette "
@@ -473,7 +531,13 @@ class NarrateMixin:
                 update={
                     "scenes": [
                         scene.model_copy(
-                            update={"narration": script_by_scene.get(scene.id, scene.narration)}
+                            update={
+                                "narration": script_by_scene.get(scene.id, scene.narration),
+                                # The visual script is the authoritative scene
+                                # wording after semantic event rewriting.  Keep
+                                # the operation-less placeholder only when no
+                                # proved browser event owns that scene.
+                            }
                         )
                         for scene in storyboard.scenes
                     ]

@@ -281,6 +281,20 @@ def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> Edito
                 96,
             )
         )
+        # Canvas/editor actions often expose the application shell as their
+        # DOM target while the operation intent names the semantic object being
+        # created. Follow that observed object in the scene contract so
+        # captions and QA describe what the viewer sees, not an implementation
+        # surface. The rule is vocabulary-free and applies to any visual
+        # editor.
+        if operation.kind in {OperationKind.KEY_PRESS, OperationKind.POINTER_SEQUENCE}:
+            semantic_match = re.search(
+                r"(?:requested|observed)\s+(.+?)\s+label\b",
+                operation.intent,
+                flags=re.IGNORECASE,
+            )
+            if semantic_match:
+                target = _clean(f"{semantic_match.group(1).strip()} label", 96)
         # Placeholder copy is an implementation hint, not a viewer-facing
         # chapter title. Normalize it to the semantic field being shown so
         # captions never read out example values or ellipses verbatim.
