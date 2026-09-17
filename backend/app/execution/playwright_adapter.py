@@ -792,6 +792,13 @@ class PlaywrightAdapter:
                     await self.page.wait_for_timeout(int(pause_ms))
             if pressed or bool(payload.get("release", False)):
                 await self.page.mouse.up(button=button)
+            if pattern == "text_placement":
+                # Canvas editors often treat toolbar-selected text placement
+                # as a click gesture rather than a zero-length drag. Keep the
+                # observed path for the trace, then issue the equivalent native
+                # click at that same grounded point to open the editor.
+                await self.page.mouse.click(float(first["x"]), float(first["y"]), button=button)
+                await self.page.wait_for_timeout(180)
             changed = None
             after_structure = None
             if (
@@ -900,6 +907,32 @@ class PlaywrightAdapter:
                       } : null;
                     }"""
                 )
+                if not focus_before and isinstance(surface_target, dict):
+                    # Some editors only create their contenteditable after a
+                    # second native click on the visible drawing surface.
+                    # Re-ground that surface and retry the same semantic
+                    # placement before declaring the interaction unsupported.
+                    try:
+                        surface, _ = await self.grounded_locator(
+                            Target.model_validate(surface_target)
+                        )
+                        box = await surface.bounding_box()
+                        if box:
+                            placement = operation.value.get("placement")
+                            px = float(placement.get("x", 0.5)) if isinstance(placement, dict) else 0.5
+                            py = float(placement.get("y", 0.5)) if isinstance(placement, dict) else 0.5
+                            await self.page.mouse.click(
+                                float(box["x"]) + float(box["width"]) * px,
+                                float(box["y"]) + float(box["height"]) * py,
+                            )
+                            await self.page.wait_for_timeout(180)
+                            focus_before = await self.page.evaluate(
+                                """() => { const e=document.activeElement; return e &&
+                                (e.isContentEditable || ['input','textarea'].includes(e.tagName.toLowerCase()) ||
+                                e.getAttribute('role') === 'textbox'); }"""
+                            )
+                    except (PlaywrightError, GroundingError, ValidationError):
+                        focus_before = None
                 if not focus_before:
                     raise GroundingError("Keyboard text input requires a focused editable surface")
                 await self.page.keyboard.type(text, delay=70)

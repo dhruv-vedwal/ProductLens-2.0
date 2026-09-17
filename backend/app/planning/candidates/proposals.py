@@ -770,7 +770,11 @@ def build_page_complete_proposal(
                             SemanticOperation(
                                 kind=OperationKind.KEY_PRESS,
                                 intent=f"Type the requested {label} label into the focused canvas editor",
-                                value={"text": label, "surface_target": destination_target.model_dump(mode="json")},
+                                value={
+                                    "text": label,
+                                    "surface_target": destination_target.model_dump(mode="json"),
+                                    "placement": {"x": x, "y": y},
+                                },
                                 postconditions=[Postcondition(kind="surface_changed", expected=True, target=destination_target)],
                                 critical=True,
                                 story_phase="demonstrate",
