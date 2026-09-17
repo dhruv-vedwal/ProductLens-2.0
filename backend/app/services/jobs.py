@@ -391,11 +391,19 @@ class DemoJobService:
         self.repository.ensure_stage_jobs(run_id)
         self.repository.update_stage_job(run_id, stage, status="RUNNING")
         self.repository.update_run(run_id, stage=lifecycle, status="RUNNING")
+        # Production follows the same configured cloud browser as discovery
+        # unless an operator explicitly overrides it.  Keep the diagnostic
+        # truthful as well as the executor (which already uses this fallback),
+        # otherwise operators incorrectly conclude that a local browser was
+        # used for the capture.
+        effective_cloud_production = bool(
+            payload.get("cloud_production", payload.get("cloud_discovery", False))
+        )
         logger.info(
             "demo_job_stage_started",
             stage=stage,
             cloud_discovery=bool(payload.get("cloud_discovery", False)),
-            cloud_production=bool(payload.get("cloud_production", False)),
+            cloud_production=effective_cloud_production,
         )
         if stage == "DISCOVERY":
             cached = self.repository.fresh_knowledge(request["url"])
