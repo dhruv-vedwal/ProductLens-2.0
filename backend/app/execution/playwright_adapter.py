@@ -931,6 +931,27 @@ class PlaywrightAdapter:
                                 (e.isContentEditable || ['input','textarea'].includes(e.tagName.toLowerCase()) ||
                                 e.getAttribute('role') === 'textbox'); }"""
                             )
+                            if (
+                                not focus_before
+                                and operation.value.get("placement_mode") == "text"
+                            ):
+                                # Text-mode editors commonly expose a single
+                                # keyboard affordance when the toolbar click
+                                # is swallowed by a canvas overlay. This is a
+                                # bounded semantic fallback, never used for
+                                # arbitrary keypresses or ordinary pages.
+                                await self.page.keyboard.press("t")
+                                await self.page.wait_for_timeout(120)
+                                await self.page.mouse.click(
+                                    float(box["x"]) + float(box["width"]) * px,
+                                    float(box["y"]) + float(box["height"]) * py,
+                                )
+                                await self.page.wait_for_timeout(180)
+                                focus_before = await self.page.evaluate(
+                                    """() => { const e=document.activeElement; return e &&
+                                    (e.isContentEditable || ['input','textarea'].includes(e.tagName.toLowerCase()) ||
+                                    e.getAttribute('role') === 'textbox'); }"""
+                                )
                     except (PlaywrightError, GroundingError, ValidationError):
                         focus_before = None
                 if not focus_before:

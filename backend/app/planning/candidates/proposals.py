@@ -774,6 +774,7 @@ def build_page_complete_proposal(
                                     "text": label,
                                     "surface_target": destination_target.model_dump(mode="json"),
                                     "placement": {"x": x, "y": y},
+                                    "placement_mode": "text",
                                 },
                                 postconditions=[Postcondition(kind="surface_changed", expected=True, target=destination_target)],
                                 critical=True,
