@@ -191,6 +191,11 @@ class ExecutionEngine:
         self.capture_event_screenshots = capture_event_screenshots
         self.semantic_boundary_observer = semantic_boundary_observer
         self.recovery_budget = RecoveryBudget()
+        # Keep only non-sensitive values entered into the current workflow so
+        # a terminal create/submit can prove that the resulting page actually
+        # represents the record just demonstrated. Credentials and secret-like
+        # fields are never retained here or in the persisted trace.
+        self._non_sensitive_form_values: dict[str, str] = {}
         self.interaction_kernel = InteractionKernel(
             run_id=trace.run_id,
             objective=trace.objective,
@@ -515,6 +520,20 @@ class ExecutionEngine:
                         _, scroll_before = await self.adapter.view_state()
                     action_at = datetime.now(UTC)
                     action_result = await self.adapter.execute(operation)
+                    if operation.kind in {
+                        OperationKind.FILL_TEXT,
+                        OperationKind.FILL_PHONE,
+                        OperationKind.SELECT_OPTION,
+                    }:
+                        target_name = str(operation.target.name if operation.target else "")
+                        value = str(operation.value or "").strip()
+                        sensitive = re.search(
+                            r"(?:password|passcode|secret|token|api[ _-]?key|otp|email)",
+                            target_name,
+                            re.IGNORECASE,
+                        )
+                        if value and not sensitive and len(value) >= 3:
+                            self._non_sensitive_form_values[target_name] = value
                     if (
                         operation.kind is OperationKind.POINTER_SEQUENCE
                         and isinstance(operation.value, dict)
@@ -621,8 +640,32 @@ class ExecutionEngine:
                             # turns a successfully verified outcome into a
                             # ``No deterministic grounding evidence`` failure.
                             if condition.kind == "url":
+                                visible_values: list[str] = []
+                                # A dynamic detail URL is not, by itself, proof
+                                # that the demonstrated form values reached the
+                                # resulting record. Require at least one
+                                # non-sensitive value to be visible after the
+                                # route settles; this catches blank/N-A detail
+                                # pages and prevents a publishable video from
+                                # claiming an unverified create.
+                                if self._non_sensitive_form_values:
+                                    readiness = getattr(self.adapter, "wait_for_page_readiness", None)
+                                    if callable(readiness):
+                                        await readiness(None)
+                                    body_text = await self._active_page().locator("body").inner_text()
+                                    visible_values = [
+                                        value
+                                        for value in self._non_sensitive_form_values.values()
+                                        if value.casefold() in body_text.casefold()
+                                    ]
+                                    if not visible_values:
+                                        raise VerificationError(
+                                            "Created record URL changed, but no demonstrated form value "
+                                            "is visible in the resulting state"
+                                        )
                                 verified_outcome = await self.adapter.snapshot(None)
                                 verified_outcome["expected_url"] = str(condition.expected)
+                                verified_outcome["matched_form_values"] = visible_values
                             else:
                                 snapshot_visible = getattr(self.adapter, "snapshot_visible", None)
                                 verified_outcome = (
