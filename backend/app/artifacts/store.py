@@ -470,3 +470,23 @@ class RunArtifacts:
             elif source.is_file():
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
+
+        # A targeted narration/render/QA retry may reuse an immutable native
+        # recording, but its provenance must be bound to the child run. Keeping
+        # the parent's run ID/path makes the renderer (correctly) reject the
+        # recording as belonging to a different run. Rebind metadata only after
+        # the copy so the source video remains byte-for-byte unchanged.
+        recording_meta = retry / "execution" / "browserbase-recording.json"
+        recording_video = retry / "execution" / "browser-recording.mp4"
+        if recording_meta.is_file() and recording_video.is_file():
+            try:
+                metadata = json.loads(recording_meta.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                metadata = {}
+            if isinstance(metadata, dict):
+                metadata["run_id"] = retry_run_id
+                metadata["artifact"] = str(recording_video)
+                metadata["sha256"] = _sha256_file(recording_video)
+                recording_meta.write_text(
+                    json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )

@@ -122,6 +122,31 @@ def test_render_retry_copies_required_predecessor_evidence_but_not_a_prior_deliv
     assert not (child.root / "final" / "demo.mp4").exists()
 
 
+def test_targeted_retry_rebinds_native_recording_provenance_to_child_run(tmp_path):
+    parent = RunArtifacts(tmp_path, "parent")
+    recording = parent.root / "execution" / "browser-recording.mp4"
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    recording.write_bytes(b"native recording")
+    parent.write_json(
+        "execution/browserbase-recording.json",
+        {
+            "provider": "browserbase",
+            "run_id": "parent",
+            "artifact": str(recording),
+            "sha256": "stale",
+        },
+    )
+
+    RunArtifacts.clone_for_targeted_retry(tmp_path, "parent", "child", start_stage="RENDER")
+
+    metadata = json.loads(
+        (tmp_path / "runs" / "child" / "execution" / "browserbase-recording.json").read_text()
+    )
+    assert metadata["run_id"] == "child"
+    assert metadata["artifact"] == str(tmp_path / "runs" / "child" / "execution" / "browser-recording.mp4")
+    assert metadata["sha256"] != "stale"
+
+
 def test_manifest_excludes_mutable_run_status_checkpoint(tmp_path):
     artifacts = RunArtifacts(tmp_path, "manifest-status")
     artifacts.write_json("objective.json", {"objective": "demo"})
