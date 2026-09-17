@@ -120,6 +120,13 @@ def test_objective_spec_does_not_privilege_a_known_application_label():
     assert "invoice" in objective.must_show
 
 
+def test_action_led_objective_uses_the_product_entity_not_the_verb():
+    objective = _objective_spec(
+        "Demonstrate creating one isolated booking through the visible New Booking workflow"
+    )
+    assert objective.primary_entity == "booking"
+
+
 def test_relationship_graph_grounds_requested_context_to_distinct_pages():
     objective = _objective_spec(
         "Demonstrate invoice approval in the context of invoice configuration"
