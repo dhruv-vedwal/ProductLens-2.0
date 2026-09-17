@@ -499,15 +499,38 @@ def _editorial_cut_windows(
             OperationKind.OPEN_MODAL,
             OperationKind.CLOSE_MODAL,
         }:
-            windows.append(
-                (
-                    max(0.0, action - (0.35 if compact_tour else 0.6)),
-                    min(
-                        source_seconds,
-                        max(reveal, action + event.duration_ms / 1000.0) + post_reveal_hold,
-                    ),
+            # Browser/cloud command latency is sometimes folded into the
+            # operation duration even though no meaningful product footage is
+            # changing during that interval. For genuinely long remote
+            # operations, retain a native-speed action beat and a separate
+            # result/reveal beat; this removes only the proven idle middle and
+            # keeps typing/click causality intact. Short/local typing remains
+            # one contiguous interval so values are visibly entered.
+            remote_gap = reveal - action
+            provider_latency = event.duration_ms / 1000.0 > 20.0 and remote_gap > 3.8
+            if provider_latency:
+                windows.append(
+                    (
+                        max(0.0, action - (0.35 if compact_tour else 0.6)),
+                        min(source_seconds, action + 2.5),
+                    )
                 )
-            )
+                windows.append(
+                    (
+                        max(0.0, reveal - 1.0),
+                        min(source_seconds, reveal + post_reveal_hold),
+                    )
+                )
+            else:
+                windows.append(
+                    (
+                        max(0.0, action - (0.35 if compact_tour else 0.6)),
+                        min(
+                            source_seconds,
+                            max(reveal, action + event.duration_ms / 1000.0) + post_reveal_hold,
+                        ),
+                    )
+                )
         elif reveal - action <= 3.8:
             windows.append(
                 (

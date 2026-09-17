@@ -203,3 +203,34 @@ def test_cloud_scroll_cut_uses_recorded_motion_not_remote_verification_latency()
     # The retained source contains the physical two-second scroll and settle,
     # not the eighteen seconds spent waiting on remote postcondition queries.
     assert windows == [(pytest.approx(4.55), pytest.approx(12.55))]
+
+
+def test_long_remote_interaction_cuts_idle_middle_but_keeps_action_and_reveal():
+    started = datetime.now(UTC)
+    event = InteractionEvent(
+        operation_id="remote-fill",
+        kind=OperationKind.FILL_TEXT,
+        intent="Enter the observed value",
+        action_at=started + timedelta(seconds=20),
+        occurred_at=started + timedelta(seconds=36),
+        before={},
+        after={"value": "grounded value"},
+        success=True,
+        duration_ms=47_000,
+    )
+    trace = DemoTrace(
+        run_id="remote-fill",
+        objective="Demo",
+        started_at=started,
+        recording_started_at=started,
+        events=[event],
+    )
+
+    windows = _editorial_cut_windows(trace, source_seconds=60)
+
+    assert len(windows) == 2
+    # The opening establish beat intentionally joins the nearby action beat.
+    assert windows[0][0] == pytest.approx(14.55)
+    assert windows[0][1] == pytest.approx(22.5)
+    assert windows[1][0] == pytest.approx(35.0)
+    assert windows[1][1] == pytest.approx(38.9)
