@@ -68,6 +68,33 @@ def adaptive_exploration_budget(
     """
     interaction_terms = {
         "create",
+        # Action wording is intent, not the product entity.  Keep these
+        # common inflected verbs out of the fallback entity chooser so an
+        # objective such as “demonstrate creating an invoice” selects
+        # ``invoice`` rather than ``creating`` when no “walkthrough of …”
+        # phrase is present.
+        "creating",
+        "building",
+        "drawing",
+        "designing",
+        "editing",
+        "filling",
+        "submitting",
+        "verifying",
+        "opening",
+        "using",
+        "selecting",
+        "showing",
+        "making",
+        "exploring",
+        "navigating",
+        "explaining",
+        "adding",
+        "new",
+        "required",
+        "details",
+        "synthetic",
+        "values",
         "add",
         "fill",
         "enter",
@@ -540,6 +567,31 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
         "resource",
         "resources",
         "detail",
+        # Fallback entity selection must ignore action phrasing as well as
+        # editorial qualifiers.  This keeps “creating an invoice” grounded
+        # on the observed invoice surface instead of the verb “creating”.
+        "creating",
+        "building",
+        "drawing",
+        "designing",
+        "editing",
+        "filling",
+        "submitting",
+        "verifying",
+        "opening",
+        "using",
+        "selecting",
+        "showing",
+        "making",
+        "exploring",
+        "navigating",
+        "explaining",
+        "adding",
+        "new",
+        "required",
+        "details",
+        "synthetic",
+        "values",
     }
     primary_entity = (
         None

@@ -61,11 +61,16 @@ def _certify_operations(
         OperationKind.SELECT_DATE: "value",
         OperationKind.SELECT_DATE_RANGE: "value",
         OperationKind.OPEN_MODAL: "visible",
-        OperationKind.CLOSE_MODAL: "overlay_clear",
+        # OutcomeSpec deliberately uses a small, portable predicate vocabulary.
+        # Closing an overlay is proven by the resulting visible page state;
+        # `overlay_clear` is an executor detail, not a public certificate kind.
+        OperationKind.CLOSE_MODAL: "visible",
         OperationKind.SUBMIT: "state",
         OperationKind.CREATE_RECORD: "state",
-        OperationKind.DRAG: "changed",
-        OperationKind.POINTER_SEQUENCE: "changed",
+        # Pointer/drag changes are verified through their resulting state (the
+        # trace retains the detailed geometry/state transition evidence).
+        OperationKind.DRAG: "state",
+        OperationKind.POINTER_SEQUENCE: "state",
         OperationKind.VERIFY_STATE: "state",
     }
     mutating = {OperationKind.SUBMIT, OperationKind.CREATE_RECORD}
