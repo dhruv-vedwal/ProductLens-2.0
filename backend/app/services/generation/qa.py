@@ -27,6 +27,7 @@ from app.quality.presentation import (
     inspect_presentation,
 )
 from app.quality.repair import classify_repair
+from app.quality.story import inspect_story
 from app.quality.synchronization import inspect_synchronization, secure_transition_intervals
 from app.quality.video import inspect_video
 from app.services.generation_policy import (
@@ -312,7 +313,17 @@ class QaMixin:
             narration_created=(artifacts.root / "audio" / "narration.mp3").exists(),
             explained_intervals=secure_transition_intervals(presentation_props),
         )
-        story = json.loads((artifacts.qa / "story-report.json").read_text(encoding="utf-8"))
+        story_path = artifacts.qa / "story-report.json"
+        if story_path.exists():
+            story = json.loads(story_path.read_text(encoding="utf-8"))
+        else:
+            # Targeted narration/render retries intentionally reuse immutable
+            # execution evidence. Older captures may predate persistence of
+            # the execution-owned story report; reconstruct it from the same
+            # trace and approved script rather than failing QA with a raw
+            # FileNotFoundError.
+            story = inspect_story(trace, objective=plan.objective, script=script)
+            artifacts.write_json("qa/story-report.json", story)
         context = ProductContext.model_validate(
             json.loads(
                 (artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8")
