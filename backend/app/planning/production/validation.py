@@ -90,6 +90,11 @@ class ValidationMixin:
                 points = (
                     operation.value.get("points") if isinstance(operation.value, dict) else None
                 )
+                relative_points = (
+                    operation.value.get("relative_points")
+                    if isinstance(operation.value, dict)
+                    else None
+                )
                 pattern = (
                     operation.value.get("pattern") if isinstance(operation.value, dict) else None
                 )
@@ -100,8 +105,11 @@ class ValidationMixin:
                 # with no points and let the executor draw a synthetic grid
                 # path, producing false success on empty editors.
                 generated_surface_pattern = (
-                    pattern == "short_reversible_stroke" and operation.target is not None
-                )
+                    pattern in {"short_reversible_stroke", "text_placement", "connector_segment"}
+                    and operation.target is not None
+                    and isinstance(relative_points, list)
+                    and len(relative_points) >= 2
+                ) or (pattern == "short_reversible_stroke" and operation.target is not None)
                 if (
                     not isinstance(points, list) or len(points) < 2
                 ) and not generated_surface_pattern:
@@ -112,7 +120,7 @@ class ValidationMixin:
                     raise PlanningValidationError(
                         "PointerSequence requires evidence references for its observed path"
                     )
-                if pattern == "connector_segment" and not isinstance(points, list):
+                if pattern == "connector_segment" and not isinstance(points, list) and not generated_surface_pattern:
                     raise PlanningValidationError(
                         "Connector paths require geometry observed during exploration"
                     )

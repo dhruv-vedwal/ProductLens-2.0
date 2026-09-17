@@ -660,7 +660,7 @@ class PlaywrightAdapter:
             surface_box = None
             proof_box = None
             if (
-                pattern in {"short_reversible_stroke", "connector_segment"}
+                pattern in {"short_reversible_stroke", "connector_segment", "text_placement"}
                 and operation.target is not None
             ):
                 # Capture a lightweight, target-local fingerprint before the
@@ -794,7 +794,7 @@ class PlaywrightAdapter:
             changed = None
             after_structure = None
             if (
-                pattern in {"short_reversible_stroke", "connector_segment"}
+                pattern in {"short_reversible_stroke", "connector_segment", "text_placement"}
                 and operation.target is not None
             ):
                 try:
@@ -852,7 +852,7 @@ class PlaywrightAdapter:
                             "committed": bool(changed),
                         }
                     }
-                    if pattern in {"short_reversible_stroke", "connector_segment"}
+                    if pattern in {"short_reversible_stroke", "connector_segment", "text_placement"}
                     else {}
                 ),
             }

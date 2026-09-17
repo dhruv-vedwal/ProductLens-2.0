@@ -960,11 +960,18 @@ class RehearseMixin:
                                         raw = page.locator(recovery.target.selector)
                                         raw_count = await raw.count()
                                         if raw_count:
-                                            enabled_visible = any(
-                                                await raw.nth(index).is_visible()
-                                                and await raw.nth(index).is_enabled()
-                                                for index in range(raw_count)
-                                            )
+                                            # Playwright checks are awaitable;
+                                            # ``any(await ... for ...)`` creates
+                                            # an async generator and never
+                                            # evaluates it.  Probe each matched
+                                            # element explicitly so dependent
+                                            # controls are recovered reliably.
+                                            enabled_visible = False
+                                            for index in range(raw_count):
+                                                item = raw.nth(index)
+                                                if await item.is_visible() and await item.is_enabled():
+                                                    enabled_visible = True
+                                                    break
                                             if not enabled_visible:
                                                 continue
                                     grounded, _ = await adapter.grounded_locator(recovery.target)
