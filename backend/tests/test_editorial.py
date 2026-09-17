@@ -354,6 +354,18 @@ def test_viewer_ready_accepts_grounded_editorial_predicates():
     )
 
 
+def test_viewer_ready_accepts_articles_and_includes_after_named_ui_title():
+    """Natural captions must not fail because a UI label contains grammar words."""
+    assert _viewer_ready(
+        "The Lead Management option includes capture, qualify, and manage leads.",
+        "Lead Management",
+    )
+    assert _viewer_ready(
+        "The add a remark input field preserves the context that helps a teammate understand this record.",
+        "Add a remark input",
+    )
+
+
 def test_form_narration_explains_the_flow_instead_of_reading_the_input_label():
     context = ProductContext(
         url="https://example.test/leads",

@@ -866,10 +866,18 @@ def _viewer_ready(text: str, title: str = "") -> bool:
         # unreliable; derive the remainder from normalized semantic tokens.
         # Compare semantic title tokens rather than punctuation (ampersands,
         # bullets, and decorative separators are common in real headings).
-        title_pattern = r"\s*" + r"\W*".join(re.escape(word) for word in title_words)
+        # Match the semantic title even when the rendered sentence inserts
+        # short grammatical words (for example, ``Add a remark input``).
+        # ``\W*`` alone cannot cross the word ``a`` because it is itself a
+        # word token, which made otherwise useful, evidence-grounded captions
+        # fail the title-dump guard.
+        separator = r"(?:\W+|\s+(?:a|an|the|of|to|for|and|in|on)\s+)"
+        title_pattern = r"\s*" + separator.join(re.escape(word) for word in title_words)
         title_prefix = title_pattern
         if title_prefix_words and title_prefix_words[0] == "the":
-            title_pattern = r"\s*the\W*" + r"\W*".join(re.escape(word) for word in title_words)
+            title_pattern = (
+                r"\s*the" + separator + separator.join(re.escape(word) for word in title_words)
+            )
         remainder = normalized.lower()[len(title_prefix) :].lstrip(" :—-.")
         title_match = re.match(title_pattern + r"\b", normalized.lower())
         remainder = (
@@ -880,7 +888,7 @@ def _viewer_ready(text: str, title: str = "") -> bool:
             len(remainder_words) >= 4
             and bool(
                 re.match(
-                    r"^(?:(?:is|are|was|were|focuses|provides|documents|combines|uses|connects|highlights|covers|organizes|keeps|offers|adds|explains|lists|groups|marks|gathers|exposes|records|preserves|captures|completes|gives)\b|(?:view|page|section|workspace|area|option|field|input)\s+(?:is|are|was|were|focuses|provides|documents|combines|uses|connects|highlights|covers|organizes|keeps|offers|adds|explains|lists|groups|marks|gathers|exposes|records|preserves|captures|completes|gives)\b)",
+                    r"^(?:(?:is|are|was|were|focuses|provides|documents|combines|uses|connects|highlights|covers|organizes|keeps|offers|adds|explains|lists|groups|marks|gathers|exposes|records|preserves|captures|completes|gives|includes)\b|(?:view|page|section|workspace|area|option|field|input|form)\s+(?:is|are|was|were|focuses|provides|documents|combines|uses|connects|highlights|covers|organizes|keeps|offers|adds|explains|lists|groups|marks|gathers|exposes|records|preserves|captures|completes|gives|includes)\b)",
                     remainder.strip(),
                 )
             )
