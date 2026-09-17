@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.deps_state import (  # noqa: F401 — re-exported for tests and callers
+from app.api.deps_state import (
     credential_service,
     dispatch_generation_job,
     jobs,

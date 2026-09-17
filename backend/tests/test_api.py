@@ -101,6 +101,25 @@ def test_duration_envelope_accepts_long_evidence_backed_stories():
     assert request.target_duration_seconds == retry.target_duration_seconds == 600
 
 
+def test_generation_request_keeps_presentation_preferences_typed_and_serializable():
+    request = GenerationRequest(
+        url="https://example.test",
+        objective="Show the workflow",
+        presentation={
+            "include_audio": False,
+            "subtitles_enabled": True,
+            "subtitle_position": "top",
+            "browser_zoom_percent": 100,
+            "export_aspect": "16:9",
+        },
+    )
+    options = request.presentation.model_dump(mode="json")
+    assert options["include_audio"] is False
+    assert options["subtitle_position"] == "top"
+    assert options["browser_zoom_percent"] == 100
+    assert options["export_aspect"] == "16:9"
+
+
 def test_cloud_discovery_is_capability_aware_but_explicitly_overridable():
     request = GenerationRequest(url="https://example.test", objective="Show the workflow")
     assert request.cloud_discovery is None

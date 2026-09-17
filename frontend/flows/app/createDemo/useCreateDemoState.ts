@@ -87,6 +87,7 @@ export function useCreateDemoState() {
   const [connectMsg, setConnectMsg] = useState<string | null>(null);
   const [ensureBusy, setEnsureBusy] = useState(false);
   const [understanding, setUnderstanding] = useState<UnderstandingPreview | null>(null);
+  const [understandingKey, setUnderstandingKey] = useState<string | null>(null);
   const [cloudDiscovery, setCloudDiscovery] = useState<boolean | null>(null);
 
   // Compat aliases for ProductStep / ReviewStep craft
@@ -162,7 +163,41 @@ export function useCreateDemoState() {
   }
 
   async function generateBriefWithAi() {
-    return;
+    if (!token || !baseUrl.trim()) {
+      setPreviewError("Add a target URL before asking AI to write the brief.");
+      return;
+    }
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const previewKey = `${baseUrl.trim()}\n${goalText.trim()}\n${context.audience.trim() || picks.audience[0] || ""}`;
+      const preview = await previewUnderstanding(token, {
+        url: baseUrl.trim(),
+        prompt: goalText.trim(),
+        audience: context.audience.trim() || picks.audience[0] || null,
+        max_pages: 3,
+      });
+      setUnderstanding(preview);
+      setUnderstandingKey(previewKey);
+      setGoalText(preview.suggested_prompt || goalText);
+      setFilmSummary(
+        preview.suggested_prompt ||
+          (preview.relevant_areas.length
+            ? `A grounded walkthrough covering ${preview.relevant_areas.slice(0, 3).join(", ")}.`
+            : "A grounded walkthrough of the product's important visible areas."),
+      );
+      setFilmIntent({
+        demo_type: preview.objective?.demo_type,
+        primary_entity: preview.objective?.primary_entity,
+        relevant_areas: preview.relevant_areas,
+        pages_inspected: preview.pages_inspected,
+        evidence_refs: preview.evidence_refs,
+      });
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : "Could not understand this product yet");
+    } finally {
+      setPreviewLoading(false);
+    }
   }
 
   async function ensureProject() {
@@ -183,7 +218,10 @@ export function useCreateDemoState() {
   }
 
   async function draftWithAi() {
-    return;
+    // Drafting and brief generation share one cached, non-recording
+    // understanding call.  This keeps the UI honest and avoids an empty
+    // "AI draft" action that used to report success without doing anything.
+    await generateBriefWithAi();
   }
 
   async function goNext() {
@@ -196,6 +234,7 @@ export function useCreateDemoState() {
       if (token && baseUrl.trim() && goalText.trim()) {
         setPreviewLoading(true);
         try {
+          const previewKey = `${baseUrl.trim()}\n${goalText.trim()}\n${context.audience.trim() || picks.audience[0] || ""}`;
           const preview = await previewUnderstanding(token, {
             url: baseUrl.trim(),
             prompt: goalText.trim(),
@@ -203,7 +242,18 @@ export function useCreateDemoState() {
             max_pages: 3,
           });
           setUnderstanding(preview);
-          if (typeof preview.summary === "string") setFilmSummary(preview.summary);
+          setUnderstandingKey(previewKey);
+          setFilmSummary(
+            preview.suggested_prompt ||
+              `A grounded walkthrough covering ${preview.relevant_areas.slice(0, 3).join(", ") || "the visible product"}.`,
+          );
+          setFilmIntent({
+            demo_type: preview.objective?.demo_type,
+            primary_entity: preview.objective?.primary_entity,
+            relevant_areas: preview.relevant_areas,
+            pages_inspected: preview.pages_inspected,
+            evidence_refs: preview.evidence_refs,
+          });
         } catch {
           /* preview is optional */
         } finally {
@@ -261,16 +311,23 @@ export function useCreateDemoState() {
         Math.min(10, Math.max(0.5, targetDurationMinutes)) * 60,
       );
 
-      // Optional preflight before commit
-      try {
-        await previewUnderstanding(token, {
-          url: baseUrl.trim(),
-          prompt: goalText.trim(),
-          audience: context.audience.trim() || picks.audience[0] || null,
-          max_pages: 3,
-        });
-      } catch {
-        /* non-blocking */
+      // Reuse the bounded understanding scan from the first wizard step. If
+      // the user edited the URL/prompt afterwards, refresh exactly once rather
+      // than issuing an unconditional duplicate model/browser call.
+      const previewKey = `${baseUrl.trim()}\n${goalText.trim()}\n${context.audience.trim() || picks.audience[0] || ""}`;
+      if (understandingKey !== previewKey) {
+        try {
+          const preview = await previewUnderstanding(token, {
+            url: baseUrl.trim(),
+            prompt: goalText.trim(),
+            audience: context.audience.trim() || picks.audience[0] || null,
+            max_pages: 3,
+          });
+          setUnderstanding(preview);
+          setUnderstandingKey(previewKey);
+        } catch {
+          /* non-blocking; generation performs its own authoritative discovery */
+        }
       }
 
       const result = await createRun(token, {
@@ -286,6 +343,25 @@ export function useCreateDemoState() {
         max_pages: 6,
         render: true,
         cloud_discovery: cloudDiscovery,
+        presentation: {
+          include_audio: includeAudio,
+          narration_style: narrationStyle,
+          pace,
+          browser_zoom_percent: browserZoomPercent,
+          subtitles_enabled: subtitlesEnabled,
+          subtitle_style: subtitleStyle as "minimal" | "apple" | "youtube",
+          subtitle_position: subtitlePosition as "top" | "bottom",
+          subtitle_font_size: subtitleFontSize as "sm" | "md" | "lg",
+          intro_template: introTemplate,
+          studio_polish: studioPolish,
+          cursor_style: cursorStyle,
+          highlight_style: highlightStyle,
+          click_zoom: clickZoom,
+          export_aspect: exportAspect as "16:9" | "9:16" | "1:1",
+          export_resolution: exportResolution as "720" | "1080" | "1440" | "2160",
+          language,
+          accent,
+        },
       });
       router.push(`/timeline?run=${result.run_id}`);
     } catch (err) {

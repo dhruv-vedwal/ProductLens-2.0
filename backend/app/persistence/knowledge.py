@@ -9,6 +9,7 @@ from uuid import uuid4
 from app.persistence.db import _DAO
 from app.urls import canonical_product_url
 
+
 def _canonical_product_key(value: str) -> str:
     """Normalize equivalent product URLs before indexing reusable knowledge."""
     return canonical_product_url(value)

@@ -183,7 +183,9 @@ async def test_failed_cloud_generation_retains_browserbase_session_evidence(tmp_
         "status": "FAILED",
     }
     assert repository.stage_job(run["id"], "DISCOVERY")["status"] == "FAILED"
-    assert all(item["status"] == "QUEUED" for item in repository.stage_jobs(run["id"])[1:])
+    # A terminal provider failure cancels downstream checkpoints so a worker
+    # cannot later claim work for a run whose evidence is already invalid.
+    assert all(item["status"] == "CANCELLED" for item in repository.stage_jobs(run["id"])[1:])
 
 
 @pytest.mark.asyncio

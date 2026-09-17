@@ -35,9 +35,14 @@ _PROVIDER_ENV_NAMES = {
 }
 
 
+def _backend_root() -> Path:
+    """Return the backend package root (`.../backend`), not the monorepo root."""
+    return Path(__file__).resolve().parents[2]
+
+
 def _project_provider_environment() -> dict[str, str]:
     """Read the new application's local environment file, never legacy runtime state."""
-    default_path = Path(__file__).resolve().parents[3] / ".env"
+    default_path = _backend_root() / ".env"
     source = Path(os.getenv("PRODUCTLENS_ENV_FILE", default_path))
     if not source.is_file():
         return {}

@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-from hashlib import sha256
-from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit
 
 from app.contracts.models import (
     DemoPlan,
     EditorialBrief,
-    EditorialFact,
     EditorialNarrationDraft,
     EditorialScene,
     EditorialStoryboard,
@@ -18,9 +16,9 @@ from app.contracts.models import (
     ProductContext,
 )
 from app.observability.logging import redact_prompt_text
+from app.presentation.editorial.narrative import *
 from app.providers.errors import ProviderError
 
-from app.presentation.editorial.narrative import *  # noqa: F403
 
 def build_editorial_storyboard(context: ProductContext, plan: DemoPlan) -> EditorialStoryboard:
     """Build a deterministic story from observed text and the validated plan.
@@ -1411,13 +1409,13 @@ def bind_storyboard_events(
     return storyboard.model_copy(update={"scenes": scenes})
 
 __all__ = [
-    "build_editorial_storyboard",
     "_GENERIC_EDITORIAL_PATTERNS",
-    "_supported",
-    "enrich_editorial_brief",
-    "enrich_editorial_storyboard",
     "_mentions_scene_element",
     "_mentions_scene_subject",
     "_scene_source",
+    "_supported",
     "bind_storyboard_events",
+    "build_editorial_storyboard",
+    "enrich_editorial_brief",
+    "enrich_editorial_storyboard",
 ]

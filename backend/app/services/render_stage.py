@@ -41,6 +41,10 @@ def render_run(*, run_id: str, artifact_root: Path) -> Path:
         if storyboard_path.exists()
         else None
     )
+    options_path = artifacts.presentation / "options.json"
+    presentation_options = (
+        cast(dict[str, Any], _load_json(options_path)) if options_path.exists() else {}
+    )
     effective_maximum, duration_accounting = production_duration_envelope(plan)
     if duration_accounting:
         artifacts.write_json("presentation/duration-accounting.json", duration_accounting)
@@ -68,6 +72,7 @@ def render_run(*, run_id: str, artifact_root: Path) -> Path:
             target_duration_seconds=plan.target_duration_seconds,
             maximum_duration_seconds=effective_maximum,
             storyboard=storyboard,
+            presentation_options=presentation_options,
         )
     except Exception as error:
         failure = (

@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-import os
 import re
 import shutil
 import subprocess
-import time
 from datetime import timedelta
 from pathlib import Path
 
-from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
     DemoTrace,
     EditorialStoryboard,
@@ -21,11 +17,13 @@ from app.contracts.models import (
     OperationKind,
     PresentationPlan,
 )
-from app.narration.audio import audio_duration_seconds
-from app.presentation.title import concise_demo_title
-from app.video.source_timing import align_trace_to_recording
 
-from app.video.render.status import *  # noqa: F403
+# Kept as a module-level compatibility hook for render tests and integrations
+# that patch the shared audio-duration probe before invoking the assembler.
+from app.narration.audio import audio_duration_seconds  # noqa: F401
+from app.presentation.title import concise_demo_title
+from app.video.render.status import *
+
 
 def _prepare_remotion_source(
     raw: Path, public: Path, run_id: str, *, strip_audio: bool = False
@@ -971,17 +969,17 @@ def _evidence_timed_captions(
     return timed
 
 __all__ = [
-    "_prepare_remotion_source",
-    "_frame_rate",
     "_PRESENTATION_SECRET_TERMS",
-    "_presentation_secret_redactions",
-    "_outro_copy",
-    "_recording_space_rect",
-    "_recording_space_cursor_paths",
-    "_safe_camera_zoom",
-    "_editorial_cut_windows",
-    "_remap_trace_for_cuts",
     "_build_editorial_source",
+    "_editorial_cut_windows",
     "_evidence_timed_beat_ranges",
     "_evidence_timed_captions",
+    "_frame_rate",
+    "_outro_copy",
+    "_prepare_remotion_source",
+    "_presentation_secret_redactions",
+    "_recording_space_cursor_paths",
+    "_recording_space_rect",
+    "_remap_trace_for_cuts",
+    "_safe_camera_zoom",
 ]

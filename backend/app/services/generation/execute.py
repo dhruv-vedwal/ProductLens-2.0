@@ -4,32 +4,22 @@ import asyncio
 import hashlib
 import json
 import re
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit
+
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
+
 from app.artifacts.store import RunArtifacts, materialize_trace_lifecycle
 from app.browser.screencast import CdpScreencastRecorder
 from app.browser.theme import discover_theme_control
 from app.contracts.models import (
-    ActionCapability,
-    AudienceProfile,
     DemoPlan,
     DemoTrace,
-    DiscoveryBudget,
     EditorialStoryboard,
-    ExplorationReport,
-    FormField,
     InteractionEvent,
-    InteractionTrace,
-    NarrationScript,
-    NarrationSegment,
-    ObjectiveSpec,
-    ObservedElement,
     OperationKind,
-    Postcondition,
     ProductContext,
     Rect,
     ReplanDecision,
@@ -40,11 +30,8 @@ from app.contracts.models import (
     WorkflowStep,
 )
 from app.execution.engine import ExecutionEngine
-from app.execution.playwright_adapter import GroundingError, PlaywrightAdapter
+from app.execution.playwright_adapter import PlaywrightAdapter
 from app.narration.script import (
-    bind_opening_to_first_event,
-    captions_from_duration,
-    recommended_caption_duration,
     script_from_trace,
 )
 from app.observability.logging import get_logger, redact_prompt_text
@@ -52,10 +39,7 @@ from app.planning.state_machine import WorkflowStateMachine
 from app.presentation.director import build_presentation_plan
 from app.presentation.editorial import (
     bind_storyboard_events,
-    build_editorial_storyboard,
     editorial_script,
-    enrich_editorial_brief,
-    enrich_editorial_storyboard,
 )
 from app.presentation.journey import build_journey, inspect_journey
 from app.presentation.scenes import build_scene_plan
@@ -72,8 +56,8 @@ from app.services.generation_policy import (
 from app.services.generation_policy import (
     recording_frame_rate as _recording_frame_rate,
 )
-from .render import GenerationPreconditionError
 
+from .render import GenerationPreconditionError
 
 logger = get_logger("app.generation")
 

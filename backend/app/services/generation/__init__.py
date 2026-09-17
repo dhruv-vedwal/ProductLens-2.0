@@ -27,9 +27,9 @@ __all__ = [
     "_canonical_url",
     "_narration_script_contract",
     "_product_knowledge_payload",
-    "_relevance_graph",
     "_rehearsal_detail_navigation_witness",
     "_rehearsal_outcome_candidates",
     "_rehearsal_post_submit_state",
+    "_relevance_graph",
     "_safe_render_error",
 ]

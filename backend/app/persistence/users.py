@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.persistence.db import _DAO
 
+
 class UsersDAO(_DAO):
     """Domain persistence for users."""
 

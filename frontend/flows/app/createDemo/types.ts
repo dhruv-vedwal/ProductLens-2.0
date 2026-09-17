@@ -59,6 +59,27 @@ export type CreateRunBody = {
   allow_external_side_effects?: boolean;
   allow_isolated_record_creation?: boolean;
   request_id?: string | null;
+  presentation?: PresentationOptions;
+};
+
+export type PresentationOptions = {
+  include_audio?: boolean;
+  narration_style?: "teach" | "showcase";
+  pace?: number;
+  browser_zoom_percent?: number;
+  subtitles_enabled?: boolean;
+  subtitle_style?: "minimal" | "apple" | "youtube";
+  subtitle_position?: "top" | "bottom";
+  subtitle_font_size?: "sm" | "md" | "lg";
+  intro_template?: string;
+  studio_polish?: boolean;
+  cursor_style?: string;
+  highlight_style?: string;
+  click_zoom?: boolean;
+  export_aspect?: "16:9" | "9:16" | "1:1";
+  export_resolution?: "720" | "1080" | "1440" | "2160";
+  language?: string;
+  accent?: string;
 };
 
 export type CreateRunResponse = {
@@ -68,7 +89,15 @@ export type CreateRunResponse = {
 
 export type UnderstandingPreview = {
   url?: string;
-  summary?: string;
+  suggested_prompt?: string;
+  objective?: {
+    demo_type?: string;
+    primary_entity?: string | null;
+    [key: string]: unknown;
+  };
+  relevant_areas: string[];
+  evidence_refs: string[];
+  pages_inspected: string[];
   pages?: unknown[];
   audience?: string | null;
   [key: string]: unknown;

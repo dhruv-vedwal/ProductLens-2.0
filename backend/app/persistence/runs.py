@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from app.persistence.db import _DAO
 
+
 class RunsDAO(_DAO):
     """Domain persistence for runs."""
 
@@ -173,7 +174,7 @@ class RunsDAO(_DAO):
             (now, run_id),
         )
         self.connection.commit()
-        return self.get_job(job["id"])
+        return dict(self.get_job(job["id"]))
 
     def delete_empty_terminal_run(self, run_id: str) -> bool:
         """Delete a terminal run only when it contains no retained artifacts.

@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from app.persistence.db import _DAO
 
+
 class JobsDAO(_DAO):
     """Domain persistence for jobs."""
 
@@ -205,11 +206,24 @@ class JobsDAO(_DAO):
         ]
 
     def fail_active_stage_jobs(self, run_id: str, error_code: str) -> None:
+        """Fail the active stage and make downstream work unclaimable.
+
+        A failed run must not leave later stage rows queued: those rows used to
+        survive provider failures and were repeatedly picked up by workers even
+        though the run was already terminal.  Keeping them as cancelled ledger
+        rows preserves retry lineage without creating phantom work.
+        """
         now = datetime.now(UTC).isoformat()
         self.connection.execute(
             """UPDATE generation_stage_jobs SET status='FAILED', error_code=?, completed_at=?, updated_at=?
             WHERE run_id=? AND status='RUNNING'""",
             (error_code, now, now, run_id),
+        )
+        self.connection.execute(
+            """UPDATE generation_stage_jobs SET status='CANCELLED', error_code=?,
+               completed_at=?, updated_at=?
+               WHERE run_id=? AND status IN ('QUEUED', 'RETRYING')""",
+            (f"UPSTREAM_{error_code}", now, now, run_id),
         )
         self.connection.commit()
 

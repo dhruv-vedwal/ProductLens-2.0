@@ -354,6 +354,11 @@ class DemoJobService:
         artifacts = RunArtifacts(self.artifact_root, run_id)
         run = self.repository.get_run(run_id)
         request = self.repository.get_request(run["request_id"])
+        presentation_options = payload.get("presentation")
+        if isinstance(presentation_options, dict):
+            # Persist preferences before any provider work so a resumed render
+            # cannot silently fall back to UI defaults.
+            artifacts.write_json("presentation/options.json", presentation_options)
         lifecycle = stage_lifecycle(stage)
         # ``run_url_stage`` is shared by broker workers and supervised direct
         # runs.  Do not rely on API enqueueing to have created its ledger.
@@ -507,6 +512,7 @@ class DemoJobService:
                 run_id=run_id,
                 artifact_root=self.artifact_root,
                 refresh_editorial=bool(payload.get("refresh_editorial", False)),
+                include_audio=bool(payload.get("presentation", {}).get("include_audio", True)),
             )
             self.repository.replace_json_artifact(
                 "narration_scripts",
@@ -812,7 +818,7 @@ class DemoJobService:
         # resumable discovery, plan, execution, narration, render and QA
         # checkpoints used by workers.  Keep this coordinator deliberately
         # thin: each stage reconstructs its input from persisted artifacts.
-        stage_payload = {
+        stage_payload: dict[str, Any] = {
             "allow_external_side_effects": allow_external_side_effects,
             "allow_isolated_record_creation": allow_isolated_record_creation,
             "render": render,
@@ -823,6 +829,7 @@ class DemoJobService:
             "credential_reference": credential_reference,
             "audience": audience,
             "target_duration_seconds": target_duration_seconds,
+            "presentation": {},
         }
         # Direct/supervised jobs do not pass through API enqueueing.  Provision
         # the same durable stage rows before discovery begins so artifacts,

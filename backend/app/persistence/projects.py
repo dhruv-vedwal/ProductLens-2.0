@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from app.persistence.db import _DAO
 
+
 class ProjectsDAO(_DAO):
     """Domain persistence for projects."""
 

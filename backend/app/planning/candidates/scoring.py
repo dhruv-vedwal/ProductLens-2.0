@@ -9,15 +9,11 @@ from urllib.parse import urljoin, urlsplit
 from app.contracts.models import (
     CandidateDemoFlow,
     ObservedElement,
-    OperationKind,
     PageKnowledge,
-    Postcondition,
     ProductContext,
-    SemanticOperation,
-    Target,
-    WorkflowProposal,
 )
 from app.urls import canonical_product_url
+
 
 def _tokens(value: str) -> set[str]:
     tokens = set(re.findall(r"[a-z0-9]{3,}", value.lower()))
@@ -713,7 +709,6 @@ def candidate_flows_from_evidence(
     """
     from app.planning.candidates.proposals import (
         _flow_from_pages,
-        _page_evidence,
         _page_relevance,
         _pages_for_context,
     )
@@ -1198,7 +1193,6 @@ def _editorial_landmark_groups(
     This is derived entirely from DOM heading hierarchy and works for
     portfolios, dashboards, articles, and arbitrary products.
     """
-    from app.planning.candidates.navigation import _fact_for_landmark, _page_landmarks
     if not landmarks:
         return []
     groups: list[list[ObservedElement]] = []
@@ -1489,32 +1483,32 @@ def _select_representative_groups(
     return [groups[index] for index in sorted(chosen)]
 
 __all__ = [
-    "_tokens",
-    "_RELATION_ROLE_NOISE",
-    "_SENSITIVE_LABEL_PATTERN",
     "_PLACEHOLDER_ELEMENT_PATTERN",
     "_POLICY_PAGE_TERMS",
-    "_is_table_or_record_artifact",
-    "_is_safe_landmark",
-    "_page_identity_words",
-    "_page_proves_relationship_side",
-    "_page_observed_labels",
+    "_RELATION_ROLE_NOISE",
+    "_SENSITIVE_LABEL_PATTERN",
     "_candidate_proves_required_relationships",
     "_canonical_url",
+    "_coalesce_duplicate_fact_groups",
+    "_deep_page_is_explicitly_requested",
+    "_editorial_landmark_groups",
     "_fact_evidence_ref",
-    "select_candidate_flow",
-    "candidate_flows_from_evidence",
+    "_group_fact_signature",
+    "_heading_level",
+    "_insert_representative_detail_pages",
     "_is_footer_policy_page",
     "_is_primary_page",
-    "_route_ancestors",
-    "_order_pages_by_visible_navigation",
-    "_insert_representative_detail_pages",
-    "_deep_page_is_explicitly_requested",
-    "_heading_level",
-    "_editorial_landmark_groups",
+    "_is_safe_landmark",
+    "_is_table_or_record_artifact",
     "_limit_editorial_groups",
-    "_split_rich_content_groups",
-    "_group_fact_signature",
-    "_coalesce_duplicate_fact_groups",
+    "_order_pages_by_visible_navigation",
+    "_page_identity_words",
+    "_page_observed_labels",
+    "_page_proves_relationship_side",
+    "_route_ancestors",
     "_select_representative_groups",
+    "_split_rich_content_groups",
+    "_tokens",
+    "candidate_flows_from_evidence",
+    "select_candidate_flow",
 ]

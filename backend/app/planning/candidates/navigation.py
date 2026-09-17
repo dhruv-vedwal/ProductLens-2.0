@@ -3,23 +3,19 @@
 from __future__ import annotations
 
 import re
-from hashlib import sha256
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 from app.contracts.models import (
     CandidateDemoFlow,
     ObservedElement,
     OperationKind,
     PageKnowledge,
-    Postcondition,
     ProductContext,
     SemanticOperation,
-    Target,
     WorkflowProposal,
 )
-from app.urls import canonical_product_url
+from app.planning.candidates.scoring import *
 
-from app.planning.candidates.scoring import *  # noqa: F403
 
 def navigation_control_for_transition(context: ProductContext, source_url: str, destination: str):
     source = _canonical_url(context.url, source_url)
@@ -742,18 +738,18 @@ def validate_flow_scope(
     return failures
 
 __all__ = [
-    "navigation_control_for_transition",
-    "_navigation_control",
-    "_is_control_chrome",
+    "_collapse_repeated_series",
+    "_configuration_landmark",
+    "_fact_for_landmark",
     "_has_descriptive_landmark_evidence",
+    "_is_control_chrome",
     "_is_operational_workspace",
+    "_navigation_control",
     "_page_form_controls",
     "_page_landmarks",
     "_page_story_subject",
-    "_configuration_landmark",
-    "_collapse_repeated_series",
-    "_prioritize_story_landmarks",
-    "_fact_for_landmark",
     "_phase_intent",
+    "_prioritize_story_landmarks",
+    "navigation_control_for_transition",
     "validate_flow_scope",
 ]

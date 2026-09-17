@@ -4,32 +4,14 @@ import json
 import os
 import re
 from pathlib import Path
-from app.artifacts.store import RunArtifacts, materialize_trace_lifecycle
+
+from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
-    ActionCapability,
     AudienceProfile,
-    DemoPlan,
-    DemoTrace,
-    DiscoveryBudget,
-    EditorialStoryboard,
-    ExplorationReport,
-    FormField,
-    InteractionEvent,
-    InteractionTrace,
     NarrationScript,
     NarrationSegment,
-    ObjectiveSpec,
-    ObservedElement,
     OperationKind,
-    Postcondition,
     ProductContext,
-    Rect,
-    ReplanDecision,
-    SemanticOperation,
-    Target,
-    Viewport,
-    ViewportDecision,
-    WorkflowStep,
 )
 from app.narration.script import (
     bind_opening_to_first_event,
@@ -37,7 +19,7 @@ from app.narration.script import (
     recommended_caption_duration,
     script_from_trace,
 )
-from app.narration.service import NarrationService, SpeechProvider
+from app.narration.service import NarrationService
 from app.presentation.director import build_presentation_plan
 from app.presentation.editorial import (
     bind_storyboard_events,
@@ -46,12 +28,13 @@ from app.presentation.editorial import (
     enrich_editorial_brief,
     enrich_editorial_storyboard,
 )
-from app.presentation.journey import build_journey, inspect_journey
+from app.presentation.journey import build_journey
 from app.presentation.scenes import build_scene_plan
 from app.providers.errors import ProviderError
 from app.quality.consistency import validate_selected_candidate_consistency
-from app.quality.editorial import inspect_editorial, inspect_editorial_preflight
+from app.quality.editorial import inspect_editorial
 from app.quality.repair import classify_repair
+
 from .render import GenerationPreconditionError
 
 
@@ -111,7 +94,12 @@ def _narration_script_contract(
 
 class NarrateMixin:
     async def narration_stage(
-        self, *, run_id: str, artifact_root: Path, refresh_editorial: bool = False
+        self,
+        *,
+        run_id: str,
+        artifact_root: Path,
+        refresh_editorial: bool = False,
+        include_audio: bool = True,
     ) -> dict:
         artifacts = RunArtifacts(artifact_root, run_id)
         trace = self._load_trace(artifacts)
@@ -508,7 +496,7 @@ class NarrateMixin:
         objective_minimum = float(plan.minimum_duration_seconds or 0)
         captions = captions_from_duration(script, max(recommended_duration, objective_minimum))
         narration = None
-        if self.speech_provider:
+        if self.speech_provider and include_audio:
             try:
                 narration = await NarrationService().create(
                     trace,

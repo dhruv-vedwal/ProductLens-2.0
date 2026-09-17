@@ -547,7 +547,7 @@ Run deterministic tests first:
 ```powershell
 cd "ProductLensAI 2.0/backend"
 python -m pytest -m "not integration" -q --disable-warnings
-python -m compileall -q src
+python -m compileall -q app
 ```
 
 Run the longer integration suite when browser/provider resources are available:

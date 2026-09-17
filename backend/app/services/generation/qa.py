@@ -3,32 +3,15 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from app.artifacts.store import RunArtifacts, materialize_trace_lifecycle
+
+from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
-    ActionCapability,
-    AudienceProfile,
     DemoPlan,
-    DemoTrace,
-    DiscoveryBudget,
     EditorialStoryboard,
-    ExplorationReport,
-    FormField,
-    InteractionEvent,
     InteractionTrace,
-    NarrationScript,
-    NarrationSegment,
-    ObjectiveSpec,
-    ObservedElement,
     OperationKind,
-    Postcondition,
     ProductContext,
-    Rect,
-    ReplanDecision,
-    SemanticOperation,
-    Target,
-    Viewport,
     ViewportDecision,
-    WorkflowStep,
 )
 from app.evaluation.completion_audit import audit_run
 from app.evaluation.sample_video_benchmark import compare_to_sample_benchmark
@@ -37,8 +20,8 @@ from app.presentation.scenes import build_scene_plan
 from app.quality.consistency import validate_selected_candidate_consistency
 from app.quality.coverage import inspect_coverage
 from app.quality.delivery import delivery_report
-from app.quality.editorial import inspect_editorial, inspect_editorial_preflight
-from app.quality.multimodal import VisualReviewer, build_review_packet, review_multimodal
+from app.quality.editorial import inspect_editorial
+from app.quality.multimodal import build_review_packet, review_multimodal
 from app.quality.presentation import (
     attach_presentation_qa,
     inspect_presentation,
@@ -49,6 +32,7 @@ from app.quality.video import inspect_video
 from app.services.generation_policy import (
     production_duration_envelope as _production_duration_envelope,
 )
+
 
 class QaMixin:
     def qa_stage(self, *, run_id: str, artifact_root: Path) -> dict:

@@ -98,7 +98,7 @@ class StagehandProvider:
         self.browserbase_project_id = browserbase_project_id
         self.openrouter_api_key = openrouter_api_key
         self.openrouter_model = openrouter_model
-        self.bridge = bridge or Path(__file__).resolve().parents[3] / "stagehand" / "observe.mjs"
+        self.bridge = bridge or Path(__file__).resolve().parents[2] / "stagehand" / "observe.mjs"
         self._invoke_limit = asyncio.Semaphore(provider_limit("stagehand"))
 
     async def observe(

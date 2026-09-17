@@ -2,23 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import re
-from contextlib import suppress
-from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-
 from app.contracts.models import (
-    ActionCapability,
-    CandidateDemoFlow,
     DiscoveryBudget,
-    FeatureKnowledge,
-    FormField,
-    FormSchema,
     ObjectiveRelationship,
     ObjectiveSpec,
     ObservedElement,
@@ -27,7 +16,7 @@ from app.contracts.models import (
     ProductRelationship,
     Target,
 )
-from app.planning.capability_resolution import resolve_capabilities
+
 
 def _tokens(value: str) -> set[str]:
     return {item for item in re.findall(r"[a-z0-9]{3,}", value.lower())}
@@ -1199,24 +1188,24 @@ def _bounded_page_navigation(
     return result
 
 __all__ = [
-    "_tokens",
-    "_canonical_route",
-    "_route_depth",
-    "adaptive_exploration_budget",
-    "_classify",
-    "_route_score",
-    "_objective_spec",
-    "_normalized_terms",
-    "_route_objective_score",
-    "_relationship_supporting_routes",
-    "_relationship_child_controls",
-    "_focused_relationship_evidence_complete",
-    "_relationship_page_roles",
-    "_derive_product_relationships",
     "_REVERSIBLE_ACTION_WORDS",
     "_UNSAFE_ACTION_WORDS",
-    "_capability_target",
-    "_page_knowledge",
-    "_restore_missing_page_landmarks",
     "_bounded_page_navigation",
+    "_canonical_route",
+    "_capability_target",
+    "_classify",
+    "_derive_product_relationships",
+    "_focused_relationship_evidence_complete",
+    "_normalized_terms",
+    "_objective_spec",
+    "_page_knowledge",
+    "_relationship_child_controls",
+    "_relationship_page_roles",
+    "_relationship_supporting_routes",
+    "_restore_missing_page_landmarks",
+    "_route_depth",
+    "_route_objective_score",
+    "_route_score",
+    "_tokens",
+    "adaptive_exploration_budget",
 ]

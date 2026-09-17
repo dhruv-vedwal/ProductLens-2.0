@@ -6,27 +6,23 @@ import hashlib
 import json
 import math
 import os
-import re
 import shutil
 import subprocess
-import time
-from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
     DemoTrace,
     EditorialStoryboard,
-    InteractionEvent,
-    OperationKind,
     PresentationPlan,
 )
 from app.narration.audio import audio_duration_seconds
 from app.presentation.title import concise_demo_title
+from app.video.render.remotion_props import *
+from app.video.render.status import *
 from app.video.source_timing import align_trace_to_recording
 
-from app.video.render.status import *  # noqa: F403
-from app.video.render.remotion_props import *  # noqa: F403
 
 def render_remotion(
     trace: DemoTrace,
@@ -34,11 +30,12 @@ def render_remotion(
     artifacts: RunArtifacts,
     *,
     narration_path: Path | None = None,
-    captions: list[dict] | None = None,
-    scenes: list[dict] | None = None,
+    captions: list[dict[str, Any]] | None = None,
+    scenes: list[dict[str, Any]] | None = None,
     target_duration_seconds: int | None = None,
     maximum_duration_seconds: int | None = None,
     storyboard: EditorialStoryboard | None = None,
+    presentation_options: dict[str, object] | None = None,
 ) -> Path:
     """Render a final MP4 from evidence video plus trace-derived camera decisions."""
     raw = artifacts.browser_video_path()
@@ -244,7 +241,7 @@ def render_remotion(
     # props so durable frame segments cannot be reused against a replaced
     # source file with the same URL.
     source_sha256 = hashlib.sha256(render_source.read_bytes()).hexdigest()
-    source_stream = next(
+    source_stream: dict[str, Any] = next(
         (
             stream
             for stream in source_probe.get("streams", [])
@@ -281,7 +278,10 @@ def render_remotion(
     # Caption-only scripts are placed on their evidence event, not spread
     # evenly across the video. The latter was the cause of caption/story drift
     # in long route transitions and gradual scrolls.
+    options = presentation_options or {}
     scaled_captions = captions or []
+    if options.get("subtitles_enabled") is False:
+        scaled_captions = []
     if scaled_captions and narration_asset is None:
         screen_seconds = screen_frames / frame_rate
         evidence_captions = _evidence_timed_captions(
@@ -415,6 +415,10 @@ def render_remotion(
         "narration": narration_asset,
         "captions": scaled_captions,
         "scenes": scenes or [],
+        # Keep frontend-selected presentation preferences alongside the
+        # render contract.  The compositor can evolve these independently,
+        # while retries/rerenders remain faithful to the original request.
+        "presentationOptions": presentation_options or {},
     }
     props_path = (artifacts.presentation / "remotion-props.json").resolve()
     # Remotion props are part of the durable presentation contract. Write
@@ -643,6 +647,6 @@ def _promote_render(candidate: Path, output: Path) -> None:
     candidate.unlink(missing_ok=True)
 
 __all__ = [
-    "render_remotion",
     "_promote_render",
+    "render_remotion",
 ]

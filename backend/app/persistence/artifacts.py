@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from app.persistence.db import _DAO
 
+
 class ArtifactsDAO(_DAO):
     """Domain persistence for artifacts."""
 

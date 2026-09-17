@@ -7,37 +7,23 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
+
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from pydantic import ValidationError
-from app.artifacts.store import RunArtifacts, materialize_trace_lifecycle
+
+from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
     ActionCapability,
-    AudienceProfile,
-    DemoPlan,
-    DemoTrace,
-    DiscoveryBudget,
-    EditorialStoryboard,
-    ExplorationReport,
     FormField,
-    InteractionEvent,
-    InteractionTrace,
-    NarrationScript,
-    NarrationSegment,
-    ObjectiveSpec,
     ObservedElement,
     OperationKind,
     Postcondition,
     ProductContext,
-    Rect,
-    ReplanDecision,
     SemanticOperation,
     Target,
-    Viewport,
-    ViewportDecision,
-    WorkflowStep,
 )
 from app.execution.playwright_adapter import GroundingError, PlaywrightAdapter
 from app.planning.capabilities import (
@@ -57,6 +43,7 @@ from app.services.generation_policy import (
 from app.services.generation_policy import (
     normalise_observed_selector as _normalise_observed_selector,
 )
+
 from .render import GenerationPreconditionError
 
 

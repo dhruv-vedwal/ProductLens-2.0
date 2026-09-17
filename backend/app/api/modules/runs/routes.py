@@ -178,6 +178,11 @@ async def retry_generation_run(
             "audience": payload.audience or original.get("audience", "product prospect"),
             "target_duration_seconds": payload.target_duration_seconds
             or int(original.get("target_duration_seconds", 120)),
+            "presentation": (
+                payload.presentation.model_dump(mode="json")
+                if payload.presentation is not None
+                else original.get("presentation", {})
+            ),
             # Editorial/narration repairs regenerate only the script and its
             # evidence-bound storyboard from the existing trace. Other retry
             # boundaries retain their approved presentation artifact.

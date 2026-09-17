@@ -51,7 +51,7 @@ class EnvironmentCredentialService:
         source = Path(
             os.getenv(
                 "PRODUCTLENS_ENV_FILE",
-                Path(__file__).resolve().parents[3] / ".env",
+                Path(__file__).resolve().parents[2] / ".env",
             )
         )
         if not source.is_file():
@@ -72,7 +72,7 @@ class EnvironmentCredentialService:
         source = Path(
             os.getenv(
                 "PRODUCTLENS_ENV_FILE",
-                Path(__file__).resolve().parents[3] / ".env",
+                Path(__file__).resolve().parents[2] / ".env",
             )
         )
         if source.is_file():

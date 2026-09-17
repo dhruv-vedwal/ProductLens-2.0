@@ -35,7 +35,7 @@ class BrowserbaseProvider:
         self.project_id = project_id
         self.session_timeout_seconds = max(60, min(1800, int(session_timeout_seconds)))
         self.stagehand_extension_path = stagehand_extension_path or (
-            Path(__file__).resolve().parents[3]
+            Path(__file__).resolve().parents[2]
             / "stagehand/node_modules/@browserbasehq/stagehand/dist/assets/stagehand-extension.zip"
         )
         self._stagehand_extensions: dict[str, str] = {}

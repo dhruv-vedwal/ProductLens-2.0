@@ -116,6 +116,7 @@ async def execute_generation_stage(
             raise ValueError(f"unknown generation job kind: {job['kind']}")
     except Exception as error:
         code = error.failure_code if isinstance(error, ProviderError) else type(error).__name__
+        repository.fail_active_stage_jobs(run_id, code)
         repository.update_stage_job(run_id, stage, status="FAILED", error_code=code)
         repository.update_run(run_id, stage="FAILED", status="FAILED", error_code=code)
         repository.finish_job(job["id"], status="FAILED", error_code=code)

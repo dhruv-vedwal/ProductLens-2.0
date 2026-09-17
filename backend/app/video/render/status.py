@@ -4,26 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
-import re
-import shutil
 import subprocess
 import time
-from datetime import timedelta
 from pathlib import Path
 
 from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
     DemoTrace,
-    EditorialStoryboard,
-    InteractionEvent,
-    OperationKind,
-    PresentationPlan,
 )
-from app.narration.audio import audio_duration_seconds
-from app.presentation.title import concise_demo_title
-from app.video.source_timing import align_trace_to_recording
+
+# Compatibility hook used by the render test harness to replace duration
+# probing consistently across the split render modules.
+from app.narration.audio import audio_duration_seconds  # noqa: F401
 
 DEFAULT_FRAME_RATE = 30
 
@@ -257,17 +250,17 @@ class NarrationTimingError(RuntimeError):
 
 __all__ = [
     "DEFAULT_FRAME_RATE",
-    "RenderTimeoutError",
     "CaptureDurationError",
+    "NarrationTimingError",
     "RecordingProvenanceError",
-    "_validate_recording_provenance",
+    "RenderTimeoutError",
     "_completed_segment_after_timeout",
-    "_segment_is_complete",
-    "_run_remotion_segment",
+    "_remotion_hardware_acceleration",
+    "_remotion_setup_timeout_ms",
+    "_render_chunk_frames",
     "_render_concurrency",
     "_render_timeout_seconds",
-    "_remotion_setup_timeout_ms",
-    "_remotion_hardware_acceleration",
-    "_render_chunk_frames",
-    "NarrationTimingError",
+    "_run_remotion_segment",
+    "_segment_is_complete",
+    "_validate_recording_provenance",
 ]

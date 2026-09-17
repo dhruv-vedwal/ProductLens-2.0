@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import re
-from hashlib import sha256
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 from app.contracts.models import (
     CandidateDemoFlow,
@@ -17,9 +16,6 @@ from app.contracts.models import (
     Target,
     WorkflowProposal,
 )
-from app.urls import canonical_product_url
-
-from app.planning.candidates.scoring import *  # noqa: F403
 from app.planning.candidates.navigation import (  # noqa: F401
     _configuration_landmark,
     _fact_for_landmark,
@@ -30,6 +26,8 @@ from app.planning.candidates.navigation import (  # noqa: F401
     _page_story_subject,
     _phase_intent,
 )
+from app.planning.candidates.scoring import *
+
 
 def build_page_complete_proposal(
     context: ProductContext, candidate: CandidateDemoFlow
@@ -992,11 +990,11 @@ def _page_evidence(page: PageKnowledge) -> list[str]:
     ]
 
 __all__ = [
-    "build_page_complete_proposal",
-    "_unique_pages",
-    "_pages_for_context",
-    "_observed_pages",
-    "_page_relevance",
     "_flow_from_pages",
+    "_observed_pages",
     "_page_evidence",
+    "_page_relevance",
+    "_pages_for_context",
+    "_unique_pages",
+    "build_page_complete_proposal",
 ]

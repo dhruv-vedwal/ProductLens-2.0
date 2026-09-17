@@ -5,51 +5,34 @@ import json
 import re
 from contextlib import suppress
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit
+
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from pydantic import ValidationError
-from app.artifacts.store import RunArtifacts, materialize_trace_lifecycle
+
+from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
-    ActionCapability,
-    AudienceProfile,
-    DemoPlan,
-    DemoTrace,
     DiscoveryBudget,
-    EditorialStoryboard,
     ExplorationReport,
-    FormField,
-    InteractionEvent,
-    InteractionTrace,
-    NarrationScript,
-    NarrationSegment,
     ObjectiveSpec,
-    ObservedElement,
-    OperationKind,
-    Postcondition,
     ProductContext,
-    Rect,
-    ReplanDecision,
-    SemanticOperation,
-    Target,
-    Viewport,
     ViewportDecision,
-    WorkflowStep,
 )
 from app.discovery.live import (
-    LiveDiscovery,
     _objective_spec,
     _page_knowledge,
     adaptive_exploration_budget,
 )
-from app.observability.logging import get_logger, redact_prompt_text
+from app.observability.logging import redact_prompt_text
 from app.presentation.viewport import choose_viewport, probe_viewport_candidates
 from app.providers.errors import ProviderError
 from app.services.generation_policy import (
     canonical_url as _canonical_url,
 )
 from app.services.knowledge import product_knowledge_payload
+
 from .render import GenerationPreconditionError
 
 

@@ -23,7 +23,7 @@ from .narrate import NarrateMixin
 from .plan import PlanMixin
 from .qa import QaMixin
 from .rehearse import RehearseMixin
-from .render import GenerationPreconditionError, RenderMixin
+from .render import RenderMixin
 
 logger = get_logger("app.generation")
 

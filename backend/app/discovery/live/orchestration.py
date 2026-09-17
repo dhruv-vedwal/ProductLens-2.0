@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -13,23 +12,16 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.contracts.models import (
-    ActionCapability,
     CandidateDemoFlow,
     DiscoveryBudget,
     FeatureKnowledge,
-    FormField,
-    FormSchema,
-    ObjectiveRelationship,
     ObjectiveSpec,
     ObservedElement,
-    PageKnowledge,
     ProductContext,
-    ProductRelationship,
-    Target,
 )
+from app.discovery.live.helpers import *
 from app.planning.capability_resolution import resolve_capabilities
 
-from app.discovery.live.helpers import *  # noqa: F403
 
 class DiscoveryOrchestrationMixin:
     async def discover(
