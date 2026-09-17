@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 from playwright.async_api import Error as PlaywrightError
+from pydantic import ValidationError
 
 from app.contracts.models import OperationKind, Rect, SemanticOperation, Target, Viewport
 from app.execution.spatial_index import SpatialIndex
@@ -874,6 +875,16 @@ class PlaywrightAdapter:
             # only after grounding a visible text tool and canvas target.
             if isinstance(operation.value, dict) and isinstance(operation.value.get("text"), str):
                 text = operation.value["text"]
+                surface_fingerprint = None
+                surface_target = operation.value.get("surface_target")
+                if isinstance(surface_target, dict):
+                    try:
+                        surface, _ = await self.grounded_locator(Target.model_validate(surface_target))
+                        box = await surface.bounding_box()
+                        if box and box.get("width", 0) >= 16 and box.get("height", 0) >= 16:
+                            surface_fingerprint = await self.page.screenshot(clip=box)
+                    except (PlaywrightError, GroundingError, ValidationError):
+                        surface_fingerprint = None
                 focus_before = await self.page.evaluate(
                     """() => {
                       const e = document.activeElement;
@@ -899,7 +910,21 @@ class PlaywrightAdapter:
                       e.getAttribute('placeholder') || '').slice(0,160), contenteditable:e.isContentEditable
                     } : null; }"""
                 )
-                return {"text_length": len(text), "scope": "focused-editable", "focused": focus}
+                surface_changed = None
+                if surface_fingerprint is not None and isinstance(surface_target, dict):
+                    try:
+                        surface, _ = await self.grounded_locator(Target.model_validate(surface_target))
+                        box = await surface.bounding_box()
+                        after = await self.page.screenshot(clip=box) if box else None
+                        surface_changed = after != surface_fingerprint
+                    except (PlaywrightError, GroundingError, ValidationError):
+                        surface_changed = None
+                return {
+                    "text_length": len(text),
+                    "scope": "focused-editable",
+                    "focused": focus,
+                    **({"surface_changed": surface_changed} if surface_changed is not None else {}),
+                }
             key = str(operation.value or "Escape")
             await self.page.keyboard.press(key)
             await self.page.wait_for_timeout(120)
