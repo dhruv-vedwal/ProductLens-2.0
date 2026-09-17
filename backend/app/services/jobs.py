@@ -576,8 +576,15 @@ class DemoJobService:
                 self.repository.update_stage_job(run_id, "VIDEO_QA", status="SKIPPED")
                 self.repository.update_run(run_id, stage=RunStage.COMPLETE, status="COMPLETE")
                 return
-            output = self.url_generator.render_stage(
-                run_id=run_id, artifact_root=self.artifact_root
+            # Remotion/FFmpeg rendering is synchronous and can take many
+            # minutes for a 1080p walkthrough. Keep it off the async event
+            # loop so the stage heartbeat continues to refresh its durable
+            # lease; otherwise the recovery worker can incorrectly requeue a
+            # healthy render while the original process is still writing it.
+            output = await asyncio.to_thread(
+                self.url_generator.render_stage,
+                run_id=run_id,
+                artifact_root=self.artifact_root,
             )
             self._register_final_video(run_id, Path(output))
             self.repository.save_video_render(
