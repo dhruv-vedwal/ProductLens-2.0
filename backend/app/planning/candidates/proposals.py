@@ -897,6 +897,19 @@ def build_page_complete_proposal(
                         covered_content_groups=[surface.name],
                     )
                 )
+                # The generic fallback stroke is useful for an unlabelled
+                # drawing request, but it adds noise after a requested
+                # component/connector composition has already completed.
+                if labels and text_tool:
+                    steps = [
+                        operation
+                        for operation in steps
+                        if not (
+                            operation.kind is OperationKind.POINTER_SEQUENCE
+                            and isinstance(operation.value, dict)
+                            and operation.value.get("pattern") == "short_reversible_stroke"
+                        )
+                    ]
                 # Do not synthesize text labels or connector paths from the
                 # wording of the objective.  A fixed grid of normalized points
                 # is not evidence of canvas objects and caused Excalidraw runs
