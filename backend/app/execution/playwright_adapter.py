@@ -656,6 +656,42 @@ class PlaywrightAdapter:
                     {"x": float(box["x"]) + width / 2, "y": center_y + inset_y * 0.35},
                     {"x": float(box["x"]) + width - inset_x, "y": center_y - inset_y * 0.15},
                 ]
+            # Re-ground the semantic drawing tool immediately before a canvas
+            # gesture. Editors may return to selection/text mode after focus
+            # moves from the toolbar to the surface; a planned toolbar click
+            # alone is therefore not a sufficient interaction guarantee.
+            if pattern in {"connector_segment", "short_reversible_stroke", "text_placement"}:
+                if pattern == "connector_segment":
+                    tool_terms = ("arrow", "connector", "line")
+                elif pattern == "text_placement":
+                    tool_terms = ("text", "label")
+                else:
+                    tool_terms = ("draw", "pen", "freehand", "pencil")
+                try:
+                    controls = await self.page.locator("button,[role='button']").all()
+                    for index, control in enumerate(controls):
+                        if not await control.is_visible():
+                            continue
+                        metadata = await control.evaluate(
+                            """node => ({
+                              text: (node.innerText || '').toLowerCase(),
+                              aria: (node.getAttribute('aria-label') || '').toLowerCase(),
+                              title: (node.getAttribute('title') || '').toLowerCase(),
+                              testid: (node.getAttribute('data-testid') || '').toLowerCase()
+                            })"""
+                        )
+                        haystack = " ".join(
+                            str(metadata.get(key, ""))
+                            for key in ("text", "aria", "title", "testid")
+                        )
+                        if any(term in haystack for term in tool_terms):
+                            await self.page.locator("button,[role='button']").nth(index).click()
+                            await self.page.wait_for_timeout(180)
+                            break
+                except (PlaywrightError, TypeError):
+                    # The planned click remains the evidence-backed fallback
+                    # when an editor exposes no semantic toolbar metadata.
+                    pass
             surface_fingerprint = None
             surface_structure = None
             surface_box = None
@@ -798,6 +834,12 @@ class PlaywrightAdapter:
                 # observed path for the trace, then issue the equivalent native
                 # click at that same grounded point to open the editor.
                 await self.page.mouse.click(float(first["x"]), float(first["y"]), button=button)
+                await self.page.wait_for_timeout(180)
+            elif pattern == "connector_segment":
+                # Selection handles are transient pixels, not proof of a
+                # committed connector. Clear them before taking the outcome
+                # witness so a failed drag cannot pass verification.
+                await self.page.keyboard.press("Escape")
                 await self.page.wait_for_timeout(180)
             changed = None
             after_structure = None
