@@ -36,6 +36,7 @@ from app.video.render import (
     _render_concurrency,
     _render_timeout_seconds,
     _validate_recording_provenance,
+    normalize_remotion_presentation_options,
     render_remotion,
 )
 from app.video.render import assemble as render_assemble
@@ -65,6 +66,22 @@ def test_frame_rate_parser_preserves_measured_source_cadence():
     assert _frame_rate("60000/1001") > 59
     assert _frame_rate("30000/1001") < 30
     assert _frame_rate("broken") == 0
+
+
+def test_presentation_options_are_normalized_at_the_remotion_boundary():
+    options = normalize_remotion_presentation_options(
+        {
+            "subtitle_style": "pill",
+            "subtitle_font_size": 32,
+            "browser_zoom_percent": 100,
+            "unknown_internal_key": "must-not-leak",
+        }
+    )
+    assert options == {
+        "subtitleStyle": "pill",
+        "subtitleFontSize": 32,
+        "browserZoomPercent": 100,
+    }
 
 
 def test_prepared_h264_editorial_source_is_copied_without_a_second_encode(

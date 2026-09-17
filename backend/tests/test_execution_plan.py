@@ -134,6 +134,39 @@ async def test_engine_compiles_action_intents_into_the_same_execution_kernel():
 
 
 @pytest.mark.asyncio
+async def test_semantic_boundary_observer_is_not_called_for_each_typed_value():
+    trace = DemoTrace(
+        run_id="boundary-observer", objective="Complete the observed flow", started_at=datetime.now(UTC)
+    )
+    calls: list[str] = []
+
+    async def observe(operation, snapshot):
+        calls.append(operation.id)
+        assert snapshot is not None
+        return {"status": "observed", "sections": ["Result"]}
+
+    engine = ExecutionEngine(Adapter(), trace, semantic_boundary_observer=observe)
+    await engine.run(
+        SemanticOperation(
+            id="typed-field",
+            kind=OperationKind.FILL_TEXT,
+            intent="Enter the observed value",
+            target=Target(name="Name"),
+            value="Demo",
+        )
+    )
+    await engine.run(
+        SemanticOperation(
+            id="verify-result",
+            kind=OperationKind.VERIFY_STATE,
+            intent="Verify the visible result",
+        )
+    )
+    assert calls == ["verify-result"]
+    assert trace.events[-1].after["semantic_boundary"]["sections"] == ["Result"]
+
+
+@pytest.mark.asyncio
 async def test_engine_persists_kernel_attempt_and_verified_outcome(tmp_path: Path):
     trace = DemoTrace(
         run_id="kernel-trace", objective="Inspect the result", started_at=datetime.now(UTC)

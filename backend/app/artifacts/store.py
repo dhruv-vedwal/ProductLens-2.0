@@ -318,6 +318,7 @@ class RunArtifacts:
             "capability_resolutions": self.root / "planning" / "capability-resolutions.json",
             "validated_state_graph": self.root / "planning" / "validated-state-graph.json",
             "plan": self.root / "plan.json",
+            "certified_demo_script": self.root / "planning" / "certified-demo-script.json",
             "plan_consistency": self.qa / "plan-consistency-report.json",
             "editorial_brief": self.presentation / "editorial-brief.json",
             "storyboard": self.presentation / "storyboard.json",
@@ -328,12 +329,15 @@ class RunArtifacts:
             "fact_extraction": self.root / "narration" / "fact-extraction.json",
             "captions": self.presentation / "rendered-captions.json",
             "coverage_qa": self.qa / "coverage-report.json",
+            "outcome_qa": self.qa / "outcome-report.json",
             "journey_qa": self.root / "quality" / "journey-report.json",
             "artifact_manifest": self.root / "artifact-manifest.json",
             "state_snapshots": self.execution / "state-snapshots.json",
             "action_attempts": self.execution / "action-attempts.json",
             "verification_results": self.execution / "verification-results.json",
             "interaction_trace": self.execution / "interaction-trace.json",
+            "semantic_moments": self.presentation / "semantic-moments.json",
+            "sync_edl": self.presentation / "sync-edl.json",
         }
         required = {
             **self.required_delivery_artifacts(),

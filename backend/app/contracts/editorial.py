@@ -80,7 +80,7 @@ class NarrationSegment(BaseModel):
     # Editorial lines carry evidence IDs; deterministic compatibility lines may
     # retain a redacted browser-state mapping until they are converted into
     # evidence references by the owning storyboard layer.
-    evidence: list[str] = Field(default_factory=list, max_length=24)
+    evidence: list[str] = Field(min_length=1, max_length=24)
     facts: list[str] | dict[str, Any] = Field(default_factory=list)
     opening: bool = False
     start_seconds: float | None = Field(default=None, ge=0)

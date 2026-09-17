@@ -176,6 +176,10 @@ class ExecutionEngine:
         scene_hold_ms: dict[str, int] | None = None,
         force_light_theme: bool = False,
         capture_event_screenshots: bool = True,
+        semantic_boundary_observer: Callable[
+            [SemanticOperation, InteractionSnapshot | None], Awaitable[dict[str, object] | None]
+        ]
+        | None = None,
     ):
         self.adapter = adapter
         self.trace = trace
@@ -185,6 +189,7 @@ class ExecutionEngine:
         self.scene_hold_ms = scene_hold_ms or {}
         self.force_light_theme = force_light_theme
         self.capture_event_screenshots = capture_event_screenshots
+        self.semantic_boundary_observer = semantic_boundary_observer
         self.recovery_budget = RecoveryBudget()
         self.interaction_kernel = InteractionKernel(
             run_id=trace.run_id,
@@ -457,6 +462,7 @@ class ExecutionEngine:
         action_result: object | None = None
         before_observation: InteractionSnapshot | None = None
         after_observation: InteractionSnapshot | None = None
+        semantic_boundary: dict[str, object] | None = None
         kernel_intent = self._action_intent_for_operation(operation)
         kernel_attempt: ActionAttempt | None = None
         # This is deliberately captured *before* the editorial reading hold.
@@ -624,6 +630,34 @@ class ExecutionEngine:
                                     if callable(snapshot_visible)
                                     else await self.adapter.snapshot(condition.target)
                                 )
+                    # Stagehand is consulted only at meaningful semantic
+                    # boundaries (navigation/reveal/mutation/verification),
+                    # never for each keystroke. Its response is advisory; the
+                    # Playwright postcondition above remains authoritative.
+                    if (
+                        self.semantic_boundary_observer is not None
+                        and operation.kind
+                        in {
+                            OperationKind.NAVIGATE,
+                            OperationKind.OPEN_NAVIGATION_ITEM,
+                            OperationKind.OPEN_MODAL,
+                            OperationKind.CLOSE_MODAL,
+                            OperationKind.SUBMIT,
+                            OperationKind.CREATE_RECORD,
+                            OperationKind.DRAG,
+                            OperationKind.POINTER_SEQUENCE,
+                            OperationKind.VERIFY_STATE,
+                        }
+                    ):
+                        try:
+                            boundary_observation = await self._record_interaction_observation()
+                            boundary = await self.semantic_boundary_observer(
+                                operation, boundary_observation
+                            )
+                            if isinstance(boundary, dict) and boundary:
+                                semantic_boundary = boundary
+                        except Exception:  # noqa: BLE001 - advisory provider cannot alter truth
+                            semantic_boundary = {"status": "unavailable"}
                     occurred_at = datetime.now(UTC)
                     if self.adapter.page is not None:
                         await self._active_page().wait_for_timeout(
@@ -676,6 +710,8 @@ class ExecutionEngine:
                 }
             if verified_outcome is not None:
                 after["verified_outcome"] = verified_outcome
+            if semantic_boundary is not None:
+                after["semantic_boundary"] = semantic_boundary
             after_observation = await self._record_interaction_observation()
             if kernel_attempt is not None:
                 kernel_attempt.dispatched = action_at is not None

@@ -84,6 +84,62 @@ class ReplanDecision(BaseModel):
     dispatched: bool = False
 
 
+class OutcomeSpec(BaseModel):
+    """A viewer-visible result that must be proven by production evidence.
+
+    Outcomes are deliberately expressed as predicates over observed browser
+    state rather than product-specific commands.  The interaction kernel may
+    choose any capability/gesture that satisfies the predicate.
+    """
+
+    id: str = Field(min_length=1, max_length=120)
+    intent: str = Field(min_length=3, max_length=300)
+    success_predicate: Literal[
+        "visible",
+        "text",
+        "value",
+        "url",
+        "options_visible",
+        "canvas_content",
+        "state",
+    ] = "visible"
+    evidence_refs: list[str] = Field(min_length=1, max_length=32)
+    mutation_class: Literal["read_only", "authorized_mutation", "external_side_effect"] = (
+        "read_only"
+    )
+    required: bool = True
+    max_attempts: int = Field(default=2, ge=1, le=4)
+    fallback_strategy: str = Field(
+        default="re-observe the live state and select another grounded capability",
+        min_length=3,
+        max_length=300,
+    )
+
+
+class CertifiedDemoScript(BaseModel):
+    """The planning certificate shared by execution, narration, and QA."""
+
+    schema_version: int = Field(default=1, ge=1)
+    outcomes: list[OutcomeSpec] = Field(min_length=1, max_length=60)
+    stop_conditions: list[str] = Field(min_length=1, max_length=24)
+    minimum_duration_seconds: int = Field(ge=5, le=900)
+    target_duration_seconds: int = Field(ge=5, le=900)
+    maximum_duration_seconds: int = Field(ge=5, le=1200)
+
+    @model_validator(mode="after")
+    def validate_certificate(self) -> CertifiedDemoScript:
+        if not (
+            self.minimum_duration_seconds
+            <= self.target_duration_seconds
+            <= self.maximum_duration_seconds
+        ):
+            raise ValueError("certified script duration envelope is invalid")
+        ids = [outcome.id for outcome in self.outcomes]
+        if len(ids) != len(set(ids)):
+            raise ValueError("certified script outcome ids must be unique")
+        return self
+
+
 class DemoPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -104,6 +160,7 @@ class DemoPlan(BaseModel):
     viewport_strategy: str
     risk_flags: list[str] = Field(default_factory=list)
     stop_conditions: list[str] = Field(min_length=1)
+    certified_script: CertifiedDemoScript | None = None
 
     @model_validator(mode="after")
     def validate_duration_envelope(self) -> DemoPlan:

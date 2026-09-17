@@ -85,6 +85,34 @@ async def test_stagehand_observation_is_normalized_without_execution(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_stagehand_observation_cache_reuses_read_only_boundary(monkeypatch, tmp_path: Path):
+    bridge = tmp_path / "observe.mjs"
+    bridge.write_text("// bridge")
+    calls = 0
+
+    class CachedProcess(Process):
+        async def communicate(self, payload):
+            nonlocal calls
+            calls += 1
+            return (
+                (
+                    b'{"version":2,"environment":"LOCAL","observedUrl":"https://example.test",'
+                    b'"candidates":[],"metrics":{}}'
+                ),
+                b"",
+            )
+
+    async def create(*args, **kwargs):
+        return CachedProcess()
+
+    monkeypatch.setattr("app.providers.stagehand.asyncio.create_subprocess_exec", create)
+    provider = StagehandProvider(bridge=bridge)
+    await provider.observe(url="https://example.test", instruction="observe", cache_dir=tmp_path)
+    await provider.observe(url="https://example.test", instruction="observe", cache_dir=tmp_path)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_stagehand_keeps_observed_actions_when_advisory_extraction_fails(
     monkeypatch, tmp_path: Path
 ):

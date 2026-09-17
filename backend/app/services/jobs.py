@@ -299,7 +299,14 @@ class DemoJobService:
             json.loads((artifacts.execution / "trace.json").read_text(encoding="utf-8"))
         )
 
-    async def run_url_stage(self, run_id: str, stage: str, *, payload: dict[str, Any]) -> None:
+    async def run_url_stage(
+        self,
+        run_id: str,
+        stage: str,
+        *,
+        payload: dict[str, Any],
+        claimed_stage: dict[str, Any] | None = None,
+    ) -> None:
         """Run one durable stage and terminally classify any unhandled failure."""
         # Direct supervisors and broker workers can observe the same queued
         # stage concurrently (for example after a shell timeout).  Claim the
@@ -309,8 +316,27 @@ class DemoJobService:
         # and concurrent Remotion renders writing into one run directory.
         self.repository.ensure_stage_jobs(run_id)
         current = self.repository.stage_job(run_id, stage)
-        if current["status"] in {"COMPLETE", "SKIPPED", "RUNNING"}:
+        if current["status"] in {"COMPLETE", "SKIPPED"}:
             return
+        owns_claim = False
+        if current["status"] == "RUNNING":
+            # A broker/local worker may pass the lease it just acquired. A
+            # second delivery sees RUNNING but does not own that lease and
+            # must not enter the provider path or duplicate a browser session.
+            if claimed_stage is None or claimed_stage.get("status") != "RUNNING":
+                return
+            # ``claimed_stage`` is the compare-and-set result returned to the
+            # worker.  Match its lease timestamp when available so a stale
+            # delivery cannot take over a lease that has since been reclaimed.
+            claimed_at = claimed_stage.get("claimed_at")
+            current_claimed_at = current.get("claimed_at")
+            if (
+                claimed_at is not None
+                and current_claimed_at is not None
+                and claimed_at != current_claimed_at
+            ):
+                return
+            owns_claim = True
         if current["status"] == "FAILED":
             # A failed checkpoint is an explicit repair boundary.  Silently
             # treating it as a no-op lets a supervisor mark the whole run
@@ -320,7 +346,7 @@ class DemoJobService:
             raise RuntimeError(
                 f"stage {stage} is FAILED; create a targeted retry from this checkpoint"
             )
-        if self.repository.claim_stage_job(run_id, stage) is None:
+        if not owns_claim and self.repository.claim_stage_job(run_id, stage) is None:
             return
         heartbeat = asyncio.create_task(self._heartbeat_stage(run_id, stage))
         try:

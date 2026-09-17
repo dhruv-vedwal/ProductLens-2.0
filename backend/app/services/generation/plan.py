@@ -169,6 +169,11 @@ class PlanMixin:
         )
         artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
         artifacts.write_json("plan.json", plan.model_dump(mode="json"))
+        if plan.certified_script is not None:
+            artifacts.write_json(
+                "planning/certified-demo-script.json",
+                plan.certified_script.model_dump(mode="json"),
+            )
         artifacts.write_json(
             "planning/validated-state-graph.json",
             WorkflowStateMachine.from_operations(

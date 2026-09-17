@@ -49,17 +49,22 @@ async def test_url_stage_worker_uses_the_same_durable_claim_boundary(tmp_path: P
 
     class FakeJobs:
         def __init__(self):
-            self.calls: list[tuple[str, dict]] = []
+            self.calls: list[tuple[str, dict, dict | None]] = []
 
-        async def run_url_stage(self, run_id: str, stage: str, *, payload: dict):
-            self.calls.append((stage, payload))
+        async def run_url_stage(
+            self, run_id: str, stage: str, *, payload: dict, claimed_stage: dict | None = None
+        ):
+            self.calls.append((stage, payload, claimed_stage))
             repository.update_stage_job(run_id, stage, status="COMPLETE")
 
     fake = FakeJobs()
     await execute_generation_stage(run["id"], "DISCOVERY", repository=repository, jobs=fake)
-    assert fake.calls == [
-        ("DISCOVERY", {"max_pages": 3, "render": False, "allow_external_side_effects": False})
-    ]
+    assert len(fake.calls) == 1
+    assert fake.calls[0][:2] == (
+        "DISCOVERY", {"max_pages": 3, "render": False, "allow_external_side_effects": False}
+    )
+    assert fake.calls[0][2] is not None
+    assert fake.calls[0][2]["status"] == "RUNNING"
     assert repository.stage_job(run["id"], "DISCOVERY")["status"] == "COMPLETE"
 
 
@@ -119,7 +124,9 @@ async def test_stage_worker_persists_non_retryable_provider_credit_failure(tmp_p
     assert repository.claim_job(job["id"])
 
     class FailingJobs:
-        async def run_url_stage(self, run_id: str, stage: str, *, payload: dict):
+        async def run_url_stage(
+            self, run_id: str, stage: str, *, payload: dict, claimed_stage: dict | None = None
+        ):
             raise ProviderError("browserbase", 402, "payment required")
 
     with pytest.raises(ProviderError):

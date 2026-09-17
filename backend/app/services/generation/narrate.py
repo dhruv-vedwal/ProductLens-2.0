@@ -66,6 +66,12 @@ def _narration_script_contract(
             if isinstance(facts, list)
             else []
         )
+        # Deterministic trace fallbacks carry browser-state facts as a mapping
+        # rather than a list of editorial IDs. Bind those lines to their
+        # immutable event witness instead of allowing an evidence-free script
+        # to cross into captions/TTS.
+        if not evidence:
+            evidence = [f"trace:event:{event_id}"]
         # A page-local scene can legitimately cite many section/element refs,
         # but the public narration contract intentionally caps evidence IDs so
         # artifacts stay bounded. Preserve stable order and provenance rather

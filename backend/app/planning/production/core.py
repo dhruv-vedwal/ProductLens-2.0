@@ -9,8 +9,10 @@ from pydantic import ValidationError
 
 from app.contracts.models import (
     ActionCapability,
+    CertifiedDemoScript,
     DemoPlan,
     OperationKind,
+    OutcomeSpec,
     Postcondition,
     ProductContext,
     SemanticOperation,
@@ -38,6 +40,71 @@ from app.planning.side_effects import (
 from app.planning.synthetic import hydrate_operations
 from app.providers.errors import ProviderError
 from app.providers.interfaces import LLMProvider
+
+
+def _certify_operations(
+    operations: list[SemanticOperation],
+    *,
+    expected_outcomes: list[str],
+    minimum_duration_seconds: int,
+    target_duration_seconds: int,
+    maximum_duration_seconds: int,
+) -> CertifiedDemoScript:
+    """Compile semantic steps into a stable, evidence-bearing outcome certificate."""
+    predicate_by_kind = {
+        OperationKind.NAVIGATE: "url",
+        OperationKind.OPEN_NAVIGATION_ITEM: "url",
+        OperationKind.FILL_TEXT: "value",
+        OperationKind.FILL_EMAIL: "value",
+        OperationKind.FILL_PHONE: "value",
+        OperationKind.SELECT_OPTION: "value",
+        OperationKind.SELECT_DATE: "value",
+        OperationKind.SELECT_DATE_RANGE: "value",
+        OperationKind.OPEN_MODAL: "visible",
+        OperationKind.CLOSE_MODAL: "overlay_clear",
+        OperationKind.SUBMIT: "state",
+        OperationKind.CREATE_RECORD: "state",
+        OperationKind.DRAG: "changed",
+        OperationKind.POINTER_SEQUENCE: "changed",
+        OperationKind.VERIFY_STATE: "state",
+    }
+    mutating = {OperationKind.SUBMIT, OperationKind.CREATE_RECORD}
+    outcomes: list[OutcomeSpec] = []
+    for operation in operations:
+        if not operation.critical and not operation.postconditions:
+            continue
+        evidence = list(operation.evidence_refs)
+        if operation.page_url:
+            evidence.append(f"page:{operation.page_url}")
+        if not evidence:
+            evidence.append(f"operation:{operation.id}")
+        outcomes.append(
+            OutcomeSpec(
+                id=f"outcome-{operation.id}",
+                intent=operation.intent,
+                success_predicate=predicate_by_kind.get(operation.kind, "visible"),
+                evidence_refs=list(dict.fromkeys(evidence)),
+                mutation_class=("authorized_mutation" if operation.kind in mutating else "read_only"),
+                required=operation.critical,
+                max_attempts=2 if operation.critical else 1,
+            )
+        )
+    if not outcomes:
+        outcomes.append(
+            OutcomeSpec(
+                id="outcome-opening-state",
+                intent="Establish the requested product state for the viewer",
+                success_predicate="visible",
+                evidence_refs=["opening:state"],
+            )
+        )
+    return CertifiedDemoScript(
+        outcomes=outcomes,
+        stop_conditions=[*expected_outcomes, "all required outcomes have verified evidence"],
+        minimum_duration_seconds=minimum_duration_seconds,
+        target_duration_seconds=target_duration_seconds,
+        maximum_duration_seconds=maximum_duration_seconds,
+    )
 
 
 class PlanningCoreMixin:
@@ -390,6 +457,13 @@ class PlanningCoreMixin:
                     ),
                 }
             )
+        certified_script = _certify_operations(
+            steps,
+            expected_outcomes=proposal.expected_outcomes,
+            minimum_duration_seconds=approved_minimum,
+            target_duration_seconds=target_duration_seconds,
+            maximum_duration_seconds=approved_maximum,
+        )
         return DemoPlan(
             objective=objective,
             narrative_goal=proposal.narrative_goal,
@@ -460,6 +534,7 @@ class PlanningCoreMixin:
                 "unexpected authentication",
                 "budget exhausted",
             ],
+            certified_script=certified_script,
         )
 
     @staticmethod

@@ -9,6 +9,7 @@ inside the ProductLens interaction kernel.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -112,6 +113,7 @@ class StagehandProvider:
         browserbase_connect_url: str | None = None,
         browserbase_extension_id: str | None = None,
         cache_dir: Path | None = None,
+        state_fingerprint: str | None = None,
     ) -> StagehandObservation:
         if environment not in {"LOCAL", "BROWSERBASE"}:
             raise ValueError("Stagehand environment must be LOCAL or BROWSERBASE")
@@ -143,13 +145,14 @@ class StagehandProvider:
             # artifact or log.
             "browserbaseConnectUrl": browserbase_connect_url,
             "stagehandExtensionId": browserbase_extension_id,
+            "stateFingerprint": state_fingerprint,
             "cacheDir": str(cache_dir) if cache_dir else None,
         }
         # Observation and action calls share the same bounded subprocess gate.
         # Without this path through ``_invoke``, concurrent discovery runs
         # could each start an unbounded Stagehand process and exhaust browser
         # slots before provider backpressure had a chance to apply.
-        response = await self._invoke(payload)
+        response = await self._invoke_cached(payload, cache_dir=cache_dir, namespace="observe")
         try:
             if response.get("version") not in {1, 2}:
                 raise ValueError("unsupported bridge response")
@@ -346,6 +349,42 @@ class StagehandProvider:
     async def _invoke(self, payload: dict[str, object]) -> dict[str, object]:
         async with self._invoke_limit:
             return await self._invoke_unbounded(payload)
+
+    async def _invoke_cached(
+        self,
+        payload: dict[str, object],
+        *,
+        cache_dir: Path | None,
+        namespace: str,
+    ) -> dict[str, object]:
+        """Cache read-only semantic observations within one run.
+
+        Stagehand is intentionally called at semantic boundaries, not for every
+        keystroke. A run-scoped cache avoids paying for identical re-observes
+        while the session, instruction, and requested state are unchanged.
+        Action/rehearsal calls never use this method because their response is
+        not safe to replay.
+        """
+        cache_path: Path | None = None
+        if cache_dir is not None:
+            key_payload = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+            cache_path = cache_dir / f"{namespace}-{hashlib.sha256(key_payload).hexdigest()}.json"
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                if isinstance(cached, dict):
+                    return cached
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pass
+        response = await self._invoke(payload)
+        if cache_path is not None:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(json.dumps(response, default=str), encoding="utf-8")
+            except OSError:
+                # Cache is an optimization; provider evidence must remain
+                # usable when a read-only cache cannot be written.
+                pass
+        return response
 
     async def _invoke_unbounded(self, payload: dict[str, object]) -> dict[str, object]:
         """Run the bridge with bounded lifetime and never expose its stderr."""

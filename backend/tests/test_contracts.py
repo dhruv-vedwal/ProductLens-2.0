@@ -6,15 +6,19 @@ from pydantic import ValidationError
 from app.contracts.models import (
     ActionIntent,
     AudienceProfile,
+    CertifiedDemoScript,
     DemoPlan,
     DemoTrace,
     InteractionEvent,
     NarrationScript,
     OperationKind,
+    OutcomeSpec,
     Postcondition,
     Target,
     WorkflowState,
 )
+from app.presentation.moments import build_semantic_moments, sync_edl_from_moments
+from app.quality.outcomes import inspect_certified_outcomes
 
 
 def test_audience_profile_is_bounded_and_serializable():
@@ -56,6 +60,72 @@ def test_demo_plan_rejects_unstructured_fields():
         )
 
 
+def test_certified_demo_script_requires_grounded_unique_outcomes():
+    outcome = OutcomeSpec(
+        id="create-result",
+        intent="Show the created item in the resulting detail view",
+        success_predicate="state",
+        evidence_refs=["dom:result", "screenshot:result"],
+        mutation_class="authorized_mutation",
+    )
+    script = CertifiedDemoScript(
+        outcomes=[outcome],
+        stop_conditions=["result visible"],
+        minimum_duration_seconds=60,
+        target_duration_seconds=90,
+        maximum_duration_seconds=120,
+    )
+    assert script.outcomes[0].success_predicate == "state"
+    with pytest.raises(ValidationError, match="outcome ids"):
+        CertifiedDemoScript(
+            outcomes=[outcome, outcome],
+            stop_conditions=["done"],
+            minimum_duration_seconds=60,
+            target_duration_seconds=90,
+            maximum_duration_seconds=120,
+        )
+    with pytest.raises(ValidationError):
+        OutcomeSpec(id="ungrounded", intent="Show result", evidence_refs=[])
+
+
+def test_certified_outcome_gate_requires_verified_operation_witness():
+    plan = DemoPlan(
+        objective="Show the resulting state",
+        narrative_goal="Explain the result",
+        audience="prospect",
+        target_duration_seconds=30,
+        selected_workflow="verified flow",
+        workflow_steps=[
+            {
+                "id": "result",
+                "intent": "Verify result",
+                "operation": {"kind": "VerifyState", "intent": "Verify result"},
+            }
+        ],
+        expected_outcomes=["result visible"],
+        viewport_strategy="preserve context",
+        stop_conditions=["result visible"],
+        certified_script=CertifiedDemoScript(
+            outcomes=[
+                OutcomeSpec(
+                    id="outcome-op-result",
+                    intent="Verify result",
+                    success_predicate="state",
+                    evidence_refs=["trace:event:op-result"],
+                )
+            ],
+            stop_conditions=["result visible"],
+            minimum_duration_seconds=30,
+            target_duration_seconds=30,
+            maximum_duration_seconds=60,
+        ),
+    )
+    trace = DemoTrace(run_id="outcome-gate", objective=plan.objective, started_at=datetime.now(UTC))
+    report = inspect_certified_outcomes(plan, trace)
+    assert report["status"] == "failed"
+    assert report["missing_outcomes"] == ["outcome-op-result"]
+
+
 def test_trace_requires_semantic_before_after_and_success():
     trace = DemoTrace(run_id="run-1", objective="Create a lead", started_at=datetime.now(UTC))
     trace.events.append(
@@ -73,6 +143,26 @@ def test_trace_requires_semantic_before_after_and_success():
     trace.final_state = WorkflowState.ACTION_IN_PROGRESS
     assert trace.events[0].before != trace.events[0].after
     assert trace.events[0].target.test_id == "new-lead-btn"
+
+
+def test_semantic_moments_and_sync_edl_share_verified_event_ids():
+    trace = DemoTrace(run_id="moments", objective="Inspect the result", started_at=datetime.now(UTC))
+    trace.events.append(
+        InteractionEvent(
+            id="event-result",
+            operation_id="op-result",
+            kind=OperationKind.VERIFY_STATE,
+            intent="Verify the resulting state is visible",
+            page_url="https://example.test/result",
+            success=True,
+            duration_ms=250,
+        )
+    )
+    trace.moments = build_semantic_moments(trace)
+    edl = sync_edl_from_moments(trace)
+    assert trace.moments[0].id == "moment-event-result"
+    assert edl["moments"][0]["event_ids"] == ["event-result"]
+    assert edl["moments"][0]["verified"] is True
 
 
 def test_narration_script_is_versioned_and_rejects_invalid_timing():

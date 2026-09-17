@@ -331,6 +331,34 @@ class InteractionEvent(BaseModel):
     scroll_path: list[dict[str, float]] = Field(default_factory=list)
 
 
+class SemanticMoment(BaseModel):
+    """A stable editorial join point derived from verified browser evidence."""
+
+    id: str = Field(min_length=1, max_length=120)
+    kind: Literal[
+        "context",
+        "navigation",
+        "inspection",
+        "interaction",
+        "reveal",
+        "verification",
+        "transition",
+    ]
+    event_ids: list[str] = Field(min_length=1, max_length=32)
+    page_url: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    viewer_value: str = Field(min_length=3, max_length=420)
+    start_at: datetime
+    end_at: datetime
+    verified: bool = False
+
+    @model_validator(mode="after")
+    def valid_interval(self) -> SemanticMoment:
+        if self.end_at < self.start_at:
+            raise ValueError("semantic moment end must not precede start")
+        return self
+
+
 class DemoTrace(BaseModel):
     run_id: str
     objective: str
@@ -364,6 +392,7 @@ class DemoTrace(BaseModel):
     state_snapshots: list[StateSnapshot] = Field(default_factory=list, max_length=600)
     action_attempts: list[ActionAttempt] = Field(default_factory=list, max_length=600)
     verification_results: list[VerificationResult] = Field(default_factory=list, max_length=600)
+    moments: list[SemanticMoment] = Field(default_factory=list, max_length=600)
 
 
 class InteractionTrace(BaseModel):

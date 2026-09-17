@@ -27,3 +27,9 @@ def test_repair_owns_discovery_and_workflow_failures():
     assert (discovery.category, discovery.retry_boundary) == ("discovery", "targeted-exploration")
     workflow = classify_repair(["WORKFLOW_VALIDATION_FAILED"])
     assert (workflow.category, workflow.retry_from_stage) == ("workflow", "PLANNING")
+
+
+def test_missing_certified_outcome_retries_the_workflow_boundary():
+    decision = classify_repair(["CERTIFIED_OUTCOME_MISSING"])
+    assert decision.category == "workflow"
+    assert decision.retry_from_stage == "PLANNING"

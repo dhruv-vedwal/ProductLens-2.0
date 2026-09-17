@@ -42,9 +42,11 @@ from app.presentation.editorial import (
     editorial_script,
 )
 from app.presentation.journey import build_journey, inspect_journey
+from app.presentation.moments import build_semantic_moments, sync_edl_from_moments
 from app.presentation.scenes import build_scene_plan
 from app.providers.errors import ProviderError
 from app.quality.coverage import inspect_coverage
+from app.quality.outcomes import inspect_certified_outcomes
 from app.quality.repair import classify_repair
 from app.quality.story import inspect_story
 from app.services.generation_policy import (
@@ -235,6 +237,18 @@ class ExecuteMixin:
         stagehand_context = ""
         if self.stagehand_provider:
             try:
+                state_fingerprint = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "url": evidence.get("url"),
+                            "title": evidence.get("title"),
+                            "text": text,
+                            "controls": evidence.get("controls", []),
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
                 stagehand_environment = (
                     "BROWSERBASE" if cloud_session_id and browserbase_connect_url else "LOCAL"
                 )
@@ -251,6 +265,7 @@ class ExecuteMixin:
                     browserbase_connect_url=browserbase_connect_url,
                     browserbase_extension_id=stagehand_extension_id,
                     cache_dir=artifacts.root / "discovery" / "stagehand-cache",
+                    state_fingerprint=state_fingerprint,
                 )
                 if observation.analysis:
                     stagehand_context = json.dumps(
@@ -662,6 +677,89 @@ class ExecuteMixin:
                     }
                     try:
                         execution_adapter = PlaywrightAdapter(page, cloud_mode=remote is not None)
+
+                        async def semantic_boundary_observer(
+                            operation: SemanticOperation,
+                            observation,
+                        ) -> dict[str, object] | None:
+                            """Ask Stagehand for a bounded editorial read of a verified state."""
+                            if self.stagehand_provider is None or observation is None:
+                                return None
+                            state_fingerprint = hashlib.sha256(
+                                json.dumps(
+                                    {
+                                        "observation": observation.id,
+                                        "url": observation.url,
+                                        "visible_text_hash": observation.visible_text,
+                                        "evidence": observation.evidence_refs,
+                                    },
+                                    sort_keys=True,
+                                    default=str,
+                                ).encode("utf-8")
+                            ).hexdigest()[:32]
+                            environment = (
+                                "BROWSERBASE"
+                                if cloud_session_id and session is not None
+                                else "LOCAL"
+                            )
+                            try:
+                                result = await asyncio.wait_for(
+                                    self.stagehand_provider.observe(
+                                        url=observation.url,
+                                        instruction=(
+                                            "Observe the current visible state after this verified "
+                                            f"semantic boundary: {redact_prompt_text(operation.intent)}. "
+                                            "Describe only visible sections, controls, and the result; "
+                                            "do not click, type, submit, navigate, or mutate."
+                                        ),
+                                        analysis_instruction=(
+                                            "Return concise visible evidence for the viewer takeaway. "
+                                            "Do not infer hidden behavior or unsupported claims."
+                                        ),
+                                        environment=environment,
+                                        browserbase_session_id=cloud_session_id,
+                                        browserbase_connect_url=(
+                                            session.connect_url if session is not None else None
+                                        ),
+                                        browserbase_extension_id=(
+                                            session.stagehand_extension_id
+                                            if session is not None
+                                            else None
+                                        ),
+                                        cache_dir=artifacts.root / "discovery" / "stagehand-cache",
+                                        state_fingerprint=state_fingerprint,
+                                    ),
+                                    timeout=self.stagehand_observe_timeout_seconds,
+                                )
+                            except Exception as error:  # noqa: BLE001 - advisory only
+                                return {
+                                    "status": "unavailable",
+                                    "error_type": type(error).__name__,
+                                }
+                            analysis = result.analysis
+                            if analysis is None:
+                                return {
+                                    "status": "observed",
+                                    "observed_url": result.observed_url or observation.url,
+                                    "candidate_count": len(result.candidates),
+                                }
+                            return {
+                                "status": "observed",
+                                "observed_url": result.observed_url or observation.url,
+                                "visible_sections": [
+                                    redact_prompt_text(str(item))[:240]
+                                    for item in analysis.visible_sections[:12]
+                                ],
+                                "meaningful_controls": [
+                                    redact_prompt_text(str(item))[:240]
+                                    for item in analysis.meaningful_controls[:20]
+                                ],
+                                "safe_next_actions": [
+                                    redact_prompt_text(str(item))[:240]
+                                    for item in analysis.safe_next_actions[:12]
+                                ],
+                            }
+
                         engine = ExecutionEngine(
                             # Scene-level dwell is the only viewer-facing hold.
                             # Provider round-trip latency is captured as real
@@ -676,6 +774,7 @@ class ExecuteMixin:
                             force_light_theme="light theme" in objective.lower()
                             or "light themed" in objective.lower(),
                             capture_event_screenshots=remote is None,
+                            semantic_boundary_observer=semantic_boundary_observer,
                         )
                         # Cloud sessions have finite provider leases. Bound
                         # semantic execution below that lease so native-video
@@ -922,7 +1021,13 @@ class ExecuteMixin:
             result.dom_snapshot_refs = ["execution/playwright-trace.zip"]
             result.accessibility_snapshot_refs = ["execution/playwright-trace.zip"]
         result = materialize_trace_lifecycle(result)
+        result.moments = build_semantic_moments(result)
         artifacts.save_trace(result)
+        artifacts.write_json(
+            "presentation/semantic-moments.json",
+            [item.model_dump(mode="json") for item in result.moments],
+        )
+        artifacts.write_json("presentation/sync-edl.json", sync_edl_from_moments(result))
         # Keep lifecycle records independently queryable for recovery and QA;
         # the complete trace remains the source of truth for replay.
         artifacts.write_json(
@@ -941,6 +1046,10 @@ class ExecuteMixin:
         artifacts.write_json("qa/coverage-report.json", coverage)
         if coverage["hard_failures"]:
             raise RuntimeError(f"Coverage QA rejected execution: {coverage['missing_outcomes']}")
+        outcome_report = inspect_certified_outcomes(plan, result)
+        artifacts.write_json("qa/outcome-report.json", outcome_report)
+        if outcome_report["hard_failures"]:
+            raise RuntimeError(f"Certified outcome QA rejected execution: {outcome_report['missing_outcomes']}")
         if storyboard is not None:
             storyboard = bind_storyboard_events(
                 storyboard, {event.operation_id for event in result.events if event.success}

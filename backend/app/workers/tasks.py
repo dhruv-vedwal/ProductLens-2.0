@@ -111,7 +111,12 @@ async def execute_generation_stage(
                 render=bool(job["payload"]["render"]),
             )
         elif job["kind"] == "url":
-            await jobs.run_url_stage(run_id, stage, payload=job["payload"])
+            await jobs.run_url_stage(
+                run_id,
+                stage,
+                payload=job["payload"],
+                claimed_stage=claimed,
+            )
         else:
             raise ValueError(f"unknown generation job kind: {job['kind']}")
     except Exception as error:

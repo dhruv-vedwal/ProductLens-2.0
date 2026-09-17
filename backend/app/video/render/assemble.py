@@ -8,6 +8,7 @@ import math
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,43 @@ from app.presentation.title import concise_demo_title
 from app.video.render.remotion_props import *
 from app.video.render.status import *
 from app.video.source_timing import align_trace_to_recording
+
+# API contracts use Pythonic snake_case while the Remotion composition is a
+# JavaScript boundary. Keep that translation explicit and allow-list the
+# presentation surface so arbitrary request keys can never leak into render
+# props. This also makes retries deterministic across API/worker versions.
+_PRESENTATION_PROP_MAP = {
+    "include_audio": "includeAudio",
+    "narration_style": "narrationStyle",
+    "pace": "pace",
+    "browser_zoom_percent": "browserZoomPercent",
+    "subtitles_enabled": "subtitlesEnabled",
+    "subtitle_style": "subtitleStyle",
+    "subtitle_position": "subtitlePosition",
+    "subtitle_font_size": "subtitleFontSize",
+    "intro_template": "introTemplate",
+    "studio_polish": "studioPolish",
+    "cursor_style": "cursorStyle",
+    "highlight_style": "highlightStyle",
+    "click_zoom": "clickZoom",
+    "export_aspect": "exportAspect",
+    "export_resolution": "exportResolution",
+    "language": "language",
+    "accent": "accent",
+}
+
+
+def normalize_remotion_presentation_options(
+    options: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Convert persisted API presentation options to the Remotion contract."""
+    if not options:
+        return {}
+    return {
+        remotion_key: options[api_key]
+        for api_key, remotion_key in _PRESENTATION_PROP_MAP.items()
+        if api_key in options
+    }
 
 
 def render_remotion(
@@ -279,6 +317,7 @@ def render_remotion(
     # evenly across the video. The latter was the cause of caption/story drift
     # in long route transitions and gradual scrolls.
     options = presentation_options or {}
+    remotion_presentation_options = normalize_remotion_presentation_options(options)
     scaled_captions = captions or []
     if options.get("subtitles_enabled") is False:
         scaled_captions = []
@@ -418,7 +457,7 @@ def render_remotion(
         # Keep frontend-selected presentation preferences alongside the
         # render contract.  The compositor can evolve these independently,
         # while retries/rerenders remain faithful to the original request.
-        "presentationOptions": presentation_options or {},
+        "presentationOptions": remotion_presentation_options,
     }
     props_path = (artifacts.presentation / "remotion-props.json").resolve()
     # Remotion props are part of the durable presentation contract. Write

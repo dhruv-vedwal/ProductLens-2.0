@@ -21,6 +21,7 @@ def classify_repair(hard_failures: list[str]) -> RepairDecision:
     workflow_markers = (
         "WORKFLOW_VALIDATION",
         "POSTCONDITION",
+        "CERTIFIED_OUTCOME",
         "UNSAFE_SIDE_EFFECT",
         "MISSING_SELECTED",
     )

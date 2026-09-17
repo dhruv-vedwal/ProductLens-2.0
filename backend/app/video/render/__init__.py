@@ -2,6 +2,7 @@
 
 from app.video.render.assemble import (
     _promote_render,
+    normalize_remotion_presentation_options,
     render_remotion,
 )
 from app.video.render.remotion_props import (
@@ -65,5 +66,6 @@ __all__ = [
     "_safe_camera_zoom",
     "_segment_is_complete",
     "_validate_recording_provenance",
+    "normalize_remotion_presentation_options",
     "render_remotion",
 ]
