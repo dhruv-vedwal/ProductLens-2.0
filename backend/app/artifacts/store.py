@@ -310,6 +310,9 @@ class RunArtifacts:
             "objective_understanding": self.root / "discovery" / "objective-understanding.json",
             "exploration_report": self.root / "exploration-report.json",
             "product_knowledge": self.root / "discovery" / "product-knowledge.json",
+            "behavioral_product_model": self.root
+            / "discovery"
+            / "behavioral-product-model.json",
             "page_knowledge": self.root / "page-knowledge",
             "feature_graph": self.root / "feature-graph.json",
             "candidate_flows": self.root / "candidate-flows.json",
@@ -338,6 +341,7 @@ class RunArtifacts:
             "interaction_trace": self.execution / "interaction-trace.json",
             "semantic_moments": self.presentation / "semantic-moments.json",
             "sync_edl": self.presentation / "sync-edl.json",
+            "multimodal_qa": self.qa / "multimodal-report.json",
         }
         required = {
             **self.required_delivery_artifacts(),
@@ -366,6 +370,10 @@ class RunArtifacts:
         if "create_isolated_record" in objective.get("permitted_mutations", []):
             rehearsal = self.root / "discovery" / "rehearsal-report.json"
             required["rehearsal_outcome"] = rehearsal.is_file() and rehearsal.stat().st_size > 0
+            certified_workflow = self.root / "planning" / "certified-workflow-graph.json"
+            required["certified_workflow"] = (
+                certified_workflow.is_file() and certified_workflow.stat().st_size > 0
+            )
         # Browserbase production uses Session Replay plus the ProductLens
         # DemoTrace instead of starting a local Playwright trace. Accept that
         # verified native pair as equivalent trace evidence for live delivery.
@@ -484,7 +492,10 @@ class RunArtifacts:
             except (OSError, ValueError, TypeError):
                 metadata = {}
             if isinstance(metadata, dict):
+                source_run_id = str(metadata.get("source_run_id") or metadata.get("run_id") or parent_run_id)
                 metadata["run_id"] = retry_run_id
+                metadata["source_run_id"] = source_run_id
+                metadata["inherited_by_run_id"] = retry_run_id
                 metadata["artifact"] = str(recording_video)
                 metadata["sha256"] = _sha256_file(recording_video)
                 recording_meta.write_text(

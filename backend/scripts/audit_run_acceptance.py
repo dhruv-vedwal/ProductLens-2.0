@@ -20,12 +20,16 @@ REQUIRED_ARTIFACTS = (
     "discovery/objective-understanding.json",
     "discovery/product-context.json",
     "discovery/product-knowledge.json",
+    "discovery/behavioral-product-model.json",
     "exploration-report.json",
     "feature-graph.json",
     "candidate-flows.json",
     "plan.json",
     "presentation/validated-scene-plan.json",
     "execution/trace.json",
+    "execution/interaction-trace.json",
+    "presentation/semantic-moments.json",
+    "presentation/sync-edl.json",
     "presentation/storyboard.json",
     "presentation/narration-script.json",
     "narration/fact-extraction.json",
@@ -37,6 +41,8 @@ REQUIRED_ARTIFACTS = (
     "qa/video-report.json",
     "qa/presentation-report.json",
     "qa/synchronization-report.json",
+    "qa/multimodal-report.json",
+    "qa/completion-audit.json",
     "qa/delivery-report.json",
 )
 
@@ -48,6 +54,7 @@ QA_REPORTS = (
     "qa/video-report.json",
     "qa/presentation-report.json",
     "qa/synchronization-report.json",
+    "qa/multimodal-report.json",
     "qa/delivery-report.json",
 )
 
@@ -126,6 +133,16 @@ def audit_run(run_root: Path, *, require_manual_review: bool = False) -> dict[st
             if isinstance(failures, list):
                 hard_failures.extend(f"{relative}:{item}" for item in failures)
     delivery = qa.get("qa/delivery-report.json", {})
+    multimodal = qa.get("qa/multimodal-report.json", {})
+    completion = _read_json(run_root / "qa" / "completion-audit.json")
+    workflow_proved = (
+        isinstance(completion, dict)
+        and completion.get("complete_evidence") is True
+        and not completion.get("missing_layers")
+    )
+    multimodal_passed = (
+        multimodal.get("status") == "complete" and not multimodal.get("hard_failures")
+    )
     video = _probe_video(run_root / "final" / "demo.mp4")
     manual_path = run_root / "quality" / "manual-review.json"
     manual = _read_json(manual_path)
@@ -136,9 +153,13 @@ def audit_run(run_root: Path, *, require_manual_review: bool = False) -> dict[st
         hard_failures.append("delivery:invalid-final-video")
     if not bool(delivery.get("deliverable")):
         hard_failures.append("delivery:verdict-not-deliverable")
+    if not workflow_proved:
+        hard_failures.append("workflow:completion-evidence-not-proved")
+    if not multimodal_passed:
+        hard_failures.append("multimodal:semantic-review-not-passed")
     hard_failures = list(dict.fromkeys(str(item) for item in hard_failures))
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": datetime.now(UTC).isoformat(),
         "run_root": str(run_root),
         "required_artifacts": list(REQUIRED_ARTIFACTS),
@@ -150,6 +171,16 @@ def audit_run(run_root: Path, *, require_manual_review: bool = False) -> dict[st
             "present": manual_path.is_file(),
             "passed": manual_passed,
             "required": require_manual_review,
+        },
+        "acceptance_evidence": {
+            "workflow_proof": workflow_proved,
+            "multimodal_verdict": {
+                "passed": multimodal_passed,
+                "provider": multimodal.get("provider"),
+                "status": multimodal.get("status"),
+            },
+            "manual_review": manual_passed,
+            "repeated_run_result": None,
         },
         "qa_layers": {
             relative: {

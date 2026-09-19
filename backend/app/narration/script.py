@@ -118,6 +118,48 @@ def script_from_trace(
     return script
 
 
+def script_from_moments(
+    trace: DemoTrace,
+    *,
+    product_title: str,
+    product_purpose: str = "",
+) -> list[dict[str, object]]:
+    """Create evidence-linked editorial copy from verified semantic moments."""
+
+    if not trace.moments:
+        return script_from_trace(trace)
+    events = {event.id: event for event in trace.events}
+    script: list[dict[str, object]] = []
+    for index, moment in enumerate(trace.moments):
+        event = next((events.get(event_id) for event_id in moment.event_ids if event_id in events), None)
+        if event is None:
+            continue
+        value = moment.viewer_value.strip().rstrip(".")
+        if index == 0:
+            purpose = product_purpose.strip().rstrip(".")
+            text = (
+                f"Welcome to {product_title}. {purpose}. We begin by showing how the "
+                f"requested workflow reaches a verified result."
+                if purpose
+                else f"Welcome to {product_title}. We begin with {value[:1].lower() + value[1:]}."
+            )
+        elif index == len(trace.moments) - 1:
+            text = f"Finally, we {value[:1].lower() + value[1:]}, completing the demonstrated outcome."
+        else:
+            text = f"Next, we {value[:1].lower() + value[1:]}."
+        script.append(
+            {
+                "event_id": event.id,
+                "scene_id": moment.id,
+                "moment_id": moment.id,
+                "text": text,
+                "facts": list(moment.evidence_refs),
+                **({"opening": True} if index == 0 else {}),
+            }
+        )
+    return script
+
+
 def captions_from_duration(
     script: list[dict[str, object]], duration_seconds: float
 ) -> list[dict[str, object]]:

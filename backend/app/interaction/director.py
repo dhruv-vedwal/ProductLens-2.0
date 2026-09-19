@@ -10,7 +10,7 @@ future multimodal providers without creating a second execution path.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from app.contracts.models import (
     ActionCandidate,
@@ -146,6 +146,10 @@ class InteractionDirector:
         destination: Target | None = None,
         safety_verified: bool | None = None,
         rehearsal_required: bool = True,
+        side_effect_policy: (
+            Literal["read_only", "authorized_mutation", "blocked"] | None
+        ) = None,
+        goal: str | None = None,
     ) -> ActionCandidate:
         """Build a semantic candidate without inventing a selector or route."""
         if snapshot.id not in {item.id for item in self.kernel.trace().observations}:
@@ -161,9 +165,11 @@ class InteractionDirector:
             "keypress": "key",
         }.get(affordance.method, affordance.method)
         expected = list(expected_outcomes or [])
-        policy = "authorized_mutation" if affordance.risk == "high" else "read_only"
+        policy = side_effect_policy or (
+            "authorized_mutation" if affordance.risk == "high" else "read_only"
+        )
         action = ActionIntent(
-            goal=f"Use the visible {affordance.label} control",
+            goal=goal or f"Use the visible {affordance.label} control",
             gesture=gesture,
             target=target,
             destination=destination,

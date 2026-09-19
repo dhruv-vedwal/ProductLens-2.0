@@ -11,6 +11,7 @@ import re
 from hashlib import sha256
 
 from app.contracts.models import (
+    ActionCapability,
     CapabilityEvidence,
     CapabilityResolution,
     ObservedElement,
@@ -98,6 +99,44 @@ class CapabilityResolver:
         required = _required_kinds(intent)
         elements = [item for item in context.elements if item.actionable]
         candidates: list[RuntimeCapability] = []
+        for index, raw_capability in enumerate(context.capabilities):
+            try:
+                capability = ActionCapability.model_validate(raw_capability)
+            except (TypeError, ValueError):
+                continue
+            if capability.kind != "form" or capability.form_schema is None:
+                continue
+            targets = [
+                target
+                for target in (
+                    capability.entry_target,
+                    capability.submit_target,
+                    capability.outcome_target,
+                )
+                if target is not None
+            ]
+            candidates.append(
+                RuntimeCapability(
+                    kind="form",
+                    purpose=capability.purpose,
+                    source_url=capability.source_url,
+                    targets=targets,
+                    strategies=["playwright", "screenshot_verification"],
+                    evidence=[
+                        CapabilityEvidence(
+                            id=f"capability:rehearsal:{index}",
+                            kind="state",
+                            source_url=capability.source_url,
+                            summary="Persisted reversible probe and outcome witness",
+                            confidence=0.98 if capability.verified else 0.72,
+                        )
+                    ],
+                    expected_outcomes=list(capability.outcome_evidence),
+                    confidence=0.98 if capability.verified else 0.72,
+                    reversible=not capability.verified,
+                    verified=capability.verified,
+                )
+            )
 
         nav = [
             item

@@ -347,8 +347,18 @@ class StagehandProvider:
             ) from error
 
     async def _invoke(self, payload: dict[str, object]) -> dict[str, object]:
-        async with self._invoke_limit:
-            return await self._invoke_unbounded(payload)
+        last_error: ProviderError | None = None
+        for attempt in range(3):
+            try:
+                async with self._invoke_limit:
+                    return await self._invoke_unbounded(payload)
+            except ProviderError as error:
+                last_error = error
+                if not error.retryable or attempt == 2:
+                    raise
+                await asyncio.sleep(0.5 * (2**attempt))
+        assert last_error is not None
+        raise last_error
 
     async def _invoke_cached(
         self,

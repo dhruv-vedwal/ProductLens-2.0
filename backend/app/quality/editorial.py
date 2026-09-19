@@ -56,6 +56,15 @@ def inspect_editorial_preflight(
         failures.append("OPENING_PAGE_NOT_ESTABLISHED")
     if not opening.narration.casefold().startswith("welcome to"):
         failures.append("OPENING_PRESENTER_WELCOME_MISSING")
+    # Fail before Browserbase execution when enrich left a wall of skeletons.
+    non_opening = [scene for scene in storyboard.scenes if scene.operation_id is not None]
+    skeleton_count = sum(
+        1
+        for scene in non_opening
+        if "control in focus for this step on screen" in scene.narration.casefold()
+    )
+    if skeleton_count >= 2:
+        failures.append("REPETITIVE_EDITORIAL_NARRATION")
     objective = context.objective
     for relation in getattr(objective, "supporting_relationships", []) if objective else []:
         if not relation.required:
@@ -86,6 +95,10 @@ def inspect_editorial_preflight(
         "next build",
         "architecture cards",
         "observed details are read before the walkthrough continues",
+        "presents its observed controls",
+        "groups the product's available capabilities",
+        "lets teams ",
+        "this leaves the visible state established at the end of the walkthrough",
     )
     # These are the phrases that slipped through the original substring list
     # in live runs.  They describe the mechanics of the tour (a view opened,
@@ -97,6 +110,8 @@ def inspect_editorial_preflight(
         r"\bvisible\s+workflow\s+is\s+demonstrated\b",
         r"\bprovides\s+the\s+setup\s+context\b.*\b(?:now\s+)?(?:we\s+)?can\s+see\b",
         r"\b(?:current|working)\s+view\s+before\s+we\s+demonstrate\b",
+        r"\b(?:view|page)\s+brings\b.*\binto\s+view\b",
+        r"\bshowing\s+how\s+this\s+part\s+of\s+the\s+product\s+is\s+organized\b",
     )
     plan_operations = {step.operation.id: step.operation for step in plan.workflow_steps}
     for scene in storyboard.scenes:
@@ -414,6 +429,16 @@ def inspect_editorial(
         if not any(is_page_exploration(item) for item in chapter):
             failures.append("TRACE_NAVIGATED_PAGE_NOT_EXPLORED")
     script_by_event = {str(line.get("event_id")): str(line.get("text", "")) for line in script}
+    script_by_moment = {
+        str(line.get("moment_id")): str(line.get("text", ""))
+        for line in script
+        if line.get("moment_id")
+    }
+    moment_text_by_event = {
+        event_id: script_by_moment.get(moment.id, "")
+        for moment in trace.moments
+        for event_id in moment.event_ids
+    }
     narrated_operation_ids = {
         str(scene.operation_id)
         for scene in narrated_storyboard_scenes(storyboard)
@@ -504,7 +529,7 @@ def inspect_editorial(
                 }
             )
             continue
-        text = script_by_event.get(event.id, "")
+        text = script_by_event.get(event.id) or moment_text_by_event.get(event.id, "")
         if not text:
             failures.append("EDITORIAL_SCENE_MISSING_NARRATION")
         else:
@@ -787,6 +812,38 @@ def inspect_editorial(
             "data",
             "flow",
             "explicit",
+            "field",
+            "fields",
+            "form",
+            "forms",
+            "viewer",
+            "choice",
+            "record",
+            "completed",
+            "provides",
+            "clear",
+            "before",
+            "needed",
+            "distinguish",
+            "recognizable",
+            "identity",
+            "later",
+            "follow",
+            "carries",
+            "forward",
+            "isolated",
+            "result",
+            "screen",
+            "originated",
+            "creation",
+            "create",
+            "details",
+            "entered",
+            "reveals",
+            "opening",
+            "captures",
+            "observed",
+            "selection",
         }
         words = {w for w in re.findall(r"[a-z0-9]{4,}", text.lower()) if w not in stop}
         for other in narrated_texts[:index]:

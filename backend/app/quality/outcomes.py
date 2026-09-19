@@ -2,7 +2,33 @@
 
 from __future__ import annotations
 
-from app.contracts.models import DemoPlan, DemoTrace
+from app.contracts.models import DemoPlan, DemoTrace, DiagramState
+
+
+def inspect_diagram_semantics(
+    diagram: DiagramState | None,
+    *,
+    requested_labels: list[str] | None = None,
+) -> list[str]:
+    """Reject pixel-only canvas success without readable labeled topology."""
+
+    if (
+        diagram is None
+        or len(diagram.nodes) < 2
+        or not diagram.labels_verified
+        or not diagram.topology_verified
+        or not diagram.connectors
+    ):
+        return ["DIAGRAM_SEMANTIC_VERIFICATION_FAILED"]
+    failures: list[str] = []
+    present = {node.label.casefold() for node in diagram.nodes if node.label}
+    for label in requested_labels or []:
+        if label.casefold() not in present:
+            failures.append("DIAGRAM_REQUESTED_LABELS_MISSING")
+            break
+    if any(not node.label_evidence_ref for node in diagram.nodes):
+        failures.append("DIAGRAM_LABELS_UNCOMMITTED")
+    return failures
 
 
 def inspect_certified_outcomes(plan: DemoPlan, trace: DemoTrace) -> dict[str, object]:

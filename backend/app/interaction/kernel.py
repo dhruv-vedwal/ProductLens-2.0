@@ -109,6 +109,7 @@ class InteractionKernel:
                 candidate.action.side_effect_policy == "authorized_mutation"
                 and not self.policy.allow_high_risk
                 and candidate.action.gesture == "submit"
+                and candidate.rehearsal_required
             )
         ]
         if not eligible:

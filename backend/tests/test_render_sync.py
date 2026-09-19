@@ -42,6 +42,7 @@ from app.video.render import (
 from app.video.render import assemble as render_assemble
 from app.video.render import remotion_props as render_remotion_props
 from app.video.render import status as render_status
+from app.video.render.status import _bounded_process_diagnostic
 
 _RENDER_MODULES = (render_assemble, render_remotion_props, render_status)
 
@@ -49,6 +50,28 @@ _RENDER_MODULES = (render_assemble, render_remotion_props, render_status)
 def _patch_render_subprocess_run(monkeypatch: pytest.MonkeyPatch, value) -> None:
     # Same shared stdlib binding the former monolith monkeypatch targeted.
     monkeypatch.setattr(subprocess, "run", value)
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            result = value(args, **kwargs)
+            self.returncode = getattr(result, "returncode", 0)
+            self.pid = 1
+            self._stdout = getattr(result, "stdout", "")
+            self._stderr = getattr(result, "stderr", "")
+
+        def communicate(self, timeout=None):
+            return self._stdout, self._stderr
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
 
 
 def _patch_render_shutil_copy2(monkeypatch: pytest.MonkeyPatch, value) -> None:
@@ -367,7 +390,57 @@ def test_recording_provenance_rejects_metadata_from_another_run(tmp_path):
         _validate_recording_provenance(trace, artifacts, raw)
 
 
-def test_recording_provenance_allows_local_capture_without_provider_metadata(tmp_path):
+def test_recording_provenance_allows_inherited_parent_recording_for_child_run(tmp_path):
+    artifacts = RunArtifacts(tmp_path, "child-run")
+    raw = artifacts.execution / "browser-recording.mp4"
+    raw.write_bytes(b"evidence")
+    artifacts.write_json(
+        "execution/browserbase-recording.json",
+        {
+            "provider": "browserbase",
+            "native_recording": "completed",
+            "run_id": "parent-run",
+            "source_run_id": "parent-run",
+            "inherited_by_run_id": "child-run",
+            "artifact": str(raw),
+        },
+    )
+    trace = DemoTrace(
+        run_id="child-run", objective="Demo", started_at=datetime.now(UTC), events=[]
+    )
+    _validate_recording_provenance(trace, artifacts, raw)
+
+
+def test_bounded_process_diagnostic_includes_pid_heartbeat_and_silent_output(tmp_path):
+    diagnostic = _bounded_process_diagnostic(
+        command=["npx", "remotion", "render"],
+        renderer=tmp_path,
+        elapsed_seconds=12.5,
+        return_code=1,
+        stdout="",
+        stderr="",
+        pid=4242,
+        heartbeat_age_seconds=8.25,
+        frames_rendered=3,
+    )
+    assert "pid=4242" in diagnostic
+    assert "heartbeat_age_seconds=8.25" in diagnostic
+    assert "frames_rendered=3" in diagnostic
+    assert "<renderer produced no stdout/stderr>" in diagnostic
+
+
+def test_bounded_process_diagnostic_parses_rendered_frame_count_from_output(tmp_path):
+    diagnostic = _bounded_process_diagnostic(
+        command=["npx", "remotion", "render"],
+        renderer=tmp_path,
+        elapsed_seconds=4,
+        return_code=1,
+        stdout="Rendered 18/40",
+        stderr="",
+        pid=99,
+    )
+    assert "pid=99" in diagnostic
+    assert "frames_rendered=18" in diagnostic
     artifacts = RunArtifacts(tmp_path, "local-run")
     raw = artifacts.execution / "browser-recording.mp4"
     raw.write_bytes(b"evidence")

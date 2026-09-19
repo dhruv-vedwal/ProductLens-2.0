@@ -22,6 +22,7 @@ from app.quality.coverage import inspect_coverage
 from app.quality.delivery import delivery_report
 from app.quality.editorial import inspect_editorial
 from app.quality.multimodal import build_review_packet, review_multimodal
+from app.quality.outcomes import inspect_diagram_semantics
 from app.quality.presentation import (
     attach_presentation_qa,
     inspect_presentation,
@@ -67,6 +68,46 @@ class QaMixin:
                     interaction_failures.append("INTERACTION_VERIFICATION_FAILED")
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 interaction_failures.append("INTERACTION_TRACE_INVALID")
+        edl_path = artifacts.presentation / "sync-edl.json"
+        try:
+            sync_edl = json.loads(edl_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            sync_edl = {}
+        edl_failures: list[str] = []
+        edl_moments = sync_edl.get("moments") if isinstance(sync_edl, dict) else None
+        if (
+            not isinstance(sync_edl, dict)
+            or sync_edl.get("schema_version") != 2
+            or sync_edl.get("authority") != "semantic_moments"
+            or not isinstance(edl_moments, list)
+        ):
+            edl_failures.append("SYNC_EDL_INVALID")
+        else:
+            expected_moment_ids = {moment.id for moment in trace.moments}
+            observed_moment_ids = {
+                str(row.get("id")) for row in edl_moments if isinstance(row, dict)
+            }
+            if expected_moment_ids != observed_moment_ids:
+                edl_failures.append("SYNC_EDL_MOMENT_COVERAGE_INCOMPLETE")
+            required_tracks = {
+                "camera",
+                "cursor",
+                "caption",
+                "narration",
+                "scroll",
+                "redaction",
+                "transition",
+            }
+            for row in edl_moments:
+                if not isinstance(row, dict):
+                    edl_failures.append("SYNC_EDL_MOMENT_MALFORMED")
+                    continue
+                tracks = row.get("tracks")
+                if not isinstance(tracks, dict) or not required_tracks <= set(tracks):
+                    edl_failures.append("SYNC_EDL_TRACKS_INCOMPLETE")
+                if not isinstance(row.get("protected_interaction_spans"), list):
+                    edl_failures.append("SYNC_EDL_PROTECTED_SPANS_MISSING")
+        interaction_failures.extend(list(dict.fromkeys(edl_failures)))
         execution_failures = [*execution_failures, *interaction_failures]
         artifacts.write_json(
             "qa/execution-report.json",
@@ -214,6 +255,19 @@ class QaMixin:
                 for event in trace.events
             )
         )
+        semantic_diagram_required = bool(
+            re.search(r"\b(?:diagram|architecture|flowchart)\b", trace.objective.casefold())
+        )
+        if semantic_diagram_required:
+            diagram = trace.diagram_states[-1] if trace.diagram_states else None
+            diagram_failures = inspect_diagram_semantics(diagram)
+            if diagram_failures:
+                video["hard_failures"] = [
+                    *video.get("hard_failures", []),
+                    *diagram_failures,
+                ]
+                video["visual_score"] = 0.0
+                video["overall_score"] = 0.0
         if visual_surface_proved and "BLANK_PRODUCT_CONTENT_INTERVAL" in video.get(
             "hard_failures", []
         ):
@@ -466,6 +520,26 @@ class QaMixin:
             ),
             reviewer=self.visual_reviewer,
         )
+        mandatory_visual_review = semantic_diagram_required or any(
+            step.operation.kind in {OperationKind.SUBMIT, OperationKind.CREATE_RECORD}
+            for step in plan.workflow_steps
+        )
+        if mandatory_visual_review and (
+            multimodal.get("status") != "complete"
+            or any(
+                "MULTIMODAL_REVIEW_UNAVAILABLE" in str(item)
+                for item in multimodal.get("hard_failures", [])
+            )
+        ):
+            multimodal["hard_failures"] = list(
+                dict.fromkeys(
+                    [
+                        *multimodal.get("hard_failures", []),
+                        "MULTIMODAL_REVIEW_UNAVAILABLE",
+                    ]
+                )
+            )
+            multimodal["status"] = "repair_required"
         artifacts.write_json("qa/multimodal-report.json", multimodal)
         # Materialize the manifest before computing delivery requirements. The
         # manifest is itself a required URL-delivery artifact; computing the

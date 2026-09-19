@@ -6,6 +6,8 @@ from pathlib import Path
 
 from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
+    BehavioralProductModel,
+    CertifiedWorkflowGraph,
     DemoPlan,
     ProductContext,
 )
@@ -40,6 +42,24 @@ class PlanMixin:
                 (artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8")
             )
         )
+        behavioral_model = None
+        behavioral_path = artifacts.root / (
+            context.behavioral_model_ref or "discovery/behavioral-product-model.json"
+        )
+        if behavioral_path.is_file():
+            behavioral_model = BehavioralProductModel.model_validate_json(
+                behavioral_path.read_text(encoding="utf-8")
+            )
+            context = context.model_copy(
+                update={
+                    "behavioral_model_ref": str(
+                        behavioral_path.relative_to(artifacts.root)
+                    ).replace("\\", "/"),
+                    "behavioral_uncertainties": behavioral_model.unresolved_uncertainties,
+                }
+            )
+        elif context.behavioral_model_ref:
+            raise ValueError("behavioral product model is required by the discovery contract")
         # Reconcile the persisted model interpretation with the deterministic
         # request parser at the production boundary. Older discovery runs may
         # have upgraded a focused "thorough" request to full_walkthrough;
@@ -160,6 +180,19 @@ class PlanMixin:
             audience=audience,
             target_duration_seconds=target_duration_seconds,
         )
+        workflow_graph_path = artifacts.root / "planning" / "certified-workflow-graph.json"
+        if (
+            context.objective is not None
+            and "create_isolated_record" in context.objective.permitted_mutations
+        ):
+            if not workflow_graph_path.is_file():
+                raise ValueError(
+                    "authorized creation objective requires a certified hidden-rehearsal workflow"
+                )
+            workflow_graph = CertifiedWorkflowGraph.model_validate_json(
+                workflow_graph_path.read_text(encoding="utf-8")
+            )
+            plan = plan.model_copy(update={"certified_workflow": workflow_graph})
         # Keep the runtime capability decision as an inspectable planning
         # artifact.  It is evidence-backed and advisory; execution still
         # re-grounds each selected target before dispatch.

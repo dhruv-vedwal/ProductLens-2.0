@@ -97,6 +97,36 @@ def test_delivery_publication_persists_the_manifest_location(tmp_path: Path):
     assert repository.locations(run["id"])[0]["kind"] == "artifact_manifest"
 
 
+def test_worker_schedules_bounded_targeted_repair_with_lineage(tmp_path: Path):
+    repository = RunRepository(tmp_path / "productlens.sqlite3")
+    request = repository.create_request("repair-request", "https://example.test", "Inspect")
+    run = repository.create_run(request["id"], str(tmp_path))
+    repository.update_run(run["id"], stage="RENDER", status="FAILED", error_code="RENDER_FAILED")
+    artifacts = RunArtifacts(tmp_path, run["id"])
+    artifacts.write_json(
+        "qa/repair-decision.json",
+        {
+            "category": "presentation",
+            "action": "re_render",
+            "retry_from_stage": "RENDER",
+            "reasons": ["FROZEN_VIDEO"],
+        },
+    )
+
+    child_id = DemoJobService(repository, tmp_path)._schedule_automatic_repair(
+        run["id"],
+        "RENDER",
+        payload={"render": True},
+        error=RuntimeError("render failed"),
+    )
+
+    assert child_id is not None
+    assert repository.run_details(child_id)["retry_of"] == run["id"]
+    assert repository.get_run(run["id"])["status"] == "REPAIRING"
+    lineage = (tmp_path / "runs" / child_id / "repair" / "lineage.json").read_text()
+    assert '"retry_from_stage": "RENDER"' in lineage
+
+
 @pytest.mark.asyncio
 async def test_fixture_job_persists_trace_and_artifact_locations(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -161,7 +191,7 @@ async def test_failed_cloud_generation_retains_browserbase_session_evidence(tmp_
     class FailingGenerator:
         async def discover_stage(self, **kwargs):
             path = tmp_path / "runs" / kwargs["run_id"] / "discovery"
-            path.mkdir(parents=True)
+            path.mkdir(parents=True, exist_ok=True)
             (path / "browserbase-session.json").write_text(
                 '{"provider":"browserbase","session_id":"cloud-1"}'
             )

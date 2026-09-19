@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "supplied_targets": [
+    {
+      "name": "SmartSevak Lead",
+      "url": "https://dashboard.smartsevak.com",
+      "objective": "Create one isolated lead using synthetic identity details and verify the created lead by its demonstrated name and phone fields.",
+      "credential_reference": "secret://productlens/smartsevak",
+      "allow_external_side_effects": true,
+      "allow_isolated_record_creation": true,
+      "manual_review_required": true,
+      "required_consecutive_runs": 10
+    },
+    {
+      "name": "SmartSevak Booking",
+      "url": "https://dashboard.smartsevak.com",
+      "objective": "Create one isolated booking using synthetic patient details, intentionally select each dependent booking control, and verify the resulting booking by its demonstrated identity fields.",
+      "credential_reference": "secret://productlens/smartsevak",
+      "allow_external_side_effects": true,
+      "allow_isolated_record_creation": true,
+      "manual_review_required": true,
+      "required_consecutive_runs": 10
+    },
+    {
+      "name": "Excalidraw Chat Architecture",
+      "url": "https://excalidraw.com/",
+      "objective": "Create a chat application architecture diagram with components including Client, API Gateway, Chat Service, Message Queue, and Database, connect them with directed arrows, and verify every label and connector relationship.",
+      "allow_external_side_effects": false,
+      "allow_isolated_record_creation": false,
+      "manual_review_required": true,
+      "required_consecutive_runs": 10
+    }
+  ],
+  "fallback_targets": []
+}

@@ -20,6 +20,7 @@ from app.contracts.models import (
     ProductContext,
     ViewportDecision,
 )
+from app.discovery.behavioral import build_behavioral_product_model
 from app.discovery.live import (
     _objective_spec,
     _page_knowledge,
@@ -558,23 +559,31 @@ class DiscoverMixin:
                         # provider limit.  Leave bounded teardown headroom,
                         # but do not let a stalled route/bridge consume the
                         # entire paid session lease.
-                        # The outer watchdog must cover the same adaptive
-                        # envelope as LiveDiscovery.  Previously it used only
-                        # the cheap 60-second default, so an interactive
-                        # objective could be cancelled while its bounded
-                        # reversible probe was still running.  Estimate the
-                        # page-independent floor here; discovery will refine
-                        # it after observing the primary navigation.
+                        # The outer watchdog must cover the maximum adaptive
+                        # envelope discovery may refine to after observing
+                        # navigation—not the pre-observation floor with
+                        # primary_route_count=0, which previously cancelled
+                        # healthy interactive explorations mid-route.
                         stage_budget = adaptive_exploration_budget(
-                            budget, objective_spec, primary_route_count=0
+                            budget,
+                            objective_spec,
+                            primary_route_count=max(12, int(budget.max_pages)),
                         )
                         discovery_deadline = (
                             min(
                                 self.cloud_capture_timeout_seconds,
-                                max(240, int(stage_budget.max_time_seconds) + 180),
+                                max(360, int(stage_budget.max_time_seconds) + 240),
                             )
                             if cloud_discovery
                             else 900
+                        )
+                        artifacts.write_json(
+                            "discovery/deadline.json",
+                            {
+                                "seconds": discovery_deadline,
+                                "adaptive_max_time_seconds": stage_budget.max_time_seconds,
+                                "adaptive_max_pages": stage_budget.max_pages,
+                            },
                         )
                         async with asyncio.timeout(discovery_deadline):
                             product = await self.discovery.discover(
@@ -771,7 +780,45 @@ class DiscoverMixin:
             raise GenerationPreconditionError(
                 "AUTH_REQUIRED: credentials must be supplied through a secret reference"
             )
+        # Interaction objectives need at least one grounded form capability.
+        # Completing discovery on an unrelated landing shell and failing later
+        # in rehearsal hides the real blocker and skips the discovery retry
+        # boundary. Fail closed here so repairs re-explore.
+        interactive_terms = re.search(
+            r"\b(create|add|fill|type|select|submit|draw|diagram|connect|drag|book|lead|workflow|automate)\b",
+            objective.casefold(),
+        )
+        form_capabilities = [
+            item
+            for item in product.capabilities
+            if isinstance(item, dict) and item.get("kind") == "form" and item.get("submit_target")
+        ]
+        if interactive_terms and not form_capabilities:
+            product = product.model_copy(
+                update={
+                    "blockers": [
+                        *product.blockers,
+                        "behavior_observation_required:no_submit_capable_form",
+                    ]
+                }
+            )
+            artifacts.write_json("discovery/product-context.json", product.model_dump(mode="json"))
+            artifacts.write_json("discovery/capabilities.json", product.capabilities)
+            raise GenerationPreconditionError(
+                "BEHAVIOR_OBSERVATION_REQUIRED: no submit-capable form was grounded for an interaction objective"
+            )
+        behavioral_model = build_behavioral_product_model(product)
+        product = product.model_copy(
+            update={
+                "behavioral_model_ref": "discovery/behavioral-product-model.json",
+                "behavioral_uncertainties": behavioral_model.unresolved_uncertainties,
+            }
+        )
         artifacts.write_json("discovery/product-context.json", product.model_dump(mode="json"))
+        artifacts.write_json(
+            "discovery/behavioral-product-model.json",
+            behavioral_model.model_dump(mode="json"),
+        )
         artifacts.write_json(
             "discovery/product-knowledge.json",
             _product_knowledge_payload(product),

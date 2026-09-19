@@ -22,30 +22,6 @@ class CapabilityCompilationError(ValueError):
 _TRANSIENT_REACT_ID = re.compile(r"^#:r[0-9a-z]+:$", re.IGNORECASE)
 
 
-def _dependency_priority(field: FormField) -> tuple[int, int]:
-    """Order observed controls by generic dependency semantics.
-
-    Choice controls commonly enable dependent inputs (dates, times, detail
-    panels).  DOM order is not a dependency graph and often places the
-    disabled dependent control first.  Keep the original order as the second
-    key while moving observed choices ahead of their dependants and dates to
-    the end.  Explicit ``depends_on`` ordering remains authoritative inside
-    ``order_form_fields``; this is only the final deterministic tie-breaker.
-    """
-    control = field.control_type.casefold()
-    if control in {"radio", "checkbox", "switch"}:
-        return (0, 0)
-    if control in {"select", "combobox"}:
-        return (1, 0)
-    if (
-        control in {"date", "time"}
-        or "date" in field.name.casefold()
-        or "time" in field.name.casefold()
-    ):
-        return (3, 0)
-    return (2, 0)
-
-
 def _is_transient_selector(selector: str) -> bool:
     """Reject React/MUI generated ids whether CSS escaping is present or not."""
     return bool(_TRANSIENT_REACT_ID.fullmatch(selector.replace("\\", "")))
@@ -70,10 +46,23 @@ def _field_target(field: FormField, source_url: str) -> Target:
         )
         else None
     )
+    control = field.control_type.casefold()
+    behavior = (field.behavior_class or "").casefold()
+    role = None
+    if control in {"select", "combobox"} or behavior in {
+        "native_select",
+        "combobox",
+        "autocomplete",
+        "time_slot",
+    }:
+        role = "combobox"
+    elif control == "radio":
+        role = "radio"
     return Target(
         name=field.name,
         label=field.name,
         selector=selector,
+        role=role,
         source_url=source_url,
     )
 
@@ -81,7 +70,7 @@ def _field_target(field: FormField, source_url: str) -> Target:
 def _operation_for(field: FormField, source_url: str) -> SemanticOperation:
     target = _field_target(field, source_url)
     control = field.control_type.casefold()
-    name = field.name.casefold()
+    behavior = field.behavior_class.casefold()
     # Checkboxes/switches require an explicit policy (for example consent) and
     # hidden controls are never user actions.  A radio is different: the live
     # rehearsal gives us a unique option selector, so choosing that observed
@@ -101,11 +90,12 @@ def _operation_for(field: FormField, source_url: str) -> SemanticOperation:
             page_url=source_url,
             evidence_refs=[f"form-field:{source_url}:{field.name}"],
         )
-    if name in {"type", "id"} and control in {"input", "string", "text"}:
-        raise CapabilityCompilationError(
-            f"Form control is structural metadata, not an editable field: {field.name}"
-        )
-    if control in {"select", "combobox"}:
+    if control in {"select", "combobox"} or behavior in {
+        "native_select",
+        "combobox",
+        "autocomplete",
+        "time_slot",
+    }:
         options = [
             item
             for item in field.options
@@ -122,13 +112,24 @@ def _operation_for(field: FormField, source_url: str) -> SemanticOperation:
             raise CapabilityCompilationError(
                 f"Selectable field has no safe observed option: {field.name}"
             )
-        value = options[0]
+        observed = (field.observed_value or "").strip()
+        matching_observed = next(
+            (item for item in options if item.casefold() == observed.casefold()), None
+        )
+        if matching_observed is not None:
+            value = matching_observed
+        else:
+            # Discovery may observe a choice list without a pre-selected value
+            # (empty required comboboxes). Pick the same deterministic option
+            # used by dependency probing so rehearsal stays evidence-backed
+            # and product-neutral rather than omitting the control.
+            value = min(options, key=str.casefold)
         kind = OperationKind.SELECT_OPTION
-    elif "email" in control or "email" in name:
+    elif control == "email" or behavior == "email_input":
         value, kind = None, OperationKind.FILL_EMAIL
-    elif any(token in f"{control} {name}" for token in ("phone", "mobile", "telephone", "tel")):
+    elif control in {"phone", "tel"} or behavior == "phone_input":
         value, kind = None, OperationKind.FILL_PHONE
-    elif control == "date" or "date" in name:
+    elif control == "date" or behavior in {"native_date", "date_picker"}:
         value, kind = None, OperationKind.SELECT_DATE
     else:
         value, kind = None, OperationKind.FILL_TEXT
@@ -180,6 +181,25 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
         raise CapabilityCompilationError(
             "Creation capability has visible required controls without a safely grounded field schema"
         )
+    # Recovery may mark a combobox for inclusion before its option list is
+    # persisted. Prefer the rehearsed observed value as a one-item choice list
+    # rather than failing closed after a successful live selection.
+    healed_fields: list[FormField] = []
+    for field in capability.form_schema.fields:
+        if (
+            field.control_type.casefold() in {"select", "combobox"}
+            and not field.options
+            and (field.observed_value or "").strip()
+        ):
+            healed_fields.append(
+                field.model_copy(update={"options": [str(field.observed_value).strip()]})
+            )
+        else:
+            healed_fields.append(field)
+    if healed_fields != list(capability.form_schema.fields):
+        capability = capability.model_copy(
+            update={"form_schema": capability.form_schema.model_copy(update={"fields": healed_fields})}
+        )
     unresolved_choices = [
         field.name
         for field in capability.form_schema.fields
@@ -187,6 +207,13 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
         and not field.options
         and not field.required
         and not _explicitly_optional(field)
+        # Provisional label-only selectors still need an observed choice once
+        # rehearsal has promoted them into the create path. Keeping them out of
+        # this gate allowed production to submit past an empty required combobox.
+        and (
+            "rehearsal:include" in field.validation_messages
+            or not str(field.selector or "").startswith("label:")
+        )
     ]
     if unresolved_choices:
         raise CapabilityCompilationError(
@@ -219,6 +246,7 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
         field
         for field in capability.form_schema.fields
         if "rehearsal:include" in field.validation_messages
+        and not _explicitly_optional(field)
         and field.control_type.casefold() not in {"checkbox", "switch", "hidden"}
         and field.name.casefold() not in {"type", "id"}
     ]
@@ -254,7 +282,6 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
         candidate_fields = order_form_fields(candidate_fields)
     except FormDependencyError as error:
         raise CapabilityCompilationError(str(error)) from error
-    candidate_fields = sorted(candidate_fields, key=_dependency_priority)
     # The rehearsal boundary already scoped these controls to the selected
     # capability. Do not silently drop fields at an arbitrary eight-control
     # cutoff (which can omit required identity/date fields after dependency

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "required_status": "PASS",
+  "criteria": [
+    "The introduction identifies the product and demonstrated objective coherently.",
+    "Actions occur in a natural order and typing is visibly progressive.",
+    "Relevant dropdown, date, and time-slot interactions visibly open and select.",
+    "The complete requested outcome remains visible long enough to understand.",
+    "Captions explain verified workflow value rather than reading controls.",
+    "Cursor travel, scrolling, camera focus, and transitions feel intentional.",
+    "No blank frame, slideshow freeze, stutter, crop, or caption obstruction is visible.",
+    "The final result is comparable in coherence and polish to the approved sample set."
+  ],
+  "review_record_path": "quality/manual-review.json",
+  "required_record_fields": [
+    "status",
+    "reviewer",
+    "reviewed_at",
+    "criteria",
+    "notes"
+  ]
+}

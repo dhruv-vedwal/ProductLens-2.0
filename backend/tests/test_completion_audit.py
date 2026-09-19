@@ -36,9 +36,18 @@ def test_audit_requires_all_layers_and_positive_delivery_declaration(tmp_path):
             (path / "page.json").write_text("{}")
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            '{"deliverable": true}' if relative.endswith("delivery-report.json") else "{}"
-        )
+        if relative.endswith("delivery-report.json"):
+            payload = {"deliverable": True}
+        elif relative.endswith("sync-edl.json"):
+            payload = {
+                "schema_version": 2,
+                "authority": "semantic_moments",
+                "source_windows": [{"start": 0, "end": 1}],
+                "moments": [{"id": "moment-1", "verified": True}],
+            }
+        else:
+            payload = {}
+        path.write_text(json.dumps(payload))
     # The manifest is written last in real runs; test the same immutable
     # integrity boundary after all required evidence is materialised.
     entries = []
@@ -111,7 +120,7 @@ def test_creation_audit_requires_matching_production_outcome_witness(tmp_path):
     assert "production_creation_outcome_proof" in report["missing_layers"]
 
 
-def test_creation_audit_accepts_rehearsal_url_witness(tmp_path):
+def test_creation_audit_rejects_rehearsal_url_without_entity_fields(tmp_path):
     (tmp_path / "discovery").mkdir()
     (tmp_path / "execution").mkdir()
     url = "https://example.test/leads/created-1"
@@ -125,10 +134,10 @@ def test_creation_audit_accepts_rehearsal_url_witness(tmp_path):
         json.dumps({"events": [{"kind": "Submit", "success": True, "after": {"url": url}}]})
     )
     report = audit_run(tmp_path)
-    assert "production_creation_outcome_proof" not in report["missing_layers"]
+    assert "production_creation_outcome_proof" in report["missing_layers"]
 
 
-def test_creation_audit_accepts_dynamic_url_with_matched_form_value(tmp_path):
+def test_creation_audit_accepts_dynamic_url_with_multiple_matched_entity_fields(tmp_path):
     (tmp_path / "discovery").mkdir()
     (tmp_path / "execution").mkdir()
     (tmp_path / "objective.json").write_text(
@@ -146,7 +155,13 @@ def test_creation_audit_accepts_dynamic_url_with_matched_form_value(tmp_path):
                         "success": True,
                         "after": {
                             "url": "https://example.test/leads/server-generated-id",
-                            "verified_outcome": {"matched_form_values": ["Demo Contact"]},
+                            "verified_outcome": {
+                                "matched_form_values": ["Demo Contact", "5550101234"],
+                                "matched_form_fields": {
+                                    "Name": "Demo Contact",
+                                    "Phone": "5550101234",
+                                },
+                            },
                         },
                         "state_delta": {"url_changed": True},
                     }
@@ -156,6 +171,79 @@ def test_creation_audit_accepts_dynamic_url_with_matched_form_value(tmp_path):
     )
     report = audit_run(tmp_path)
     assert "production_creation_outcome_proof" not in report["missing_layers"]
+
+
+def test_creation_audit_rejects_dynamic_url_with_only_generic_matched_value(tmp_path):
+    (tmp_path / "discovery").mkdir()
+    (tmp_path / "execution").mkdir()
+    (tmp_path / "objective.json").write_text(
+        json.dumps({"permitted_mutations": ["create_isolated_record"]})
+    )
+    (tmp_path / "discovery" / "rehearsal-report.json").write_text(
+        json.dumps({"outcome_target": {"name": "verified created record"}})
+    )
+    (tmp_path / "execution" / "trace.json").write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "kind": "Submit",
+                        "success": True,
+                        "after": {
+                            "url": "https://example.test/leads/server-generated-id",
+                            "verified_outcome": {
+                                "matched_form_values": ["Unassigned"],
+                                "matched_form_fields": {"Branch": "Unassigned"},
+                            },
+                        },
+                        "state_delta": {"url_changed": True},
+                    }
+                ]
+            }
+        )
+    )
+
+    report = audit_run(tmp_path)
+
+    assert "production_creation_outcome_proof" in report["missing_layers"]
+
+
+def test_creation_audit_rejects_two_generic_placeholder_values(tmp_path):
+    (tmp_path / "discovery").mkdir()
+    (tmp_path / "execution").mkdir()
+    (tmp_path / "objective.json").write_text(
+        json.dumps({"permitted_mutations": ["create_isolated_record"]})
+    )
+    (tmp_path / "discovery" / "rehearsal-report.json").write_text(
+        json.dumps({"outcome_target": {"name": "verified created record"}})
+    )
+    (tmp_path / "execution" / "trace.json").write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "kind": "Submit",
+                        "success": True,
+                        "after": {
+                            "url": "https://example.test/leads/server-generated-id",
+                            "verified_outcome": {
+                                "matched_form_values": ["Unassigned", "Default"],
+                                "matched_form_fields": {
+                                    "Branch": "Unassigned",
+                                    "Assignee": "Default",
+                                },
+                            },
+                        },
+                        "state_delta": {"url_changed": True},
+                    }
+                ]
+            }
+        )
+    )
+
+    report = audit_run(tmp_path)
+
+    assert "production_creation_outcome_proof" in report["missing_layers"]
 
 
 def test_audit_rejects_manifest_that_omits_required_evidence(tmp_path):

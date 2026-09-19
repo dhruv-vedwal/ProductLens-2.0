@@ -242,13 +242,9 @@ def _distinct_editorial_narration(
             # visible beat``; describe the relationship between this target
             # and its containing page using only scene-local labels.
             if secondary:
-                return _human_sentence(
-                    f"The {primary} checkpoint is shown within {secondary}, keeping its visible details together for review"
-                )
-            return _human_sentence(
-                f"The {primary} checkpoint opens its own visible details for review"
-            )
-        return "This scene adds a distinct, visible beat to the walkthrough for comparison."
+                return scene.narration.strip() or _interaction_skeleton(primary)
+            return scene.narration.strip() or _interaction_skeleton(primary)
+        return scene.narration.strip() or _interaction_skeleton(scene.title)
     return text
 
 
@@ -367,45 +363,12 @@ def editorial_script(
                     scene_id = opening.id
                 first_bound = False
             elif scene_index == len(narrated_scenes) - 1 or scene.story_phase == "close":
-                # A full walkthrough should resolve as a guided journey, not
-                # abruptly end on the final field/button label. The first
-                # sentence remains evidence-grounded; the second is editorial
-                # connective language that tells the viewer why this visible
-                # final state matters.
-                text = f"{text.rstrip('.')}. This leaves the visible state established at the end of the walkthrough."
-            # Accessibility fallbacks such as ``svg workspace`` describe an
-            # implementation surface, not a viewer-facing product area. If a
-            # persisted storyboard contains that placeholder, derive a stable
-            # subject from the scene's observed route and keep the copy
-            # deliberately evidence-safe instead of allowing a route-label
-            # caption through the editorial gate.
+                # Keep approved enrich copy; do not append canned closing glue.
+                text = text.strip()
             if re.search(r"\b(?:svg|canvas|element)-?\s*workspace\b", text, flags=re.IGNORECASE):
-                route = next(
-                    (
-                        value.split("://", 1)[-1].split("/", 1)[-1].split("?", 1)[0]
-                        for value in scene.evidence
-                        if value.startswith("page:") and "/" in value.split("://", 1)[-1]
-                    ),
-                    "workspace",
+                text = scene.narration.strip() or _interaction_skeleton(
+                    _concise_scene_subject(scene.title)
                 )
-                subject = (
-                    _clean(route.replace("-", " ").replace("_", " ").title(), 56) or "workspace"
-                )
-                text = _human_sentence(
-                    f"The {subject} view keeps the visible workspace in context for review"
-                )
-            # Keep the approved scene wording intact.  Rewriting a grounded
-            # sentence merely because its neighbouring control uses a similar
-            # grammatical pattern tends to erase the target-specific evidence
-            # and produce unsupported filler.  Duplicate detection remains a
-            # deterministic editorial repair: when two page-local scenes are
-            # backed by the same dense fact, retain the current scene's own
-            # labels while avoiding a narrated slideshow.
-            # Product identities can contain dotted tokens (``draw.io``,
-            # package names, domains). The generic sentence de-duplicator
-            # treats the first dot as punctuation and inserts a space, so
-            # never run it over the presenter opening; opening copy is already
-            # bounded and assembled from approved sentences.
             if scene_id != opening.id:
                 text = _collapse_repeated_sentences(text)
             text = _distinct_editorial_narration(
@@ -414,49 +377,13 @@ def editorial_script(
                 prior_texts,
                 evidence=" ".join([*facts, *scene.evidence]),
             )
-            # Duplicate-beat repair can itself select a placeholder evidence
-            # label as an anchor. Apply the same implementation-label guard
-            # after that repair so ``svg workspace`` can never be the final
-            # viewer-facing caption.
-            if re.search(r"\b(?:svg|canvas|element)-?\s*workspace\b", text, flags=re.IGNORECASE):
-                route = next(
-                    (
-                        value.split("://", 1)[-1].split("/", 1)[-1].split("?", 1)[0]
-                        for value in scene.evidence
-                        if value.startswith("page:") and "/" in value.split("://", 1)[-1]
-                    ),
-                    "workspace",
-                )
-                subject = (
-                    _clean(route.replace("-", " ").replace("_", " ").title(), 56) or "workspace"
-                )
-                text = _human_sentence(
-                    f"The {subject} view keeps the visible workspace in context for review"
-                )
-            # Model prose can occasionally echo a dense accessibility dump
-            # (zero-width characters, template braces, or phrases such as
-            # ``where the visible create is``). It is not publishable copy and
-            # is not a reason to discard an otherwise valid trace. Replace it
-            # with a short scene-local summary grounded in the observed title
-            # and section labels.
             if re.search(
                 r"\u200b|\{\{|\}\}|where\s+the\s+visible\s+create\s+is|\bSort\s+By\b",
                 text,
                 flags=re.IGNORECASE,
             ):
-                labels = [
-                    _clean(value.split(":", 1)[1], 56)
-                    for value in scene.evidence
-                    if value.startswith("section:")
-                    and not re.fullmatch(
-                        r"(?:svg|canvas|element)-?\s*workspace",
-                        value.split(":", 1)[1].strip(),
-                        flags=re.IGNORECASE,
-                    )
-                ]
-                subject = labels[0] if labels else _concise_scene_subject(scene.title)
-                text = _human_sentence(
-                    f"The {subject} view shows the visible records and controls that can be reviewed here"
+                text = scene.narration.strip() or _interaction_skeleton(
+                    _concise_scene_subject(scene.title)
                 )
             # The presenter opening intentionally contains a greeting, the
             # walkthrough subject, and one purpose sentence. It may be longer

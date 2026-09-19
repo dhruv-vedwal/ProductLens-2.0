@@ -22,6 +22,7 @@ FORBIDDEN_RUNTIME_IDENTIFIERS = (
     "calmprep",
     "cookplan ai",
     "smartsevak",
+    "excalidraw",
     "datansh solutions",
     # Domain phrases that previously leaked from the interview-prep fixture
     # into the shared narration fallback.  Fixture/test data may use them;

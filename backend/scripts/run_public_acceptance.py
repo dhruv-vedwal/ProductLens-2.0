@@ -12,6 +12,7 @@ import asyncio
 import ctypes
 import json
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -34,6 +35,14 @@ def _target_key(value: object) -> str:
         return canonical_product_url(str(value or ""))
     except (TypeError, ValueError):
         return str(value or "").strip().rstrip("/").casefold()
+
+
+def _read_json(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _historical_targets(path: Path) -> list[dict[str, str]]:
@@ -64,13 +73,92 @@ def _historical_targets(path: Path) -> list[dict[str, str]]:
     return result
 
 
+def _ledger_document(
+    records: list[dict[str, object]],
+    attempts: list[dict[str, object]],
+    rejected: list[dict[str, object]],
+) -> dict[str, object]:
+    scenarios: dict[str, dict[str, object]] = {}
+    for item in attempts:
+        name = str(item.get("name") or item.get("url") or "unknown")
+        bucket = scenarios.setdefault(
+            name,
+            {
+                "attempts": 0,
+                "clean_passes": 0,
+                "first_passes": 0,
+                "consecutive_passes": 0,
+                "repair_count": 0,
+                "first_pass_rate": 0.0,
+            },
+        )
+        bucket["attempts"] = int(bucket["attempts"]) + 1
+        if _base_evidence_passed(item):
+            bucket["clean_passes"] = int(bucket["clean_passes"]) + 1
+            if bool(item.get("first_pass", True)):
+                bucket["first_passes"] = int(bucket["first_passes"]) + 1
+        evidence = item.get("acceptance_evidence")
+        repeated = (
+            evidence.get("repeated_run_result") if isinstance(evidence, dict) else None
+        )
+        if isinstance(repeated, dict):
+            bucket["consecutive_passes"] = max(
+                int(bucket["consecutive_passes"]),
+                int(repeated.get("consecutive_passes", 0)),
+            )
+        bucket["repair_count"] = int(bucket["repair_count"]) + int(
+            item.get("repair_count", 0)
+        )
+    for bucket in scenarios.values():
+        attempts_count = max(1, int(bucket["attempts"]))
+        bucket["first_pass_rate"] = round(
+            int(bucket["first_passes"]) / attempts_count,
+            4,
+        )
+    return {
+        "schema_version": 2,
+        "runs": records,
+        "attempts": attempts,
+        "rejected": rejected,
+        "scenario_results": scenarios,
+    }
+
+
 def _accepted_record(record: dict[str, object]) -> bool:
     """Return whether an attempt can enter the final acceptance set."""
+    evidence = record.get("acceptance_evidence")
+    if not isinstance(evidence, dict):
+        return False
+    repeated = evidence.get("repeated_run_result")
+    required_runs = int(record.get("required_consecutive_runs", 1))
     return (
         record.get("status") == "COMPLETE"
         and record.get("deliverable") is True
         and bool(record.get("final_video"))
         and not record.get("hard_failures")
+        and evidence.get("workflow_proof") is True
+        and isinstance(evidence.get("multimodal_verdict"), dict)
+        and evidence["multimodal_verdict"].get("passed") is True
+        and (
+            not record.get("manual_review_required")
+            or evidence.get("manual_review") is True
+        )
+        and isinstance(repeated, dict)
+        and int(repeated.get("consecutive_passes", 0)) >= required_runs
+    )
+
+
+def _base_evidence_passed(record: dict[str, object]) -> bool:
+    evidence = record.get("acceptance_evidence")
+    return bool(
+        record.get("status") == "COMPLETE"
+        and record.get("deliverable") is True
+        and record.get("final_video")
+        and not record.get("hard_failures")
+        and isinstance(evidence, dict)
+        and evidence.get("workflow_proof") is True
+        and isinstance(evidence.get("multimodal_verdict"), dict)
+        and evidence["multimodal_verdict"].get("passed") is True
     )
 
 
@@ -119,6 +207,26 @@ def _refresh_record_from_artifacts(
     if not root_value:
         return refreshed
     root = Path(str(root_value))
+    repair_count = int(refreshed.get("repair_count", 0))
+    seen_repairs: set[str] = set()
+    while (root / "qa" / "repair-scheduled.json").is_file():
+        try:
+            scheduled = _read_json(root / "qa" / "repair-scheduled.json") or {}
+            repaired_run_id = str(scheduled.get("retry_run_id") or "")
+        except (OSError, TypeError, ValueError):
+            break
+        if not repaired_run_id or repaired_run_id in seen_repairs:
+            break
+        candidate = root.parent / repaired_run_id
+        if not candidate.is_dir():
+            break
+        seen_repairs.add(repaired_run_id)
+        repair_count += 1
+        root = candidate
+        refreshed["repaired_run_id"] = repaired_run_id
+        refreshed["artifact_root"] = str(root)
+    refreshed["repair_count"] = repair_count
+    refreshed["first_pass"] = repair_count == 0
     # Failed attempts historically retained only ``status=FAILED`` in the
     # acceptance manifest. Recover the durable stage/error classification from
     # the run repository so blocked targets are transparent and can be
@@ -163,6 +271,37 @@ def _refresh_record_from_artifacts(
         )
         refreshed["deliverable"] = bool(delivery.get("deliverable", False))
         refreshed["hard_failures"] = list(delivery.get("hard_failures", []))
+    completion = _read_json(root / "qa" / "completion-audit.json")
+    multimodal = _read_json(root / "qa" / "multimodal-report.json")
+    manual = _read_json(root / "quality" / "manual-review.json")
+    prior_evidence = refreshed.get("acceptance_evidence")
+    prior_repeated = (
+        prior_evidence.get("repeated_run_result")
+        if isinstance(prior_evidence, dict)
+        else None
+    )
+    refreshed["acceptance_evidence"] = {
+        "workflow_proof": (
+            isinstance(completion, dict)
+            and completion.get("complete_evidence") is True
+            and not completion.get("missing_layers")
+        ),
+        "multimodal_verdict": {
+            "passed": (
+                isinstance(multimodal, dict)
+                and multimodal.get("status") == "complete"
+                and not multimodal.get("hard_failures")
+            ),
+            "provider": multimodal.get("provider") if isinstance(multimodal, dict) else None,
+            "status": multimodal.get("status") if isinstance(multimodal, dict) else "missing",
+        },
+        "manual_review": isinstance(manual, dict) and manual.get("status") == "PASS",
+        "repeated_run_result": (
+            prior_repeated
+            if isinstance(prior_repeated, dict)
+            else {"consecutive_passes": 1 if refreshed.get("deliverable") else 0}
+        ),
+    }
     return refreshed
 
 
@@ -170,6 +309,11 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--targets", type=Path, default=Path("validation/public-targets.json"))
     parser.add_argument("--artifact-root", type=Path, default=None)
+    parser.add_argument(
+        "--ledger-name",
+        default="public-runs",
+        help="Versioned acceptance ledger basename (without .json).",
+    )
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--start-at", type=int, default=0)
     parser.add_argument("--cloud", action=argparse.BooleanOptionalAction, default=True)
@@ -205,7 +349,14 @@ async def main() -> None:
     repository, jobs = build_job_service(settings)
     target_config = args.targets.resolve()
     primary, fallbacks = _target_sets(target_config)
-    output = (args.artifact_root or settings.artifact_root) / "acceptance" / "public-runs.json"
+    ledger_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", args.ledger_name).strip("-")
+    if not ledger_name:
+        raise ValueError("ledger name must contain at least one alphanumeric character")
+    output = (
+        (args.artifact_root or settings.artifact_root)
+        / "acceptance"
+        / f"{ledger_name}.json"
+    )
     if args.all_targets:
         configured_urls = {_target_key(item.get("url", "")) for item in [*primary, *fallbacks]}
         for historical in _historical_targets(output):
@@ -312,7 +463,7 @@ async def main() -> None:
     # satisfied and no new browser work is needed in this invocation.
     output.write_text(
         json.dumps(
-            {"schema_version": 1, "runs": records, "attempts": attempts, "rejected": rejected},
+            _ledger_document(records, attempts, rejected),
             indent=2,
         ),
         encoding="utf-8",
@@ -479,6 +630,8 @@ async def main() -> None:
             "url": target["url"],
             "run_id": run["id"],
             "started_at": datetime.now(UTC).isoformat(),
+            "manual_review_required": bool(target.get("manual_review_required", False)),
+            "required_consecutive_runs": int(target.get("required_consecutive_runs", 1)),
         }
         print(
             json.dumps(
@@ -495,7 +648,9 @@ async def main() -> None:
             await asyncio.wait_for(
                 jobs.run_url(
                     run["id"],
-                    allow_external_side_effects=False,
+                    allow_external_side_effects=bool(
+                        target.get("allow_external_side_effects", False)
+                    ),
                     render=args.render,
                     cloud_discovery=args.cloud,
                     audience="product prospect",
@@ -505,6 +660,9 @@ async def main() -> None:
                     # fewer viable scenes, without renderer slowdown.
                     target_duration_seconds=120,
                     credential_reference=target.get("credential_reference"),
+                    allow_isolated_record_creation=bool(
+                        target.get("allow_isolated_record_creation", False)
+                    ),
                 ),
                 timeout=overall_timeout,
             )
@@ -536,6 +694,28 @@ async def main() -> None:
         # just as the coroutine deadline fires; the immutable delivery report
         # and repository stage are the authoritative verdict in that race.
         record = _refresh_record_from_artifacts(record, repository)
+        previous_consecutive = 0
+        for previous in reversed(attempts):
+            if _target_key(previous.get("url")) != _target_key(record.get("url")):
+                continue
+            previous_evidence = previous.get("acceptance_evidence")
+            previous_result = (
+                previous_evidence.get("repeated_run_result")
+                if isinstance(previous_evidence, dict)
+                else None
+            )
+            if _base_evidence_passed(previous) and isinstance(previous_result, dict):
+                previous_consecutive = int(previous_result.get("consecutive_passes", 0))
+            break
+        current_evidence = record.get("acceptance_evidence")
+        if isinstance(current_evidence, dict):
+            current_evidence["repeated_run_result"] = {
+                "consecutive_passes": (
+                    previous_consecutive + 1 if _base_evidence_passed(record) else 0
+                ),
+                "required": int(record.get("required_consecutive_runs", 1)),
+                "latest_run_id": record.get("run_id"),
+            }
         attempts.append(record)
         # A blocked/auth-required/infrastructure-failed public target must not
         # silently reduce the eight-project acceptance set. Replace it with a
@@ -546,6 +726,19 @@ async def main() -> None:
         if accepted:
             records.append(record)
             accepted_urls.add(_target_key(record.get("url")))
+        elif (
+            _base_evidence_passed(record)
+            and isinstance(record.get("acceptance_evidence"), dict)
+            and int(
+                record["acceptance_evidence"]["repeated_run_result"].get(
+                    "consecutive_passes", 0
+                )
+            )
+            < int(record.get("required_consecutive_runs", 1))
+        ):
+            # Repeat this configured scenario with a new independent run.
+            # Any failure resets the consecutive count above.
+            targets.append(dict(target))
         else:
             rejected.append(record)
             rejected_urls.add(_target_key(record.get("url")))
@@ -564,7 +757,7 @@ async def main() -> None:
         )
         output.write_text(
             json.dumps(
-                {"schema_version": 1, "runs": records, "attempts": attempts, "rejected": rejected},
+                _ledger_document(records, attempts, rejected),
                 indent=2,
             ),
             encoding="utf-8",

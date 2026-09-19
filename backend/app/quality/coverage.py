@@ -227,6 +227,39 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict[str, Any]:
         *(["OBJECTIVE_COVERAGE_INCOMPLETE"] if missing else []),
         *outcome_visual_failures,
     ]
+    if trace.behavioral_states:
+        visible_action_kinds = {
+            "FillText",
+            "FillEmail",
+            "FillPhone",
+            "SelectOption",
+            "SelectDate",
+            "SelectDateRange",
+            "Check",
+            "Uncheck",
+            "ChooseRadio",
+        }
+        for event in successful:
+            if event.kind.value not in visible_action_kinds:
+                continue
+            interaction = event.after.get("interaction_evidence")
+            if not isinstance(interaction, dict) or not interaction.get("behavior_adapter"):
+                failures.append("BEHAVIOR_ADAPTER_EVIDENCE_MISSING")
+                continue
+            if float(interaction.get("classification_confidence", 0.0)) < 0.6:
+                failures.append("BEHAVIOR_CLASSIFICATION_CONFIDENCE_LOW")
+            if event.kind.value.startswith("Fill") and not (
+                interaction.get("typing_started")
+                and interaction.get("partial_value_checkpoint") is not None
+                and interaction.get("completed_value_checkpoint") is not None
+            ):
+                failures.append("VISIBLE_TYPING_EVIDENCE_MISSING")
+            if event.kind.value == "SelectOption" and not (
+                interaction.get("options_visible")
+                or interaction.get("interaction") == "native-select-visible-keyboard"
+            ):
+                failures.append("DROPDOWN_SELECTION_EVIDENCE_MISSING")
+        failures = list(dict.fromkeys(failures))
     return {
         "coverage_score": 1.0 if not failures else 0.0,
         "expected_outcomes": plan.expected_outcomes,

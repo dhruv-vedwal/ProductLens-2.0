@@ -69,6 +69,8 @@ class WorkflowStep(BaseModel):
     page_phase: (
         Literal["establish", "explore", "explain", "demonstrate", "verify", "transition"] | None
     ) = None
+    outcome_id: str | None = Field(default=None, max_length=120)
+    required_control_ids: list[str] = Field(default_factory=list, max_length=24)
 
 
 class ReplanDecision(BaseModel):
@@ -103,6 +105,13 @@ class OutcomeSpec(BaseModel):
         "canvas_content",
         "state",
     ] = "visible"
+    target: Target | None = None
+    expected: Any = None
+    start_state_id: str | None = Field(default=None, max_length=160)
+    terminal_state_id: str | None = Field(default=None, max_length=160)
+    required_control_ids: list[str] = Field(default_factory=list, max_length=32)
+    identity_fields: list[str] = Field(default_factory=list, max_length=16)
+    verification_witnesses: list[Postcondition] = Field(default_factory=list, max_length=16)
     evidence_refs: list[str] = Field(min_length=1, max_length=32)
     mutation_class: Literal["read_only", "authorized_mutation", "external_side_effect"] = (
         "read_only"
@@ -140,6 +149,44 @@ class CertifiedDemoScript(BaseModel):
         return self
 
 
+class CertifiedWorkflowEdge(BaseModel):
+    """One rehearsed transition that is safe to execute in production."""
+
+    id: str = Field(min_length=1, max_length=160)
+    from_state_id: str = Field(min_length=1, max_length=160)
+    to_state_id: str = Field(min_length=1, max_length=160)
+    outcome_id: str = Field(min_length=1, max_length=120)
+    operation: SemanticOperation
+    verified: bool = True
+    reversible: bool = True
+    mutation_committed: bool = False
+    evidence_refs: list[str] = Field(min_length=1, max_length=64)
+
+
+class CertifiedWorkflowGraph(BaseModel):
+    """Hidden-rehearsal certificate consumed by the production executor."""
+
+    schema_version: int = Field(default=1, ge=1)
+    product_fingerprint: str = Field(min_length=8, max_length=128)
+    objective: str = Field(min_length=3, max_length=500)
+    start_state_id: str = Field(min_length=1, max_length=160)
+    terminal_state_ids: list[str] = Field(min_length=1, max_length=32)
+    outcomes: list[OutcomeSpec] = Field(min_length=1, max_length=60)
+    edges: list[CertifiedWorkflowEdge] = Field(min_length=1, max_length=160)
+    entity_witness_fields: list[str] = Field(default_factory=list, max_length=32)
+    rehearsal_run_id: str = Field(min_length=1, max_length=160)
+    certified_at: str
+
+    @model_validator(mode="after")
+    def validate_graph(self) -> CertifiedWorkflowGraph:
+        outcome_ids = {item.id for item in self.outcomes}
+        if any(edge.outcome_id not in outcome_ids for edge in self.edges):
+            raise ValueError("workflow edge references an unknown outcome")
+        if any(edge.mutation_committed for edge in self.edges):
+            raise ValueError("rehearsal graph cannot certify a committed mutation")
+        return self
+
+
 class DemoPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -161,6 +208,7 @@ class DemoPlan(BaseModel):
     risk_flags: list[str] = Field(default_factory=list)
     stop_conditions: list[str] = Field(min_length=1)
     certified_script: CertifiedDemoScript | None = None
+    certified_workflow: CertifiedWorkflowGraph | None = None
 
     @model_validator(mode="after")
     def validate_duration_envelope(self) -> DemoPlan:

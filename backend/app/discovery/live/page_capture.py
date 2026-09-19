@@ -17,6 +17,7 @@ from app.contracts.models import (
     ProductContext,
 )
 from app.discovery.live.helpers import *
+from app.interaction.state import classify_control, stable_control_id
 
 
 class PageCaptureMixin:
@@ -148,10 +149,11 @@ class PageCaptureMixin:
         expose anonymous helper inputs or repeated checkbox internals outside
         the active modal. The open dialog/form is the authoritative boundary.
         """
-        raw = await scope.locator(
-            "input, select, textarea, [contenteditable='true'], [role='combobox'], [role='textbox'], [role='searchbox'], [role='spinbutton'], [role='checkbox'], [role='radio']"
-        ).evaluate_all(
-            """nodes => nodes.map(node => {
+        raw = await asyncio.wait_for(
+            scope.locator(
+                "input, select, textarea, [contenteditable='true'], [role='combobox'], [role='textbox'], [role='searchbox'], [role='spinbutton'], [role='checkbox'], [role='radio']"
+            ).evaluate_all(
+                """nodes => nodes.slice(0, 120).map(node => {
                 const text = value => (value || '').replace(/\\s+/g, ' ').trim();
                 const labelled = (node.getAttribute('aria-labelledby') || '').split(/\\s+/)
                     .map(id => document.getElementById(id)?.innerText || '')
@@ -222,6 +224,8 @@ class PageCaptureMixin:
                     node.getAttribute('data-dependent-on') || '';
                 return {
                     name: semanticName, selector, controlType,
+                    tag: node.tagName.toLowerCase(), role,
+                    inputType: type,
                     dependsOn: dependencyHint.split(',').map(value => value.trim()).filter(Boolean).slice(0, 8),
                     validationMessages,
                     // Browser-native validation is ideal, but form libraries
@@ -235,10 +239,14 @@ class PageCaptureMixin:
                     options: node.tagName.toLowerCase() === 'select'
                         ? Array.from(node.options).map(option => option.value || option.text).filter(Boolean).slice(0, 40)
                         : [],
+                    observedValue: displayText || null,
+                    geometryY: node.getBoundingClientRect().y,
                 };
-            }).filter(item => item.visible && !item.disabled && item.selector && item.name &&
+            }).filter(item => item.visible && item.selector && item.name &&
                 !/^(?:element-\\d+|on|off|x|true|false|\\d+)$/i.test(item.name) &&
                 !['hidden', 'submit', 'button', 'reset'].includes(item.controlType))"""
+            ),
+            timeout=18,
         )
         fields: list[FormField] = []
         seen: set[tuple[str, str]] = set()
@@ -247,13 +255,42 @@ class PageCaptureMixin:
             if key in seen:
                 continue
             seen.add(key)
+            behavior_class, _confidence = classify_control(
+                {
+                    "name": item["name"],
+                    "tag": item.get("tag"),
+                    "role": item.get("role"),
+                    "type": item.get("inputType"),
+                    "options": item.get("options", []),
+                }
+            )
             fields.append(
                 FormField(
                     name=str(item["name"])[:200],
                     selector=str(item["selector"]),
                     control_type=str(item["controlType"]),
+                    behavior_class=behavior_class,
+                    stable_id=stable_control_id(
+                        {
+                            "name": item["name"],
+                            "tag": item.get("tag"),
+                            "role": item.get("role"),
+                            "type": item.get("inputType"),
+                            "geometry": {"x": 0, "y": item.get("geometryY") or 0},
+                        },
+                        surface_id=f"form:{source_url}",
+                    ),
                     required=bool(item["required"]),
+                    enabled=not bool(item.get("disabled")),
                     options=[str(value)[:200] for value in item.get("options", [])],
+                    observed_value=(
+                        str(item["observedValue"])[:300]
+                        if item.get("observedValue")
+                        else None
+                    ),
+                    geometry_y=(
+                        float(item["geometryY"]) if item.get("geometryY") is not None else None
+                    ),
                     confidence=0.95,
                     depends_on=[str(value)[:200] for value in item.get("dependsOn", [])],
                     validation_messages=[
@@ -293,104 +330,362 @@ class PageCaptureMixin:
         real option rather than inventing a value for a custom combobox.
         """
         enriched = []
-        for field in schema.fields:
+        # Prefer selectable fields that lack options first—these are the ones
+        # that later block safe rehearsal compilation—then fill remaining
+        # choice controls within a small bounded budget.
+        pending_choice_enrichment = 0
+        ordered_fields = sorted(
+            schema.fields,
+            key=lambda field: (
+                0
+                if field.control_type.casefold() in {"select", "combobox"} and not field.options
+                else 1,
+                0 if field.required else 1,
+            ),
+        )
+        for field in ordered_fields:
             if field.control_type.casefold() not in {"select", "combobox"} or field.options:
                 enriched.append(field)
                 continue
-            locators = [page.get_by_label(field.name, exact=True)]
-            if field.control_type.casefold() == "combobox":
-                locators.append(page.get_by_role("combobox", name=field.name, exact=True))
-            if field.selector.startswith(("#", "[")):
-                locators.append(page.locator(field.selector))
-            control = None
-            for locator in locators:
-                for index in range(await locator.count()):
-                    candidate = locator.nth(index)
-                    if await candidate.is_visible():
-                        control = candidate
-                        break
-                if control is not None:
-                    break
-            if control is None and field.control_type.casefold() == "combobox":
-                # A number of design systems render a visually labelled
-                # combobox without a `for`, aria-label, or aria-labelledby
-                # relationship.  Do not fall back to a coordinate or a broad
-                # first-combobox click. Instead, find the unique visible
-                # combobox whose *nearest* readable ancestor contains this
-                # field's observed label. This is DOM evidence and remains
-                # safe across component libraries.
-                semantic_candidates = await page.locator("[role='combobox']").evaluate_all(
-                    """(nodes, fieldName) => {
-                        const normal = value => (value || '').replace(/\\s+/g, ' ').trim().toLocaleLowerCase();
-                        const sought = normal(fieldName);
-                        return nodes.map((node, index) => {
-                            let parent = node.parentElement;
-                            for (let depth = 1; parent && depth <= 6; depth += 1, parent = parent.parentElement) {
-                                const label = normal(parent.innerText);
-                                if (label.includes(sought) && label.length <= 420) return {index, depth};
-                            }
-                            return null;
-                        }).filter(Boolean);
-                    }""",
-                    field.name,
-                )
-                if semantic_candidates:
-                    nearest_depth = min(int(item["depth"]) for item in semantic_candidates)
-                    nearest = [
-                        item for item in semantic_candidates if int(item["depth"]) == nearest_depth
-                    ]
-                    if len(nearest) == 1:
-                        candidate = page.locator("[role='combobox']").nth(int(nearest[0]["index"]))
-                        if await candidate.is_visible():
-                            control = candidate
-            if control is None:
+            if pending_choice_enrichment >= 6:
                 enriched.append(field)
                 continue
+            pending_choice_enrichment += 1
             try:
-                # Cloud CDP actionability can take a few seconds after a
-                # dialog's entrance transition. A 1.5-second probe timeout
-                # made a real, visible selector appear optionless and later
-                # authorised an incomplete submit. This remains a bounded,
-                # reversible discovery click; it is not a production retry.
-                await control.click(timeout=5_000)
-                # Some accessible comboboxes expose their first available
-                # choice only after keyboard expansion. ArrowDown is a
-                # reversible inspection gesture: it changes neither the form
-                # value nor product state, and lets discovery observe choices
-                # without fabricating a search term or selecting anything.
-                if field.control_type.casefold() == "combobox":
+                enriched_field = await asyncio.wait_for(
+                    self._enrich_one_choice_field(page, field), timeout=10
+                )
+            except TimeoutError:
+                enriched.append(field)
+                continue
+            enriched.append(enriched_field)
+        enriched_by_key = {
+            (field.name.casefold(), field.selector): field for field in enriched
+        }
+        restored = [
+            enriched_by_key.get((field.name.casefold(), field.selector), field)
+            for field in schema.fields
+        ]
+        return schema.model_copy(update={"fields": restored})
+
+    async def _enrich_one_choice_field(self, page, field: FormField) -> FormField:
+        """Open one reversible choice control and capture its visible options."""
+
+        locators = []
+        if field.selector.startswith("label:"):
+            label = field.selector.removeprefix("label:").strip() or field.name
+            locators.extend(
+                [
+                    page.get_by_role("combobox", name=re.compile(rf"^{re.escape(label)}$", re.I)),
+                    page.get_by_label(re.compile(rf"^{re.escape(label)}$", re.I)),
+                    page.get_by_text(label, exact=True),
+                ]
+            )
+        locators.append(page.get_by_label(field.name, exact=True))
+        if field.control_type.casefold() == "combobox":
+            locators.append(page.get_by_role("combobox", name=field.name, exact=True))
+        if field.selector.startswith(("#", "[")):
+            locators.append(page.locator(field.selector))
+        control = None
+        for locator in locators:
+            try:
+                count = await locator.count()
+            except PlaywrightError:
+                continue
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if await candidate.is_visible():
+                        # A plain text label match may resolve to the legend;
+                        # prefer an actual combobox/input near that label.
+                        tag = (
+                            await candidate.evaluate("node => node.tagName.toLowerCase()")
+                        ).casefold()
+                        role = (
+                            await candidate.evaluate(
+                                "node => (node.getAttribute('role') || '').toLowerCase()"
+                            )
+                        ).casefold()
+                        if tag in {"input", "select", "button"} or role in {
+                            "combobox",
+                            "listbox",
+                            "button",
+                        }:
+                            control = candidate
+                            break
+                        nearby = candidate.locator(
+                            "xpath=ancestor-or-self::*[1]/following::input[1] | ancestor-or-self::*[1]/following::*[@role='combobox'][1]"
+                        )
+                        if await nearby.count():
+                            control = nearby.first
+                            break
+                except PlaywrightError:
+                    continue
+            if control is not None:
+                break
+        if control is None and field.control_type.casefold() == "combobox":
+            # Last-resort: attribute/name hints often survive when the
+            # accessible name is only rendered as a floating label.
+            hint = re.sub(r"[^a-z0-9]", "", field.name.casefold())
+            if hint:
+                try:
+                    attr = page.locator(
+                        f"[role='combobox'][name*='{hint}' i], "
+                        f"[role='combobox'][id*='{hint}' i], "
+                        f"input[name*='{hint}' i][role='combobox'], "
+                        f"div[role='combobox'][aria-label*='{field.name}' i]"
+                    )
+                    if await attr.count():
+                        candidate = attr.first
+                        if await candidate.is_visible():
+                            control = candidate
+                except PlaywrightError:
+                    pass
+        if control is None and field.control_type.casefold() == "combobox":
+            semantic_candidates = await page.locator("[role='combobox']").evaluate_all(
+                """(nodes, fieldName) => {
+                    const normal = value => (value || '').replace(/\\s+/g, ' ').trim().toLocaleLowerCase();
+                    const sought = normal(fieldName);
+                    return nodes.map((node, index) => {
+                        let parent = node.parentElement;
+                        for (let depth = 1; parent && depth <= 6; depth += 1, parent = parent.parentElement) {
+                            const label = normal(parent.innerText);
+                            if (!label.includes(sought) || label.length > 420) continue;
+                            const exact = label === sought || label.startsWith(sought + ' ') || label.startsWith(sought + '\\n');
+                            return {index, depth, exact: exact ? 1 : 0, span: label.length};
+                        }
+                        return null;
+                    }).filter(Boolean);
+                }""",
+                field.name,
+            )
+            if semantic_candidates:
+                # Prefer an exact local label over a distant form container that
+                # merely contains the field name among many siblings.
+                best_exact = max(int(item.get("exact") or 0) for item in semantic_candidates)
+                ranked = [
+                    item for item in semantic_candidates if int(item.get("exact") or 0) == best_exact
+                ]
+                nearest_depth = min(int(item["depth"]) for item in ranked)
+                nearest = [
+                    item
+                    for item in ranked
+                    if int(item["depth"]) == nearest_depth
+                ]
+                nearest.sort(key=lambda item: int(item.get("span") or 10_000))
+                if nearest:
+                    candidate = page.locator("[role='combobox']").nth(int(nearest[0]["index"]))
+                    if await candidate.is_visible():
+                        control = candidate
+        if control is None:
+            return field
+        try:
+            await control.click(timeout=5_000)
+            if field.control_type.casefold() == "combobox":
+                # Design-system autocompletes often need an explicit popup
+                # affordance or keyboard open after focus; try both before
+                # treating the control as optionless.
+                try:
+                    popup = control.locator(
+                        "xpath=ancestor::*[contains(@class,'Autocomplete') or contains(@class,'autocomplete')][1]//button[contains(@class,'popupIndicator') or @aria-label='Open' or @title='Open']"
+                    )
+                    if await popup.count():
+                        await popup.first.click(timeout=2_000)
+                except PlaywrightError:
+                    pass
+                try:
+                    await control.press("ArrowDown")
+                except PlaywrightError:
+                    pass
+            values: list[str] = []
+            for _attempt in range(10):
+                try:
+                    await page.wait_for_selector(
+                        "[role='listbox'], [role='option'], [role='menu']",
+                        state="attached",
+                        timeout=500,
+                    )
+                except PlaywrightError:
+                    pass
+                # Portaled listboxes can report not-visible briefly while still
+                # exposing readable option text; harvest attached nodes too.
+                harvested = await page.evaluate(
+                    """() => {
+                      const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+                      const selected = document.querySelector(
+                        '[role="option"][aria-selected="true"], [role="option"].Mui-focused, [role="option"].Mui-focusVisible'
+                      );
+                      if (selected) {
+                        const label = clean(selected.innerText || selected.textContent);
+                        if (label) return [label];
+                      }
+                      const nodes = Array.from(document.querySelectorAll(
+                        "[role='option'], [role='listbox'] li, [role='menu'] [role='menuitem'], ul[role='listbox'] li"
+                      ));
+                      return nodes
+                        .map(node => clean(node.innerText || node.textContent || node.getAttribute('data-value')))
+                        .filter(Boolean)
+                        .slice(0, 40);
+                    }"""
+                )
+                for label in harvested or []:
+                    if label and str(label).casefold() not in {
+                        "no options",
+                        "no results",
+                    }:
+                        values.append(str(label))
+                if values:
+                    break
+                if _attempt in {2, 5}:
                     try:
+                        await control.click(timeout=2_000)
+                        await control.press("Control+A")
+                        await control.type("a", delay=40)
                         await control.press("ArrowDown")
                     except PlaywrightError:
                         pass
-                # Remote/custom comboboxes commonly fetch their list after
-                # the click.  A single 200ms snapshot made ProductLens treat
-                # an otherwise valid dependent control as optionless. Wait
-                # only for *visible observed* choices, never for a guessed
-                # value or an arbitrary fixed form delay.
-                values: list[str] = []
-                for _attempt in range(8):
-                    options = page.locator(
-                        "[role='option'], [role='listbox'] li, [role='menu'] [role='menuitem']"
-                    )
-                    for index in range(await options.count()):
-                        option = options.nth(index)
-                        if not await option.is_visible():
-                            continue
-                        label = " ".join((await option.inner_text()).split())
-                        if label:
-                            values.append(label)
-                    if values:
+                await page.wait_for_timeout(350)
+            await self._safe_escape(page)
+            unique = list(dict.fromkeys(values))[:40]
+            if not unique:
+                # MUI Autocomplete sometimes leaves the focused option text on
+                # the input itself after ArrowDown without mounting a listbox
+                # long enough to harvest. Treat that typed/focused value as a
+                # one-item option list so rehearsal can still select it.
+                try:
+                    typed = (await control.input_value(timeout=1_000) or "").strip()
+                except PlaywrightError:
+                    typed = ""
+                if typed and typed.casefold() not in {
+                    "select",
+                    "select an option",
+                    "choose",
+                    "choose an option",
+                }:
+                    unique = [typed]
+            if not unique:
+                return field
+            observed = (field.observed_value or "").strip()
+            safe = [
+                item
+                for item in unique
+                if item.casefold()
+                not in {"select", "select an option", "choose", "choose an option"}
+            ]
+            chosen = next(
+                (item for item in safe if item.casefold() == observed.casefold()),
+                min(safe, key=str.casefold) if safe else None,
+            )
+            update = {"options": unique}
+            if chosen and not observed:
+                update["observed_value"] = chosen
+            return field.model_copy(update=update)
+        except PlaywrightError:
+            await self._safe_escape(page)
+            return field
+
+    async def _probe_form_dependencies(self, page, scope, schema: FormSchema) -> FormSchema:
+        """Select one reversible observed choice and record resulting child state."""
+
+        fields = list(schema.fields)
+        for parent in fields:
+            if (
+                not parent.enabled
+                or parent.control_type.casefold() not in {"select", "combobox"}
+                or not parent.options
+            ):
+                continue
+            safe_options = [
+                value
+                for value in parent.options
+                if value.strip().casefold()
+                not in {"select", "select an option", "choose", "choose an option"}
+            ]
+            if not safe_options:
+                continue
+            value = min(safe_options, key=str.casefold)
+            locators = [page.get_by_label(parent.name, exact=True)]
+            if parent.selector.startswith(("#", "[")):
+                locators.append(page.locator(parent.selector))
+            control = None
+            for locator in locators:
+                try:
+                    candidate = locator.first
+                    if await candidate.is_visible() and await candidate.is_enabled():
+                        control = candidate
                         break
-                    await page.wait_for_timeout(300)
-                await self._safe_escape(page)
-                enriched.append(
-                    field.model_copy(update={"options": list(dict.fromkeys(values))[:40]})
+                except PlaywrightError:
+                    continue
+            if control is None:
+                continue
+            try:
+                tag = await control.evaluate("element => element.tagName.toLowerCase()")
+                if tag == "select":
+                    await control.select_option(label=value)
+                else:
+                    await control.click()
+                    option = page.get_by_role("option", name=value, exact=True)
+                    visible = [
+                        option.nth(index)
+                        for index in range(await option.count())
+                        if await option.nth(index).is_visible()
+                    ]
+                    if len(visible) != 1:
+                        await self._safe_escape(page)
+                        continue
+                    await visible[0].click()
+                await page.wait_for_timeout(350)
+                refreshed = await self._enrich_choice_options(
+                    page, await self._form_schema_from_scope(scope, schema.source_url)
                 )
             except PlaywrightError:
                 await self._safe_escape(page)
-                enriched.append(field)
-        return schema.model_copy(update={"fields": enriched})
+                continue
+            before_by_name = {item.name.casefold(): item for item in fields}
+            promoted: list[FormField] = []
+            for child in refreshed.fields:
+                before = before_by_name.get(child.name.casefold())
+                if before is None:
+                    promoted.append(child)
+                    continue
+                became_enabled = not before.enabled and child.enabled
+                became_populated = not before.options and bool(child.options)
+                options_changed = bool(before.options and child.options != before.options)
+                promoted.append(
+                    child.model_copy(
+                        update={
+                            "depends_on": list(
+                                dict.fromkeys(
+                                    [
+                                        *child.depends_on,
+                                        *(
+                                            [parent.name]
+                                            if child.name != parent.name
+                                            and (
+                                                became_enabled
+                                                or became_populated
+                                                or options_changed
+                                            )
+                                            else []
+                                        ),
+                                    ]
+                                )
+                            ),
+                        }
+                    )
+                )
+            fields = [
+                item.model_copy(update={"observed_value": value})
+                if item.name.casefold() == parent.name.casefold()
+                else item
+                for item in promoted
+            ]
+        return schema.model_copy(
+            update={
+                "fields": fields,
+                "evidence": [*schema.evidence, "reversible dependency transition probe"],
+            }
+        )
 
     async def inspect(
         self, page, objective: str, budget: DiscoveryBudget | None = None
@@ -406,25 +701,43 @@ class PageCaptureMixin:
             # Long-polling applications may never be idle; the short fallback is
             # still enough to inspect their hydrated DOM without stalling a run.
             await page.wait_for_timeout(700)
-        title = await page.title()
-        visible_text = (await page.locator("body").inner_text())[:8_000]
+
+        async def _bounded_evaluate(expression: str, *, timeout: float = 12.0):
+            # Browser-side DOM walks can freeze a remote CDP session long after
+            # Python's wait_for fires. Keep each evaluate short so a heavy CRM
+            # shell cannot wedge discovery for the full outer stage deadline.
+            return await asyncio.wait_for(page.evaluate(expression), timeout=timeout)
+
+        try:
+            title = await asyncio.wait_for(page.title(), timeout=8)
+        except TimeoutError:
+            title = ""
+        try:
+            visible_text = (
+                await asyncio.wait_for(page.locator("body").inner_text(), timeout=10)
+            )[:8_000]
+        except TimeoutError:
+            visible_text = ""
         # Cards and article bodies carry the explanation a viewer needs, but
         # are often not actionable controls. Capture their visible prose as
         # evidence for the editorial layer without turning them into click
         # targets or treating a title as a complete fact.
-        raw_blocks = await page.evaluate(
-            """() => Array.from(document.querySelectorAll(`main section, main article, section, article, [data-testid]`)).slice(0, 200).map(node => (node.innerText || '').replace(/\\s+/g, ' ').trim()).filter(text => text.length >= 40).slice(0, 20)"""
-        )
+        try:
+            raw_blocks = await _bounded_evaluate(
+                """() => Array.from(document.querySelectorAll(`main section, main article, section, article, [data-testid]`)).slice(0, 200).map(node => (node.innerText || '').replace(/\\s+/g, ' ').trim()).filter(text => text.length >= 40).slice(0, 20)"""
+            )
+        except TimeoutError:
+            raw_blocks = []
         # Some content/timeline cards are plain divs rather than semantic
         # sections or heading containers. Select bounded *leaf-like* readable
         # cards so a company/project title retains the visible role and
         # contribution text needed for editorial narration.
-        # A locator-wide evaluation can remain pending while a large hydrated
-        # dashboard is committing. Query a bounded slice in the page instead;
-        # this preserves generic card evidence without consuming discovery's
-        # entire deadline on one selector.
-        card_blocks = await page.evaluate(
-            """() => Array.from(document.querySelectorAll('main div')).slice(0, 4000).map(node => {
+        # Cap the candidate pool tightly: scanning thousands of nested CRM
+        # divs on Browserbase previously wedged CDP until the outer discovery
+        # watchdog cancelled the whole stage.
+        try:
+            card_blocks = await _bounded_evaluate(
+                """() => Array.from(document.querySelectorAll('main div')).slice(0, 800).map(node => {
                 const text = (node.innerText || '').replace(/\\s+/g, ' ').trim();
                 const childWithSameText = Array.from(node.children).some(child =>
                     ((child.innerText || '').replace(/\\s+/g, ' ').trim()) === text
@@ -432,13 +745,16 @@ class PageCaptureMixin:
                 return {text, childWithSameText};
             }).filter(item => item.text.length >= 120 && item.text.length <= 1400 && !item.childWithSameText)
               .map(item => item.text).slice(0, 40)"""
-        )
+            )
+        except TimeoutError:
+            card_blocks = []
         # Component libraries frequently render project cards as nested divs
         # rather than semantic articles. Associate every visible heading with
         # its nearest readable container so editorial facts retain the card's
         # description, role, contribution, and outcome—not merely its title.
-        heading_blocks = await page.evaluate(
-            """() => Array.from(document.querySelectorAll(`h1,h2,h3,h4`)).slice(0, 120).map(node => {
+        try:
+            heading_blocks = await _bounded_evaluate(
+                """() => Array.from(document.querySelectorAll(`h1,h2,h3,h4`)).slice(0, 120).map(node => {
                 const heading = (node.innerText || '').replace(/\\s+/g, ' ').trim();
                 let parent = node.parentElement, body = '';
                 while (parent) {
@@ -451,7 +767,9 @@ class PageCaptureMixin:
                 }
                 return heading && body ? `${heading} :: ${body}` : '';
             }).filter(Boolean).slice(0, 50)"""
-        )
+            )
+        except TimeoutError:
+            heading_blocks = []
         content_blocks = list(
             dict.fromkeys(
                 str(block)[:700] for block in [*heading_blocks, *raw_blocks, *card_blocks]
@@ -464,9 +782,15 @@ class PageCaptureMixin:
         # bounded set of visible, action-oriented body lines; this remains
         # evidence extraction, never a product-specific template.
         if len(content_blocks) < 3:
-            body_lines = await page.locator("body").evaluate(
-                "node => (node.innerText || '').split(/\\n+/).map(value => value.replace(/\\s+/g, ' ').trim()).filter(Boolean)"
-            )
+            try:
+                body_lines = await asyncio.wait_for(
+                    page.locator("body").evaluate(
+                        "node => (node.innerText || '').split(/\\n+/).map(value => value.replace(/\\s+/g, ' ').trim()).filter(Boolean)"
+                    ),
+                    timeout=8,
+                )
+            except TimeoutError:
+                body_lines = []
             action_words = re.compile(
                 r"\\b(?:manage|track|review|schedule|configure|organize|monitor|plan|create|compare|follow|coordinate|support|filter|list|build|edit|transition|confirm)\\b",
                 re.IGNORECASE,
@@ -484,22 +808,24 @@ class PageCaptureMixin:
         # natural scroll tour of a project collection rather than jumping to
         # whichever CTA happens to be actionable.
         # Read the interactive inventory in one bounded page-side operation.
-        # Locator-wide evaluation is disproportionately expensive for virtual
-        # lists and frequently re-rendering dashboards, while this query still
-        # captures the same semantic evidence and caps work before sorting.
-        raw = await page.evaluate(
-            """() => {
+        # Never scan every DOM node for shadow roots: on large CRM shells that
+        # walk freezes the remote renderer and leaves discovery waiting until
+        # the outer stage watchdog fires. Sample a capped host set instead.
+        try:
+            raw = await _bounded_evaluate(
+                """() => {
                 const selector = `a,button,input,select,textarea,iframe,canvas,svg,[contenteditable='true'],[draggable='true'],[dropzone],[aria-grabbed='true'],[aria-dropeffect],[role='application'],[role='toolbar'],[role='button'],[role='combobox'],[role='option'],[role='checkbox'],[role='radio'],[role='alert'],[role='status'],[role='dialog'],[role='row'],[role='gridcell'],tr,td,li,h1,h2,h3,h4`;
                 // Shadow-root controls are part of the same observable page
                 // even though document.querySelectorAll cannot cross the
                 // boundary. Include open roots as fresh evidence; closed
                 // roots remain represented by their host geometry/text.
-                const roots = [document, ...Array.from(document.querySelectorAll('*')).map(node => node.shadowRoot).filter(Boolean)];
-                const nodes = [
-                    ...roots.flatMap(root => Array.from(root.querySelectorAll(selector))),
-                    ...Array.from(document.querySelectorAll('*')).filter(node => node.shadowRoot),
-                ];
-                return nodes.slice(0, 5000).map((node, index) => ({
+                const roots = [document];
+                const hostSample = Array.from(document.querySelectorAll('body *')).slice(0, 1200);
+                for (const host of hostSample) {
+                    if (host.shadowRoot) roots.push(host.shadowRoot);
+                }
+                const nodes = roots.flatMap(root => Array.from(root.querySelectorAll(selector))).slice(0, 2000);
+                return nodes.map((node, index) => ({
                 // Keep the same human field identity used by scoped form
                 // discovery. A placeholder is an implementation hint, not
                 // presenter copy; using it as a scene name can leak a sample
@@ -545,8 +871,11 @@ class PageCaptureMixin:
                 navigation_scope: (() => { const container=node.closest('header,nav,footer,[role="navigation"]'); if (!container) return 'unknown'; if (container.tagName.toLowerCase()==='footer') return 'footer'; return 'primary'; })(),
                 visible: !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)
                 })).sort((left, right) => right.formPriority - left.formPriority || Number(right.visible) - Number(left.visible)).slice(0, 160).map(({formPriority, ...item}) => item);
-            }"""
-        )
+            }""",
+                timeout=15,
+            )
+        except TimeoutError:
+            raw = []
         elements = [
             ObservedElement(
                 tag=item["tag"],
@@ -569,6 +898,171 @@ class PageCaptureMixin:
             for item in raw
             if item["visible"] and str(item["name"]).strip()
         ]
+        # CRM/SPA shells often render primary destinations as plain clickable
+        # text inside aside/nav containers rather than semantic anchors. When
+        # the standard inventory yields no same-origin routes, harvest a
+        # bounded set of visible nav-like controls so objective ranking can
+        # still probe the requested area.
+        if not any(item.href for item in elements):
+            try:
+                nav_raw = await _bounded_evaluate(
+                    """() => {
+                    const roots = [
+                        ...Array.from(document.querySelectorAll('aside,nav,header,[role="navigation"],[class*="sidebar" i],[class*="sidenav" i],[class*="menu" i]')).slice(0, 40),
+                        document.body,
+                    ];
+                    const seen = new Set();
+                    const out = [];
+                    for (const root of roots) {
+                        if (!root) continue;
+                        for (const node of Array.from(root.querySelectorAll('a,button,[role="link"],[role="button"],[role="menuitem"],[role="tab"],li,div,span')).slice(0, 500)) {
+                            const text = (node.innerText || node.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+                            if (!text || text.length < 2 || text.length > 48) continue;
+                            if (text.split(' ').length > 6) continue;
+                            const visible = !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+                            if (!visible) continue;
+                            const key = text.toLowerCase();
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            const href = node.getAttribute('href') || node.closest('a[href]')?.getAttribute('href') || null;
+                            out.push({
+                                name: text,
+                                tag: node.tagName.toLowerCase(),
+                                role: node.getAttribute('role') || (href ? 'link' : 'button'),
+                                selector: node.getAttribute('data-testid')
+                                    ? `[data-testid="${node.getAttribute('data-testid')}"]`
+                                    : node.getAttribute('aria-label')
+                                    ? `[aria-label="${node.getAttribute('aria-label')}"]`
+                                    : href
+                                    ? `a[href="${href}"]`
+                                    : node.tagName.toLowerCase(),
+                                href,
+                                type: node.getAttribute('type'),
+                                text,
+                                visible: true,
+                                navigation_scope: node.closest('aside,nav,[role="navigation"],[class*="sidebar" i]') ? 'primary' : 'unknown',
+                                formPriority: 0,
+                                required: false,
+                                autocomplete: null,
+                                options: [],
+                                draggable: false,
+                                dropzone: false,
+                                shadowRoot: !!node.shadowRoot,
+                            });
+                            if (out.length >= 60) return out;
+                        }
+                    }
+                    return out;
+                }""",
+                    timeout=10,
+                )
+            except TimeoutError:
+                nav_raw = []
+            for item in nav_raw if isinstance(nav_raw, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                elements.append(
+                    ObservedElement(
+                        tag=str(item.get("tag") or "button"),
+                        role=item.get("role"),
+                        name=name[:300],
+                        selector=str(item.get("selector") or "button"),
+                        href=item.get("href"),
+                        element_type=item.get("type"),
+                        required=False,
+                        options=[],
+                        autocomplete=None,
+                        text=item.get("text"),
+                        source_url=page.url,
+                        actionable=True,
+                        navigation_scope=str(item.get("navigation_scope") or "unknown"),
+                        draggable=False,
+                        dropzone=False,
+                        shadow_host=bool(item.get("shadowRoot")),
+                    )
+                )
+        # Always harvest create/add CTAs. Interactive CRM toolbars often render
+        # "New Lead" outside the primary inventory slice or as non-semantic
+        # clickable text; missing them leaves discovery with only template
+        # forms on sibling routes.
+        try:
+            cta_raw = await _bounded_evaluate(
+                """() => {
+                    const needles = /\\b(new|create|add|compose|schedule|book)\\b/i;
+                    const nodes = Array.from(document.querySelectorAll(
+                        'a,button,[role="button"],[role="link"],[class*="btn" i],[class*="button" i]'
+                    )).slice(0, 800);
+                    const out = [];
+                    const seen = new Set();
+                    for (const node of nodes) {
+                        const text = (node.innerText || node.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+                        if (!text || text.length > 48 || !needles.test(text)) continue;
+                        const visible = !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+                        if (!visible) continue;
+                        const key = text.toLowerCase();
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        out.push({
+                            name: text,
+                            tag: node.tagName.toLowerCase(),
+                            role: node.getAttribute('role') || 'button',
+                            selector: node.getAttribute('data-testid')
+                                ? `[data-testid="${node.getAttribute('data-testid')}"]`
+                                : node.getAttribute('aria-label')
+                                ? `[aria-label="${node.getAttribute('aria-label')}"]`
+                                : node.tagName.toLowerCase(),
+                            href: node.getAttribute('href'),
+                            type: node.getAttribute('type') || 'button',
+                            text,
+                            visible: true,
+                            navigation_scope: 'unknown',
+                            formPriority: 1,
+                            required: false,
+                            autocomplete: null,
+                            options: [],
+                            draggable: false,
+                            dropzone: false,
+                            shadowRoot: !!node.shadowRoot,
+                        });
+                        if (out.length >= 20) break;
+                    }
+                    return out;
+                }""",
+                timeout=8,
+            )
+        except TimeoutError:
+            cta_raw = []
+        existing_names = {item.name.casefold() for item in elements}
+        for item in cta_raw if isinstance(cta_raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name or name.casefold() in existing_names:
+                continue
+            existing_names.add(name.casefold())
+            elements.append(
+                ObservedElement(
+                    tag=str(item.get("tag") or "button"),
+                    role=item.get("role"),
+                    name=name[:300],
+                    selector=str(item.get("selector") or "button"),
+                    href=item.get("href"),
+                    element_type=item.get("type"),
+                    required=False,
+                    options=[],
+                    autocomplete=None,
+                    text=item.get("text"),
+                    source_url=page.url,
+                    actionable=True,
+                    navigation_scope=str(item.get("navigation_scope") or "unknown"),
+                    draggable=False,
+                    dropzone=False,
+                    shadow_host=bool(item.get("shadowRoot")),
+                )
+            )
         objective_words = _tokens(objective)
         origin = urlparse(page.url)
         # A link without an accessible/visible semantic name is not a

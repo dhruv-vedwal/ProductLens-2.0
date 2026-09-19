@@ -7,6 +7,7 @@ an optional multimodal reviewer without making delivery depend on a model call.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -127,13 +128,27 @@ def review_multimodal(
                 if key not in {"video_path", "frames"}
             },
         }
-    result = reviewer(review_packet)
+    try:
+        result = reviewer(review_packet)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        return {
+            "status": "unavailable",
+            "provider": "reviewer",
+            "hard_failures": [f"MULTIMODAL_REVIEW_UNAVAILABLE:{type(error).__name__}"],
+            "warnings": [],
+            "findings": [],
+        }
     if not isinstance(result, dict):
         raise TypeError("multimodal reviewer must return a mapping")
+    failures = [str(item) for item in result.get("hard_failures", [])]
+    warnings = [str(item) for item in result.get("warnings", [])]
+    unavailable = any("MULTIMODAL_REVIEW_UNAVAILABLE" in item for item in [*failures, *warnings])
+    if unavailable and not any("MULTIMODAL_REVIEW_UNAVAILABLE" in item for item in failures):
+        failures.append("MULTIMODAL_REVIEW_UNAVAILABLE")
     return {
-        "status": "complete",
+        "status": "unavailable" if unavailable else "complete",
         "provider": result.get("provider"),
-        "hard_failures": list(result.get("hard_failures", [])),
-        "warnings": list(result.get("warnings", [])),
+        "hard_failures": failures,
+        "warnings": warnings,
         "findings": result.get("findings", []),
     }

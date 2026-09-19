@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from app.evaluation.witnesses import is_specific_entity_value, specific_entity_fields
 from app.quality.consistency import validate_selected_candidate_consistency
 
 REQUIRED_ARTIFACTS: tuple[tuple[str, str], ...] = (
@@ -13,6 +14,7 @@ REQUIRED_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("discovery", "discovery/product-context.json"),
     ("exploration_report", "exploration-report.json"),
     ("product_knowledge", "discovery/product-knowledge.json"),
+    ("behavioral_product_model", "discovery/behavioral-product-model.json"),
     ("knowledge", "page-knowledge"),
     ("feature_graph", "feature-graph.json"),
     ("candidate_flows", "candidate-flows.json"),
@@ -21,10 +23,13 @@ REQUIRED_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("capability_resolution", "planning/capability-resolutions.json"),
     ("plan_consistency", "qa/plan-consistency-report.json"),
     ("trace", "execution/trace.json"),
+    ("interaction_trace", "execution/interaction-trace.json"),
     ("state_snapshots", "execution/state-snapshots.json"),
     ("action_attempts", "execution/action-attempts.json"),
     ("verification_results", "execution/verification-results.json"),
     ("presentation", "presentation/presentation-plan.json"),
+    ("semantic_moments", "presentation/semantic-moments.json"),
+    ("sync_edl", "presentation/sync-edl.json"),
     ("editorial_brief", "presentation/editorial-brief.json"),
     ("storyboard", "presentation/storyboard.json"),
     ("scene_plan", "presentation/scene-plan.json"),
@@ -132,6 +137,21 @@ def audit_run(root: Path) -> dict[str, object]:
         plan_payload = {}
     consistency_failures = validate_selected_candidate_consistency(plan_payload)
     missing.extend(failure.casefold() for failure in consistency_failures)
+    sync_edl_path = root / "presentation" / "sync-edl.json"
+    try:
+        sync_edl = json.loads(sync_edl_path.read_text(encoding="utf-8"))
+        edl_moments = sync_edl.get("moments", [])
+        if (
+            sync_edl.get("schema_version") != 2
+            or sync_edl.get("authority") != "semantic_moments"
+            or not isinstance(edl_moments, list)
+            or not edl_moments
+            or any(not item.get("verified") for item in edl_moments if isinstance(item, dict))
+            or not sync_edl.get("source_windows")
+        ):
+            missing.append("invalid_sync_edl")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        missing.append("invalid_sync_edl")
     # Delivery must be supported by the individual layer reports. A report
     # file is not proof of success when it persists hard failures for a
     # targeted repair; inspect the durable verdicts rather than relying on an
@@ -172,8 +192,11 @@ def audit_run(root: Path) -> dict[str, object]:
         objective = {}
     if "create_isolated_record" in objective.get("permitted_mutations", []):
         rehearsal_path = root / "discovery" / "rehearsal-report.json"
+        certified_workflow_path = root / "planning" / "certified-workflow-graph.json"
         trace_path = root / "execution" / "trace.json"
         try:
+            if not certified_workflow_path.is_file():
+                missing.append("certified_workflow")
             rehearsal = json.loads(rehearsal_path.read_text(encoding="utf-8"))
             target = rehearsal.get("outcome_target") or {}
             witness = str(target.get("name", "")).casefold()
@@ -189,23 +212,41 @@ def audit_run(root: Path) -> dict[str, object]:
                 if not isinstance(after, dict):
                     return False
                 serialized = json.dumps(after).casefold()
-                if witness and witness in serialized:
+                if witness and is_specific_entity_value(witness) and witness in serialized:
                     return True
-                if witness_url and witness_url in str(after.get("url", "")).casefold():
-                    return True
-                # Creation pages commonly receive a server-generated identifier,
-                # so the rehearsal URL is intentionally not stable across runs.
-                # The execution kernel records the independent, visible values
-                # matched on the resulting state; those values plus a changed
-                # route are the authoritative production witness in that case.
+                # A rehearsal URL is not an identity witness. Dynamic create
+                # routes must still retain demonstrated entity fields.
                 verified_outcome = after.get("verified_outcome")
                 if not isinstance(verified_outcome, dict):
                     return False
-                matched_values = verified_outcome.get("matched_form_values")
+                matched_fields = specific_entity_fields(
+                    verified_outcome.get("matched_form_fields")
+                    if isinstance(verified_outcome.get("matched_form_fields"), dict)
+                    else {}
+                )
+                matched_values = list(matched_fields.values())
                 return bool(
                     after.get("url_changed")
                     or event.get("state_delta", {}).get("url_changed")
-                ) and isinstance(matched_values, list) and bool(matched_values)
+                ) and (
+                    isinstance(matched_fields, dict)
+                    and len(
+                        {
+                            str(field).strip().casefold(): str(value).strip()
+                            for field, value in matched_fields.items()
+                            if str(field).strip() and str(value).strip()
+                        }
+                    )
+                    >= 2
+                    # Backward-compatible traces may still prove identity
+                    # through the rehearsal's explicit outcome target above.
+                    or (
+                        witness
+                        and witness in serialized
+                        and isinstance(matched_values, list)
+                        and bool(matched_values)
+                    )
+                )
 
             proved = any(_event_proves_creation(event) for event in submitted)
             if (not witness and not witness_url) or not submitted or not proved:

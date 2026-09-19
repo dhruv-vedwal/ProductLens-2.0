@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, TypeVar
@@ -17,6 +18,32 @@ from app.providers.limits import provider_limit
 
 Schema = TypeVar("Schema", bound=BaseModel)
 logger = get_logger("app.providers.openrouter")
+
+
+def _structured_timeout_seconds() -> float:
+    raw = os.getenv("OPENROUTER_STRUCTURED_TIMEOUT_SECONDS", "120")
+    try:
+        return max(30.0, min(300.0, float(raw)))
+    except (TypeError, ValueError):
+        return 120.0
+
+
+def _parse_structured_json(content: str) -> Any:
+    """Parse model JSON even when wrapped in markdown fences or prose."""
+    text = str(content or "").strip()
+    if not text:
+        raise ValueError("empty structured response")
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        return json.loads(text[start : end + 1])
 
 
 class OpenRouterProvider:
@@ -57,9 +84,12 @@ class OpenRouterProvider:
             # the result safe and focused.
             "max_tokens": self.max_tokens,
         }
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        timeout_seconds = _structured_timeout_seconds()
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_seconds, connect=10.0)
+        ) as client:
             try:
-                async with asyncio.timeout(35):
+                async with asyncio.timeout(timeout_seconds + 5.0):
                     response = await client.post(
                         self.endpoint,
                         headers={
@@ -97,7 +127,7 @@ class OpenRouterProvider:
             url=safe_url(self.endpoint),
             model=self.model,
         )
-        return schema.model_validate_json(content)
+        return schema.model_validate(_parse_structured_json(str(content)))
 
 
 class OpenRouterVisualReviewer:
@@ -183,8 +213,8 @@ class OpenRouterVisualReviewer:
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             return {
                 "provider": "openrouter",
-                "hard_failures": [],
-                "warnings": [f"MULTIMODAL_REVIEW_UNAVAILABLE:{type(error).__name__}"],
+                "hard_failures": [f"MULTIMODAL_REVIEW_UNAVAILABLE:{type(error).__name__}"],
+                "warnings": [],
                 "findings": [],
             }
         return {

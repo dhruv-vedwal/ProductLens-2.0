@@ -60,3 +60,15 @@ def test_director_rejects_unobserved_snapshot():
             snapshot=_snapshot(),
             affordance=_snapshot().visible_affordances[0],
         )
+
+
+def test_production_engine_uses_director_selection_and_behavior_adapters():
+    source = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "app"
+        / "execution"
+        / "engine.py"
+    ).read_text(encoding="utf-8")
+    assert "self.interaction_director.select(candidates)" in source
+    assert "self.behavior_adapters.execute(" in source
+    assert "from app.evaluation.witnesses import specific_entity_fields" in source

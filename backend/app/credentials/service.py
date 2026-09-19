@@ -145,7 +145,13 @@ class EnvironmentCredentialService:
         # password control is evidence that authentication is required; hidden
         # controls must not turn an otherwise demoable URL into AUTH_REQUIRED.
         password = page.locator('input[type="password"]:visible')
-        if await password.count() == 0:
+        try:
+            password_count = await password.count()
+        except PlaywrightError as error:
+            raise CredentialError(
+                f"AUTH_PAGE_CLOSED: login page became unavailable before credential fill ({type(error).__name__})"
+            ) from error
+        if password_count == 0:
             return False
         if not reference:
             raise CredentialError("AUTH_REQUIRED: a browser credential reference is required")
@@ -153,16 +159,28 @@ class EnvironmentCredentialService:
         username = page.locator(
             'input[type="email"]:visible, input[name*="user" i]:visible, input[name*="email" i]:visible'
         )
-        if await username.count() != 1 or await password.count() != 1:
+        try:
+            username_count = await username.count()
+            password_count = await password.count()
+        except PlaywrightError as error:
+            raise CredentialError(
+                f"AUTH_PAGE_CLOSED: login controls became unavailable ({type(error).__name__})"
+            ) from error
+        if username_count != 1 or password_count != 1:
             raise CredentialError("AUTH_UNSUPPORTED: could not uniquely identify login inputs")
         # Authentication is part of a product demo when the user requests it.
         # Use the same deliberate input behaviour as the semantic executor so
         # the source recording contains real typing and cursor timing rather
         # than an unexplained pasted value. Values remain absent from traces.
-        await username.click()
-        await username.press("ControlOrMeta+A")
-        await username.press("Backspace")
-        await username.press_sequentially(credentials.username, delay=70)
+        try:
+            await username.click()
+            await username.press("ControlOrMeta+A")
+            await username.press("Backspace")
+            await username.press_sequentially(credentials.username, delay=70)
+        except PlaywrightError as error:
+            raise CredentialError(
+                f"AUTH_PAGE_CLOSED: username fill interrupted ({type(error).__name__})"
+            ) from error
         if action_observer is not None:
             await action_observer(
                 "auth:username", "FillEmail", "Email address", 'input[type="email"]'
@@ -172,10 +190,15 @@ class EnvironmentCredentialService:
         # provider-neutral presentation hold; it does not expose the value or
         # make authentication depend on a fixed network delay.
         await page.wait_for_timeout(5_000)
-        await password.click()
-        await password.press("ControlOrMeta+A")
-        await password.press("Backspace")
-        await password.press_sequentially(credentials.password, delay=70)
+        try:
+            await password.click()
+            await password.press("ControlOrMeta+A")
+            await password.press("Backspace")
+            await password.press_sequentially(credentials.password, delay=70)
+        except PlaywrightError as error:
+            raise CredentialError(
+                f"AUTH_PAGE_CLOSED: password fill interrupted ({type(error).__name__})"
+            ) from error
         if action_observer is not None:
             await action_observer("auth:password", "FillText", "Password", 'input[type="password"]')
         await page.wait_for_timeout(5_000)

@@ -131,24 +131,41 @@ class DiscoveryOrchestrationMixin:
                 )
             samples = [initial]
             try:
-                metrics = await page.evaluate(
-                    "() => ({height: document.documentElement.scrollHeight, viewport: window.innerHeight})"
-                )
-                height, viewport = float(metrics["height"]), float(metrics["viewport"])
-                if height > viewport * 1.35:
-                    for fraction in (0.45, 0.9):
-                        await page.evaluate(
-                            "y => window.scrollTo({top: y, behavior: 'instant'})",
-                            max(0, height * fraction - viewport * 0.4),
-                        )
-                        await page.wait_for_timeout(1_000)
-                        samples.append(
-                            await asyncio.wait_for(
-                                self.inspect(page, objective, budget), timeout=30
+                try:
+                    metrics = await asyncio.wait_for(
+                        page.evaluate(
+                            "() => ({height: document.documentElement.scrollHeight, viewport: window.innerHeight})"
+                        ),
+                        timeout=8,
+                    )
+                except TimeoutError:
+                    metrics = None
+                if isinstance(metrics, dict):
+                    height, viewport = float(metrics["height"]), float(metrics["viewport"])
+                    if height > viewport * 1.35:
+                        for fraction in (0.45, 0.9):
+                            try:
+                                await asyncio.wait_for(
+                                    page.evaluate(
+                                        "y => window.scrollTo({top: y, behavior: 'instant'})",
+                                        max(0, height * fraction - viewport * 0.4),
+                                    ),
+                                    timeout=5,
+                                )
+                            except TimeoutError:
+                                break
+                            await page.wait_for_timeout(1_000)
+                            samples.append(
+                                await asyncio.wait_for(
+                                    self.inspect(page, objective, budget), timeout=30
+                                )
                             )
-                        )
             finally:
-                await page.evaluate("() => window.scrollTo({top: 0, behavior: 'instant'})")
+                with suppress(TimeoutError, PlaywrightError):
+                    await asyncio.wait_for(
+                        page.evaluate("() => window.scrollTo({top: 0, behavior: 'instant'})"),
+                        timeout=5,
+                    )
             elements: list[ObservedElement] = []
             seen_elements: set[tuple[str | None, str, str]] = set()
             for sample in samples:
@@ -170,6 +187,7 @@ class DiscoveryOrchestrationMixin:
             )
 
         primary = await inspect_with_scroll_evidence()
+        opening_context = primary
         objective_spec = objective_spec or _objective_spec(objective)
         primary_route_count = len(
             {
@@ -208,6 +226,66 @@ class DiscoveryOrchestrationMixin:
             "Target page" in item for item in capability_blockers
         ):
             primary = await inspect_with_scroll_evidence()
+        early_pages: list[ProductContext] = []
+        early_nav_probes: list[str] = []
+        # When the shell exposes no href navigation, probe a few objective-
+        # matching clickable labels (common CRM aside items) so discovery can
+        # leave a generic landing page and inspect the requested area.
+        if not any(item.href for item in primary.navigation):
+            for nav_control in _objective_nav_controls(primary, objective_spec):
+                if asyncio.get_running_loop().time() - discovery_started >= budget.max_time_seconds:
+                    break
+                if not await revive_page_if_closed():
+                    break
+                try:
+                    visible = await self._visible_semantic_control(page, nav_control)
+                    clicked = False
+                    if visible is not None:
+                        try:
+                            await visible.click(timeout=3_000)
+                            clicked = True
+                        except PlaywrightError:
+                            clicked = await self._dom_semantic_click(page, nav_control)
+                    else:
+                        clicked = await self._dom_semantic_click(page, nav_control)
+                    if not clicked:
+                        continue
+                    await page.wait_for_timeout(700)
+                    revealed = await inspect_with_scroll_evidence(recovery_url=page.url)
+                    if _canonical_route(revealed.url) == _canonical_route(entry_url):
+                        capability_blockers.append(
+                            f"objective_nav_no_route_change:{nav_control.name}"
+                        )
+                        continue
+                    revealed = revealed.model_copy(
+                        update={
+                            "evidence": [
+                                *revealed.evidence,
+                                f"objective_nav_control:{nav_control.name}",
+                            ]
+                        }
+                    )
+                    early_pages.append(revealed)
+                    early_nav_probes.append(f"objective_nav_control:{nav_control.name}")
+                    more_caps, more_actions, more_blockers = await self._probe_reversible_capabilities(
+                        page,
+                        revealed,
+                        objective,
+                        remaining=max(0, min(3, budget.max_actions // 6) - len(capabilities)),
+                    )
+                    capabilities.extend(more_caps)
+                    capability_actions.extend(more_actions)
+                    capability_blockers.extend(more_blockers)
+                    primary = revealed
+                    # One successful objective-area entry is enough before the
+                    # ordinary route collector; avoid turning discovery into a
+                    # broad label crawl.
+                    break
+                except PlaywrightError as error:
+                    capability_blockers.append(
+                        f"objective_nav_failed:{nav_control.name}:{str(error)[:120]}"
+                    )
+                    await self._safe_escape(page)
         if explore_visible_routes:
             origin = urlparse(entry_url)
             visible_routes: list[str] = []
@@ -291,8 +369,16 @@ class DiscoveryOrchestrationMixin:
                 "evidence": [*primary.evidence, "fresh knowledge routes re-grounded"],
             }
         )
-        collected = [primary]
-        navigation_probes: list[str] = []
+        collected = [opening_context]
+        seen_collected = {_canonical_route(opening_context.url)}
+        for early in early_pages:
+            canonical = _canonical_route(early.url)
+            if canonical not in seen_collected:
+                collected.append(early)
+                seen_collected.add(canonical)
+        if _canonical_route(primary.url) not in seen_collected:
+            collected.append(primary)
+        navigation_probes: list[str] = list(early_nav_probes)
         rejected_routes: list[str] = []
         try:
             entry_canonical = _canonical_route(entry_url)
@@ -354,12 +440,15 @@ class DiscoveryOrchestrationMixin:
                         # lists; only the small matching index set is brought
                         # back to Playwright for the actual semantic click.
                         try:
-                            anchor_inventory = await page.evaluate(
-                                """() => Array.from(document.querySelectorAll('a')).slice(0, 160).map((node, index) => ({
+                            anchor_inventory = await asyncio.wait_for(
+                                page.evaluate(
+                                    """() => Array.from(document.querySelectorAll('a')).slice(0, 160).map((node, index) => ({
                                     index,
                                     href: node.getAttribute('href'),
                                     visible: !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)
                                 }))"""
+                                ),
+                                timeout=8,
                             )
                         except (PlaywrightError, TimeoutError):
                             anchor_inventory = []
@@ -441,7 +530,9 @@ class DiscoveryOrchestrationMixin:
                         visible = await self._visible_semantic_control(page, relationship_control)
                         if visible is None:
                             continue
-                        before_text = (await page.locator("body").inner_text())[:8_000]
+                        before_text = (
+                            await asyncio.wait_for(page.locator("body").inner_text(), timeout=8)
+                        )[:8_000]
                         await page.wait_for_timeout(500)
                         try:
                             await visible.click(timeout=5_000)
@@ -565,6 +656,20 @@ class DiscoveryOrchestrationMixin:
                 + 0.15 * len(terms & objective_words)
                 + (0.35 if objective_spec.demo_type == "full_walkthrough" else 0),
             )
+            # Prefer operational record surfaces over sibling artifact pages
+            # that share the entity noun (templates, imports, integrations).
+            artifact_terms = {
+                "template",
+                "templates",
+                "import",
+                "imports",
+                "integration",
+                "integrations",
+                "waba",
+            }
+            path_terms = _tokens(urlparse(page_info.url).path)
+            if (terms | path_terms) & artifact_terms and not (artifact_terms & objective_words):
+                score = max(0.05, score - 0.35)
             # Semantic relevance is still grounded in the observed page terms;
             # these synonym bridges prevent an "invite teammate" objective
             # from ranking a generic settings page above an observed Users

@@ -88,6 +88,13 @@ def _certify_operations(
                 id=f"outcome-{operation.id}",
                 intent=operation.intent,
                 success_predicate=predicate_by_kind.get(operation.kind, "visible"),
+                target=operation.target,
+                expected=(
+                    operation.postconditions[0].expected
+                    if operation.postconditions
+                    else operation.value
+                ),
+                verification_witnesses=list(operation.postconditions),
                 evidence_refs=list(dict.fromkeys(evidence)),
                 mutation_class=("authorized_mutation" if operation.kind in mutating else "read_only"),
                 required=operation.critical,
@@ -174,6 +181,33 @@ class PlanningCoreMixin:
             context.capability_resolutions.append(resolution)
         candidate = select_candidate_flow(context, objective)
         self._validate_objective_grounding(context, candidate)
+        objective_lower = objective.lower()
+        walkthrough_request = bool(
+            objective_spec
+            and (
+                objective_spec.demo_type == "full_walkthrough"
+                or re.search(r"\b(?:walkthrough|tour|demo video)\b", objective_lower)
+            )
+        )
+        mutation_request = bool(
+            objective_spec
+            and (
+                "create_isolated_record" in objective_spec.permitted_mutations
+                or re.search(
+                    r"\b(?:create|book|booking|configure|draw|drawing|connect|submit)\b",
+                    objective_lower,
+                )
+            )
+        )
+        if (
+            mutation_request
+            and not walkthrough_request
+            and resolution.selected_capability_id is None
+        ):
+            raise PlanningValidationError(
+                "action-oriented objective lacks a certified behavioral capability; "
+                "targeted exploration or rehearsal is required instead of a route tour"
+            )
         # A requested duration must be plausible from *captured* production
         # evidence before a fresh browser context is opened. This is not a
         # request to pad a sparse form with holds: discovery must instead add
@@ -188,7 +222,6 @@ class PlanningCoreMixin:
                 "candidate lacks enough evidence-backed content for the approved minimum duration; "
                 "targeted exploration must collect relevant page-local scenes"
             )
-        objective_lower = objective.lower()
         # Objective understanding is the authoritative scope classifier.  The
         # previous lexical check only recognised the literal word ``full``;
         # a request such as "create a complete walkthrough" was consequently
@@ -511,6 +544,7 @@ class PlanningCoreMixin:
                         ],
                     ],
                     page_phase=operation.story_phase,
+                    outcome_id=f"outcome-{operation.id}",
                 )
                 for index, operation in enumerate(steps)
             ],

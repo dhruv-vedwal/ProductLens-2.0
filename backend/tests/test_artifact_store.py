@@ -144,6 +144,8 @@ def test_targeted_retry_rebinds_native_recording_provenance_to_child_run(tmp_pat
         (tmp_path / "runs" / "child" / "execution" / "browserbase-recording.json").read_text()
     )
     assert metadata["run_id"] == "child"
+    assert metadata["source_run_id"] == "parent"
+    assert metadata["inherited_by_run_id"] == "child"
     assert metadata["artifact"] == str(tmp_path / "runs" / "child" / "execution" / "browser-recording.mp4")
     assert metadata["sha256"] != "stale"
     trace = json.loads((tmp_path / "runs" / "child" / "execution" / "trace.json").read_text())

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
 from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
     AudienceProfile,
+    EditorialStoryboard,
     NarrationScript,
     NarrationSegment,
     OperationKind,
@@ -17,6 +17,7 @@ from app.narration.script import (
     bind_opening_to_first_event,
     captions_from_duration,
     recommended_caption_duration,
+    script_from_moments,
     script_from_trace,
 )
 from app.narration.service import NarrationService
@@ -129,32 +130,39 @@ class NarrateMixin:
                 "selected_workflow": plan.selected_workflow,
             },
         )
-        # Planning owns the approved editorial wording. Narration must never
-        # rebuild a deterministic fallback over an already enriched storyboard:
-        # that silently discards the evidence-reviewed script and changes scene
-        # timing without a planning repair.
-        # Rebuild from the immutable plan/evidence on every narration pass.
-        # A persisted storyboard may have been produced by an older writer or
-        # contain a rejected route-label line; loading it during a targeted
-        # retry would make the repair boundary stale and defeat deterministic
-        # editorial validation.  The trace, plan, and scene IDs remain the
-        # authorities, so this refresh cannot invent browser actions.
-        storyboard = build_editorial_storyboard(context, plan)
-        # A targeted narration repair intentionally starts from the
-        # deterministic evidence-bound storyboard. The original planning pass
-        # already had an opportunity to use OpenRouter; spending another pair
-        # of model calls on a rejected script can reintroduce label dumps. A
-        # caller may explicitly opt into a second editorial model pass through
-        # the environment when investigating a provider/model regression.
-        allow_repair_editorial_model = os.getenv(
-            "PRODUCTLENS_REPAIR_EDITORIAL_WITH_LLM", "false"
-        ).lower() in {"1", "true", "yes"}
-        if (
-            refresh_editorial
-            and allow_repair_editorial_model
-            and self.planner is not None
-            and self.planner.provider is not None
-        ):
+        # Planning owns the approved editorial wording (enrich + preflight).
+        # First-pass narration must reuse that persisted storyboard. Rebuilding
+        # drafts here without enrich overwrites polished lines with skeleton
+        # fallbacks, fails REPETITIVE_EDITORIAL_NARRATION, and wastes the
+        # Browserbase credits already spent in EXECUTION.
+        # Targeted narration repairs (refresh_editorial=True) rebuild from the
+        # immutable plan/evidence and re-enrich so a stale writer cannot stick.
+        persisted_storyboard = artifacts.presentation / "storyboard.json"
+        if refresh_editorial:
+            storyboard = build_editorial_storyboard(context, plan)
+            if self.planner is None or self.planner.provider is None:
+                raise ProviderError(
+                    "openrouter",
+                    None,
+                    "ENRICH_PROVIDER_ERROR: structured provider required for narration refresh",
+                )
+            storyboard = await enrich_editorial_brief(context, storyboard, self.planner.provider)
+            storyboard = await enrich_editorial_storyboard(
+                context, storyboard, self.planner.provider
+            )
+        elif persisted_storyboard.is_file():
+            storyboard = EditorialStoryboard.model_validate(
+                json.loads(persisted_storyboard.read_text(encoding="utf-8"))
+            )
+        else:
+            # No planning artifact — require live enrich; never ship draft skeletons.
+            storyboard = build_editorial_storyboard(context, plan)
+            if self.planner is None or self.planner.provider is None:
+                raise ProviderError(
+                    "openrouter",
+                    None,
+                    "ENRICH_PROVIDER_ERROR: structured provider required for narration",
+                )
             storyboard = await enrich_editorial_brief(context, storyboard, self.planner.provider)
             storyboard = await enrich_editorial_storyboard(
                 context, storyboard, self.planner.provider
@@ -488,36 +496,122 @@ class NarrateMixin:
                     if str(line.get("event_id")) not in {item["event_id"] for item in auth_lines}
                 ],
             ]
-        if storyboard and script:
-            # The approved script is the narration source of truth. Keep the
-            # storyboard copy synchronized before editorial QA so a targeted
-            # narration repair (including placeholder cleanup) is evaluated
-            # against the exact text that will be rendered, not stale model
-            # prose persisted by an earlier attempt.
-            storyboard_text = {scene.id: scene.narration for scene in storyboard.scenes}
-
-            def _is_route_label_line(value: str) -> bool:
-                return bool(
-                    re.search(
-                        r"\b(?:view|page)\s+brings\b.*\binto\s+view\b|"
-                        r"\bshowing\s+how\s+this\s+part\s+of\s+the\s+product\s+is\s+organized\b",
-                        value,
-                        flags=re.IGNORECASE,
+        if storyboard is not None and not visual_request:
+            # Prefer the deterministic storyboard over moment/provider scripts.
+            # Moment scene ids do not match storyboard ids, so syncing by
+            # scene_id left generic moment prose in editorial QA even after a
+            # good storyboard existed.
+            events_by_operation = {
+                event.operation_id: event for event in trace.events if event.success
+            }
+            storyboard_script: list[dict] = []
+            for scene in storyboard.scenes:
+                if not str(scene.narration or "").strip():
+                    continue
+                if scene.operation_id and scene.operation_id in events_by_operation:
+                    event = events_by_operation[scene.operation_id]
+                    storyboard_script.append(
+                        {
+                            "event_id": event.id,
+                            "scene_id": scene.id,
+                            "text": scene.narration,
+                            "facts": [str(item) for item in scene.evidence[:8]],
+                        }
                     )
+                elif scene.interaction == "opening" or scene.id == "opening":
+                    anchor = next(
+                        (
+                            event
+                            for event in trace.events
+                            if event.success
+                            and not str(event.operation_id or "").startswith("auth:")
+                        ),
+                        next((event for event in trace.events if event.success), None),
+                    )
+                    if anchor is not None:
+                        storyboard_script.append(
+                            {
+                                "event_id": anchor.id,
+                                "scene_id": scene.id,
+                                "opening": True,
+                                "text": scene.narration,
+                                "facts": [str(item) for item in scene.evidence[:8]],
+                            }
+                        )
+            if storyboard_script:
+                auth_lines = [
+                    line
+                    for line in script
+                    if str(line.get("scene_id") or "").startswith("auth:")
+                ]
+                # Fold the operation-less opening welcome into the first
+                # product scene instead of emitting a second script row on the
+                # same event id (that duplicates the first product beat and
+                # fails SCRIPT_TRACE_MISMATCH / CAPTION_WITHOUT_PRESENTATION_BEAT).
+                opening_text = next(
+                    (
+                        str(scene.narration).strip()
+                        for scene in storyboard.scenes
+                        if (scene.interaction == "opening" or scene.id == "opening")
+                        and str(scene.narration or "").strip()
+                    ),
+                    "",
                 )
+                product_lines = [
+                    line
+                    for line in storyboard_script
+                    if not (
+                        line.get("opening")
+                        or str(line.get("scene_id") or "") in {"opening"}
+                    )
+                ]
+                if opening_text and product_lines:
+                    first = dict(product_lines[0])
+                    first_text = str(first.get("text") or "").strip()
+                    if opening_text not in first_text:
+                        first["text"] = f"{opening_text} {first_text}".strip()
+                    first["opening"] = True
+                    product_lines = [first, *product_lines[1:]]
+                script = [*auth_lines, *product_lines]
+        elif trace.moments:
+            script = script_from_moments(
+                trace,
+                product_title=context.title or "the product",
+                product_purpose=(
+                    storyboard.brief.product_purpose if storyboard is not None else ""
+                ),
+            )
+        if storyboard and script:
+            # The approved storyboard is the narration source of truth for
+            # product scenes. Moment/provider scripts can still carry older
+            # generic route sentences after the deterministic storyboard has
+            # been rebuilt; evaluate and render the storyboard wording.
+            storyboard_text = {scene.id: scene.narration for scene in storyboard.scenes}
+            operation_to_scene = {
+                str(scene.operation_id): scene.id
+                for scene in storyboard.scenes
+                if scene.operation_id
+            }
+            events_by_id = {event.id: event for event in trace.events}
 
-            # A compatibility/provider script can carry an older generic
-            # route sentence even after the deterministic storyboard has been
-            # rebuilt. Keep one evidence-bound source of truth by replacing
-            # only that rejected line; all other approved script timing and
-            # scene identity remain untouched.
+            def _storyboard_line_text(line: dict) -> str:
+                scene_id = str(line.get("scene_id") or "")
+                if scene_id in storyboard_text and str(storyboard_text[scene_id]).strip():
+                    return str(storyboard_text[scene_id])
+                event = events_by_id.get(str(line.get("event_id") or ""))
+                if event is not None:
+                    mapped = operation_to_scene.get(str(event.operation_id or ""))
+                    if mapped and str(storyboard_text.get(mapped) or "").strip():
+                        return str(storyboard_text[mapped])
+                return str(line.get("text") or "")
+
             script = [
                 {
                     **line,
                     "text": (
-                        storyboard_text.get(str(line.get("scene_id")), str(line.get("text") or ""))
-                        if _is_route_label_line(str(line.get("text") or ""))
-                        else line.get("text")
+                        str(line.get("text") or "")
+                        if str(line.get("scene_id") or "").startswith("auth:")
+                        else _storyboard_line_text(line)
                     ),
                 }
                 for line in script
@@ -533,10 +627,6 @@ class NarrateMixin:
                         scene.model_copy(
                             update={
                                 "narration": script_by_scene.get(scene.id, scene.narration),
-                                # The visual script is the authoritative scene
-                                # wording after semantic event rewriting.  Keep
-                                # the operation-less placeholder only when no
-                                # proved browser event owns that scene.
                             }
                         )
                         for scene in storyboard.scenes

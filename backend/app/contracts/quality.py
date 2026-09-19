@@ -31,11 +31,18 @@ class RepairDecision(BaseModel):
         "narration",
         "video_qa",
         "provider",
+        "visual_review",
+        "external_input",
         "internal",
         "none",
     ]
     action: Literal[
-        "re_render", "targeted_reexecution", "regenerate_narration", "provider_retry", "fail"
+        "re_render",
+        "targeted_reexecution",
+        "regenerate_narration",
+        "provider_retry",
+        "needs_input",
+        "fail",
     ]
     reasons: list[str] = Field(default_factory=list)
     retry_from_stage: str | None = None

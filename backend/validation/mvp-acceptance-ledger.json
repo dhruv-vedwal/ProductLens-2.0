@@ -1,0 +1,1451 @@
+{
+  "schema_version": 1,
+  "status": "not_accepted",
+  "required_consecutive_runs": 10,
+  "required_gates": [
+    "certified_outcome_graph",
+    "entity_or_diagram_witness",
+    "no_behavioral_qa_failure",
+    "usable_multimodal_report",
+    "valid_video_technical_report",
+    "sample_quality_manual_review",
+    "generality_audit"
+  ],
+  "scenarios": {
+    "SmartSevak Lead": {
+      "url": "https://dashboard.smartsevak.com",
+      "objective": "Create one isolated lead using synthetic identity details and verify the created lead by its demonstrated name and phone fields.",
+      "records": [
+        {
+          "run_id": "b9fa31dc-2b6c-4558-894d-d31386bf9f1f",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "TargetClosedError: Locator.click: Target page, context or browser has been closed\nCall log:\n  - waiting for locator(\"input[type=\\\"password\\\"]:visible\")\n",
+          "finished_at": "2026-09-18T10:37:24.022968+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\b9fa31dc-2b6c-4558-894d-d31386bf9f1f",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "da598ec5-eec1-48b6-b9f7-339d7ff588a4",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: REHEARSAL_CAPABILITY_UNAVAILABLE: no safe submit-capable form is grounded in the requested feature",
+          "finished_at": "2026-09-18T11:30:04.570314+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\da598ec5-eec1-48b6-b9f7-339d7ff588a4",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "fb7ad18b-89c4-4bd6-80b3-7e8c40f91eca",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "PlanningValidationError: CANDIDATE_FLOW_SCOPE_VIOLATION:https://dashboard.smartsevak.com/whatsappSessionMessaging/leadTemplates",
+          "finished_at": "2026-09-18T11:47:37.142568+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\fb7ad18b-89c4-4bd6-80b3-7e8c40f91eca",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "56227798-b244-4491-91e6-590d66d5d1a5",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "FileNotFoundError: [Errno 2] No such file or directory: 'F:\\\\Productlens_2.0\\\\ProductLensAI 2.0\\\\backend\\\\artifacts\\\\runs\\\\dd1e6bfa-0fd6-4926-88a7-dc632a0fa022\\\\plan.json'",
+          "finished_at": "2026-09-18T11:59:11.890906+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\56227798-b244-4491-91e6-590d66d5d1a5",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "1d7846d8-624b-40d6-8128-dc6e342915a9",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: REHEARSAL_CAPABILITY_INVALID: Creation capability has non-optional selectable fields without safe observed choices: Source",
+          "finished_at": "2026-09-18T13:08:55.016894+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\1d7846d8-624b-40d6-8128-dc6e342915a9",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "908bd0b7-3553-49bb-bb9a-0e2086a3ebb2",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: REHEARSAL_CAPABILITY_INVALID: Creation capability has non-optional selectable fields without safe observed choices: Source",
+          "finished_at": "2026-09-18T13:33:39.726684+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\908bd0b7-3553-49bb-bb9a-0e2086a3ebb2",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "d6556072-574d-4d49-a20b-d83055e1556a",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: REHEARSAL_FORM_VALIDATION_UNRESOLVED: form remained invalid or open after submit",
+          "finished_at": "2026-09-18T13:46:17.768831+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\d6556072-574d-4d49-a20b-d83055e1556a",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "e325db24-df69-4620-b475-e06bc5994d5e",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: REHEARSAL_FORM_VALIDATION_UNRESOLVED: form remained invalid or open after submit",
+          "finished_at": "2026-09-18T14:02:36.443111+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\e325db24-df69-4620-b475-e06bc5994d5e",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "b44baa14-23f6-4256-8def-62739dfd19f6",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: EDITORIAL_QA_REJECTED: ['GENERIC_ROUTE_LABEL_CAPTION', 'UNSUPPORTED_OR_WRONG_SCENE_CAPTION', 'REPETITIVE_EDITORIAL_NARRATION']",
+          "finished_at": "2026-09-18T15:12:24.662336+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\b44baa14-23f6-4256-8def-62739dfd19f6",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {
+            "Enter Phone Number": "9852247415",
+            "Enter name (if available)": "Aarav Mehta",
+            "Source": "Facebook"
+          },
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "4417cf8a-10cb-473f-85a9-b5f591ad1562",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: AUTH_REQUIRED: credentials must be supplied through a secret reference",
+          "finished_at": "2026-09-18T15:13:34.362385+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\4417cf8a-10cb-473f-85a9-b5f591ad1562",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "b2046fd5-1799-4f11-9192-bd91e98a0f92",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: EDITORIAL_QA_REJECTED: ['GENERIC_ROUTE_LABEL_CAPTION', 'UNSUPPORTED_OR_WRONG_SCENE_CAPTION', 'REPETITIVE_EDITORIAL_NARRATION']",
+          "finished_at": "2026-09-18T15:37:10.573247+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\b2046fd5-1799-4f11-9192-bd91e98a0f92",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "2b373b59-b8ea-4b61-a81b-744d3ed681b9",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: EDITORIAL_QA_REJECTED: ['GENERIC_ROUTE_LABEL_CAPTION', 'UNSUPPORTED_OR_WRONG_SCENE_CAPTION', 'REPETITIVE_EDITORIAL_NARRATION']",
+          "finished_at": "2026-09-18T15:54:04.707992+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\2b373b59-b8ea-4b61-a81b-744d3ed681b9",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "42909915-2e1b-42a2-8147-42ba1cbe13b1",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "TargetClosedError: Locator.press_sequentially: Target page, context or browser has been closed\nCall log:\n  - waiting for get_by_label(\"Add a remark (optional)\", exact=True)\n    - locator resolved to <textarea id=\":r24:\" aria-invalid=\"false\" class=\"MuiOutlinedInput-input MuiInputBase-input MuiInputBase-inputMultiline css-1pwy64z\"></textarea>\n  - elementHandle.type(\"Harbor Ana\")\n",
+          "finished_at": "2026-09-18T16:09:26.153929+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\42909915-2e1b-42a2-8147-42ba1cbe13b1",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "1455328b-6f21-4e6e-b529-3eaa817a4a96",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "CredentialError: AUTH_PAGE_CLOSED: username fill interrupted (TimeoutError)",
+          "finished_at": "2026-09-18T16:15:20.449318+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\1455328b-6f21-4e6e-b529-3eaa817a4a96",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "f1d54d43-e5fd-4265-ae58-c7cc6dd187f8",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "CredentialError: AUTH_PAGE_CLOSED: username fill interrupted (TimeoutError)",
+          "finished_at": "2026-09-18T16:16:27.204291+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\f1d54d43-e5fd-4265-ae58-c7cc6dd187f8",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "c183949e-1d02-4bed-b640-5d6bbcfdd54e",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "CapabilityCompilationError: Creation capability has non-optional selectable fields without safe observed choices: Source",
+          "finished_at": "2026-09-18T16:26:59.905980+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\c183949e-1d02-4bed-b640-5d6bbcfdd54e",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "1302e1d0-7367-464a-954d-5c683c8c20ec",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: EDITORIAL_QA_REJECTED: ['GENERIC_ROUTE_LABEL_CAPTION', 'UNSUPPORTED_OR_WRONG_SCENE_CAPTION', 'REPETITIVE_EDITORIAL_NARRATION']",
+          "finished_at": "2026-09-18T18:09:42.999528+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\1302e1d0-7367-464a-954d-5c683c8c20ec",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {
+            "Enter Phone Number": "9852247415",
+            "Enter name (if available)": "Aarav Mehta",
+            "Source": "Facebook"
+          },
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "4b451304-7f7b-496b-b376-19a16205c99d",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "GenerationPreconditionError: EDITORIAL_QA_REJECTED: ['UNSUPPORTED_OR_WRONG_SCENE_CAPTION', 'REPETITIVE_EDITORIAL_NARRATION']",
+          "finished_at": "2026-09-18T18:28:30.984504+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\4b451304-7f7b-496b-b376-19a16205c99d",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "5e0d5413-2dff-4f9e-848b-edb44fd5d041",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "CredentialError: AUTH_PAGE_CLOSED: password fill interrupted (TimeoutError)",
+          "finished_at": "2026-09-18T20:09:27.002506+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\5e0d5413-2dff-4f9e-848b-edb44fd5d041",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "cdf2104e-d665-4722-bc8d-2a6ebc3d476e",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "FileNotFoundError: [Errno 2] No such file or directory: 'F:\\\\Productlens_2.0\\\\ProductLensAI 2.0\\\\backend\\\\artifacts\\\\runs\\\\b8c757f8-7d0d-489e-8a37-c8b92784def6\\\\execution\\\\trace.json'",
+          "finished_at": "2026-09-18T20:38:09.019724+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\cdf2104e-d665-4722-bc8d-2a6ebc3d476e",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "5ed1a5c0-21c0-4a0a-850a-3c7bebadee6a",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "FileNotFoundError: [Errno 2] No such file or directory: 'F:\\\\Productlens_2.0\\\\ProductLensAI 2.0\\\\backend\\\\artifacts\\\\runs\\\\2cef9470-8635-497e-bd39-94d8da4caf8f\\\\execution\\\\trace.json'",
+          "finished_at": "2026-09-19T06:56:00.853747+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\5ed1a5c0-21c0-4a0a-850a-3c7bebadee6a",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "965dc8f0-3a3c-4d5b-9075-65570d54654e",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "FileNotFoundError: [Errno 2] No such file or directory: 'F:\\\\Productlens_2.0\\\\ProductLensAI 2.0\\\\backend\\\\artifacts\\\\runs\\\\78be9e65-172e-40b4-83ed-d8f1e3c16abb\\\\execution\\\\trace.json'",
+          "finished_at": "2026-09-19T07:44:04.569321+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\965dc8f0-3a3c-4d5b-9075-65570d54654e",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "9293900e-b54c-485a-97ee-840ba08f4413",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "TimeoutError: Page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to \"https://dashboard.smartsevak.com/\", waiting until \"domcontentloaded\"\n",
+          "finished_at": "2026-09-19T07:49:58.269433+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\9293900e-b54c-485a-97ee-840ba08f4413",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "8e16aec9-716e-48ff-baf7-52ce4035e8c2",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "TimeoutError: Page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to \"https://dashboard.smartsevak.com/\", waiting until \"domcontentloaded\"\n",
+          "finished_at": "2026-09-19T07:55:57.107110+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\8e16aec9-716e-48ff-baf7-52ce4035e8c2",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "a795b230-66f6-4e53-af5d-e9bc67e4a4b2",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "CredentialError: AUTH_PAGE_CLOSED: username fill interrupted (TimeoutError)",
+          "finished_at": "2026-09-19T07:56:55.772566+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\a795b230-66f6-4e53-af5d-e9bc67e4a4b2",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "67f7f53d-eb8a-4227-8700-dcd3190680e1",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "TimeoutError: Page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to \"https://dashboard.smartsevak.com/\", waiting until \"domcontentloaded\"\n",
+          "finished_at": "2026-09-19T08:02:37.723000+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\67f7f53d-eb8a-4227-8700-dcd3190680e1",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "dd5fe29d-c9b6-48e2-afff-a9cda05e6139",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "CredentialError: AUTH_PAGE_CLOSED: username fill interrupted (TimeoutError)",
+          "finished_at": "2026-09-19T08:09:28.071881+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\dd5fe29d-c9b6-48e2-afff-a9cda05e6139",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "5bcb738e-8ca8-4f01-814d-dc19b7997755",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "CredentialError: AUTH_PAGE_CLOSED: username fill interrupted (TimeoutError)",
+          "finished_at": "2026-09-19T08:10:31.657756+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\5bcb738e-8ca8-4f01-814d-dc19b7997755",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "be2a5c4c-e140-42d8-80a8-f29d0ada0f99",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "CredentialError: AUTH_PAGE_CLOSED: username fill interrupted (TimeoutError)",
+          "finished_at": "2026-09-19T08:11:29.671249+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\be2a5c4c-e140-42d8-80a8-f29d0ada0f99",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "1aaf0eca-6be0-4351-96e3-ceaf24266680",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "CredentialError: AUTH_PAGE_CLOSED: username fill interrupted (TimeoutError)",
+          "finished_at": "2026-09-19T08:12:59.437254+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\1aaf0eca-6be0-4351-96e3-ceaf24266680",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        },
+        {
+          "run_id": "ecf28007-15b1-4285-8678-771c04cdba56",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "RuntimeError: Delivery QA rejected render: ['demo_brief', 'capability_resolutions', 'validated_state_graph', 'certified_demo_script', 'outcome_qa', 'certified_workflow', 'SOURCE_FOOTAGE_LOW_STRUCTURAL_SIMILARITY', 'CAPTION_WITHOUT_PRESENTATION_BEAT', 'CAPTION_COVERAGE_TOO_SHORT', 'CAPTION_TRACE_MISMATCH', 'MULTIMODAL_REVIEW_UNAVAILABLE:JSONDecodeError', 'MULTIMODAL_REVIEW_UNAVAILABLE']",
+          "finished_at": "2026-09-19T09:17:08.083090+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\ecf28007-15b1-4285-8678-771c04cdba56",
+          "certified_outcome_graph": false,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
+        }
+      ],
+      "progress": {
+        "required_consecutive_runs": 10,
+        "consecutive_accepted": 0,
+        "accepted_runs": 0,
+        "first_pass_runs": 0,
+        "first_pass_rate": 0.0,
+        "signoff_ready": false,
+        "evaluations": [
+          {
+            "run_id": "b9fa31dc-2b6c-4558-894d-d31386bf9f1f",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "da598ec5-eec1-48b6-b9f7-339d7ff588a4",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "fb7ad18b-89c4-4bd6-80b3-7e8c40f91eca",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "56227798-b244-4491-91e6-590d66d5d1a5",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "1d7846d8-624b-40d6-8128-dc6e342915a9",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "908bd0b7-3553-49bb-bb9a-0e2086a3ebb2",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "d6556072-574d-4d49-a20b-d83055e1556a",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "e325db24-df69-4620-b475-e06bc5994d5e",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "b44baa14-23f6-4256-8def-62739dfd19f6",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "4417cf8a-10cb-473f-85a9-b5f591ad1562",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "b2046fd5-1799-4f11-9192-bd91e98a0f92",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "2b373b59-b8ea-4b61-a81b-744d3ed681b9",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "42909915-2e1b-42a2-8147-42ba1cbe13b1",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "1455328b-6f21-4e6e-b529-3eaa817a4a96",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "f1d54d43-e5fd-4265-ae58-c7cc6dd187f8",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "c183949e-1d02-4bed-b640-5d6bbcfdd54e",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "1302e1d0-7367-464a-954d-5c683c8c20ec",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "4b451304-7f7b-496b-b376-19a16205c99d",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "5e0d5413-2dff-4f9e-848b-edb44fd5d041",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "cdf2104e-d665-4722-bc8d-2a6ebc3d476e",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "5ed1a5c0-21c0-4a0a-850a-3c7bebadee6a",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "965dc8f0-3a3c-4d5b-9075-65570d54654e",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "9293900e-b54c-485a-97ee-840ba08f4413",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "8e16aec9-716e-48ff-baf7-52ce4035e8c2",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "a795b230-66f6-4e53-af5d-e9bc67e4a4b2",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "67f7f53d-eb8a-4227-8700-dcd3190680e1",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "dd5fe29d-c9b6-48e2-afff-a9cda05e6139",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "5bcb738e-8ca8-4f01-814d-dc19b7997755",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "be2a5c4c-e140-42d8-80a8-f29d0ada0f99",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "1aaf0eca-6be0-4351-96e3-ceaf24266680",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "ecf28007-15b1-4285-8678-771c04cdba56",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
+              "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          }
+        ]
+      }
+    },
+    "SmartSevak Booking": {
+      "url": "https://dashboard.smartsevak.com",
+      "objective": "Create one isolated booking using synthetic patient details, intentionally select each dependent booking control, and verify the resulting booking by its demonstrated identity fields.",
+      "records": [],
+      "progress": {
+        "required_consecutive_runs": 10,
+        "consecutive_accepted": 0,
+        "accepted_runs": 0,
+        "first_pass_runs": 0,
+        "first_pass_rate": 0.0,
+        "signoff_ready": false,
+        "evaluations": []
+      }
+    },
+    "Excalidraw Chat Architecture": {
+      "url": "https://excalidraw.com/",
+      "objective": "Create a chat application architecture diagram with components including Client, API Gateway, Chat Service, Message Queue, and Database, connect them with directed arrows, and verify every label and connector relationship.",
+      "records": [],
+      "progress": {
+        "required_consecutive_runs": 10,
+        "consecutive_accepted": 0,
+        "accepted_runs": 0,
+        "first_pass_runs": 0,
+        "first_pass_rate": 0.0,
+        "signoff_ready": false,
+        "evaluations": []
+      }
+    }
+  },
+  "mvp_signoff": false
+}

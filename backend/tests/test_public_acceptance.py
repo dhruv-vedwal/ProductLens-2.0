@@ -18,6 +18,12 @@ def test_acceptance_manifest_counts_only_deliverable_attempts():
         "deliverable": True,
         "final_video": "artifacts/runs/demo/final/demo.mp4",
         "hard_failures": [],
+        "acceptance_evidence": {
+            "workflow_proof": True,
+            "multimodal_verdict": {"passed": True},
+            "manual_review": False,
+            "repeated_run_result": {"consecutive_passes": 1},
+        },
     }
     assert _accepted_record(base)
     assert not _accepted_record({**base, "deliverable": False})
@@ -47,6 +53,14 @@ def test_repaired_attempt_is_promoted_from_durable_delivery_report():
         (root / "final" / "demo.mp4").write_bytes(b"mp4")
         (root / "qa" / "delivery-report.json").write_text(
             json.dumps({"deliverable": True, "hard_failures": []}), encoding="utf-8"
+        )
+        (root / "qa" / "completion-audit.json").write_text(
+            json.dumps({"complete_evidence": True, "missing_layers": []}),
+            encoding="utf-8",
+        )
+        (root / "qa" / "multimodal-report.json").write_text(
+            json.dumps({"status": "complete", "hard_failures": [], "provider": "test"}),
+            encoding="utf-8",
         )
         refreshed = _refresh_record_from_artifacts(
             {"status": "FAILED", "artifact_root": str(root), "final_video": None}

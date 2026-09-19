@@ -714,7 +714,16 @@ def build_page_complete_proposal(
                     ),
                     None,
                 )
-                if labels and text_tool:
+                shape_tool = next(
+                    (
+                        candidate
+                        for candidate in tool_candidates
+                        if _tokens(candidate.name)
+                        & {"rectangle", "box", "shape", "component"}
+                    ),
+                    None,
+                )
+                if labels and text_tool and shape_tool:
                     # A bounded, readable grid is a layout algorithm, not a
                     # product recipe. It gives every requested label a
                     # distinct drop point while leaving generous canvas space.
@@ -725,6 +734,77 @@ def build_page_complete_proposal(
                     ]
                     for index, label in enumerate(labels):
                         x, y = positions[index]
+                        shape_target = Target(
+                            name=shape_tool.name,
+                            selector=shape_tool.selector,
+                            text=shape_tool.text or shape_tool.name,
+                            source_url=shape_tool.source_url,
+                        )
+                        steps.append(
+                            SemanticOperation(
+                                kind=OperationKind.CLICK,
+                                intent=f"Activate the observed {shape_tool.name} tool for the requested {label} component",
+                                target=shape_target,
+                                postconditions=[
+                                    Postcondition(
+                                        kind="visible",
+                                        expected=shape_tool.name,
+                                        target=shape_target,
+                                    )
+                                ],
+                                critical=True,
+                                story_phase="demonstrate",
+                                page_url=page_url,
+                                page_contract_phases=["demonstrate"],
+                                evidence_refs=[
+                                    *evidence,
+                                    f"element:{shape_tool.name}",
+                                    f"objective-label:{label}",
+                                ],
+                            )
+                        )
+                        steps.append(
+                            SemanticOperation(
+                                kind=OperationKind.POINTER_SEQUENCE,
+                                intent=f"Create the requested {label} component node on the observed canvas",
+                                target=destination_target,
+                                value={
+                                    "pattern": "shape_box",
+                                    "relative_points": [
+                                        {"x": x - 0.10, "y": y - 0.07},
+                                        {"x": x + 0.10, "y": y + 0.07},
+                                    ],
+                                    "duration_ms": 650,
+                                    "press": True,
+                                    "release": True,
+                                    "diagram_node": {
+                                        "id": f"node-{index + 1}",
+                                        "label": label,
+                                        "kind": "component",
+                                        "x": x,
+                                        "y": y,
+                                    },
+                                },
+                                postconditions=[
+                                    Postcondition(
+                                        kind="changed",
+                                        expected=True,
+                                        target=destination_target,
+                                    )
+                                ],
+                                critical=True,
+                                story_phase="demonstrate",
+                                page_url=page_url,
+                                page_contract_phases=["demonstrate", "verify"],
+                                evidence_refs=[
+                                    *evidence,
+                                    f"element:{surface.name}",
+                                    f"diagram-node:{label}",
+                                ],
+                                required_content_groups=[label],
+                                covered_content_groups=[label],
+                            )
+                        )
                         text_target = Target(
                             name=text_tool.name,
                             selector=text_tool.selector,
@@ -775,6 +855,7 @@ def build_page_complete_proposal(
                                     "surface_target": destination_target.model_dump(mode="json"),
                                     "placement": {"x": x, "y": y},
                                     "placement_mode": "text",
+                                    "diagram_label_for": f"node-{index + 1}",
                                 },
                                 postconditions=[Postcondition(kind="surface_changed", expected=True, target=destination_target)],
                                 critical=True,
@@ -823,6 +904,14 @@ def build_page_complete_proposal(
                                         "duration_ms": 700,
                                         "press": True,
                                         "release": True,
+                                        "diagram_connector": {
+                                            "id": f"connector-{index + 1}",
+                                            "source_node_id": f"node-{index + 1}",
+                                            "target_node_id": f"node-{index + 2}",
+                                            "source_label": labels[index],
+                                            "target_label": labels[index + 1],
+                                            "kind": "directed",
+                                        },
                                     },
                                     postconditions=[Postcondition(kind="changed", expected=True, target=destination_target)],
                                     critical=True,

@@ -199,12 +199,44 @@ def render_remotion(
         # composition chrome; equality at the floating-point boundary would
         # otherwise make evidence timing fall back to evenly spread captions.
         duration_floor = max(duration_floor, sum(caption_reading_holds.values()) + 1.0)
-    windows = _editorial_cut_windows(
-        trace,
-        source_seconds,
-        minimum_seconds=duration_floor,
-        reading_holds_seconds=caption_reading_holds,
-    )
+    sync_edl_path = artifacts.presentation / "sync-edl.json"
+    sync_edl: dict[str, Any] = {}
+    if sync_edl_path.is_file():
+        try:
+            loaded_edl = json.loads(sync_edl_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_edl, dict):
+                sync_edl = loaded_edl
+        except (OSError, ValueError, json.JSONDecodeError):
+            sync_edl = {}
+    edl_windows = sync_edl.get("source_windows")
+    if (
+        sync_edl.get("schema_version") == 2
+        and sync_edl.get("authority") == "semantic_moments"
+        and isinstance(edl_windows, list)
+        and edl_windows
+    ):
+        windows = [
+            (
+                max(0.0, float(item["start"])),
+                min(source_seconds, float(item["end"])),
+            )
+            for item in edl_windows
+            if isinstance(item, dict)
+            and float(item.get("end", 0)) > float(item.get("start", 0))
+            and float(item.get("start", 0)) < source_seconds
+        ]
+        if not windows:
+            raise CaptureDurationError("Sync EDL has no source window inside the recording")
+    else:
+        # Isolated renderer fixtures may predate the production EDL boundary.
+        # URL delivery requires sync-edl.json, so this compatibility path can
+        # never make an uncontracted live run deliverable.
+        windows = _editorial_cut_windows(
+            trace,
+            source_seconds,
+            minimum_seconds=duration_floor,
+            reading_holds_seconds=caption_reading_holds,
+        )
     removes_unestablished_prelude = bool(windows and windows[0][0] > 0.1)
     editorial_window_seconds = sum(end - start for start, end in windows)
     # Provider/browser command latency can create long, content-free gaps in
@@ -231,18 +263,6 @@ def render_remotion(
     # is editorially necessary.
     if needs_duration_edit or removes_unestablished_prelude or removes_proven_dead_time:
         editorial_seconds = editorial_window_seconds
-        artifacts.write_json(
-            "presentation/source-edit-plan.json",
-            {
-                "mode": "native_speed_cuts",
-                "source_seconds": round(source_seconds, 3),
-                "edited_seconds": round(editorial_seconds, 3),
-                "windows": [
-                    {"start": round(start, 3), "end": round(end, 3)} for start, end in windows
-                ],
-                "reason": "remove proven remote transport/dead intervals; retained footage is never accelerated",
-            },
-        )
         if (
             maximum_duration_seconds is not None
             and editorial_seconds + presentation_chrome_seconds > maximum_duration_seconds + 0.25
@@ -251,18 +271,22 @@ def render_remotion(
                 "native capture exceeds the approved final duration envelope even after native-speed editorial cuts"
             )
         render_source = _build_editorial_source(raw, render_dir=render_dir, windows=windows)
-        source_edit_path = artifacts.presentation / "source-edit-plan.json"
-        try:
-            source_edit_payload = json.loads(source_edit_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
-            source_edit_payload = {}
         artifacts.write_json(
-            "presentation/source-edit-plan.json",
+            "presentation/sync-edl.json",
             {
-                **source_edit_payload,
-                "rendered_source": str(
-                    render_source.resolve().relative_to(artifacts.root.resolve())
-                ),
+                **sync_edl,
+                "render": {
+                    "mode": "native_speed_cuts",
+                    "source_seconds": round(source_seconds, 3),
+                    "edited_seconds": round(editorial_seconds, 3),
+                    "source_windows": [
+                        {"start": round(start, 3), "end": round(end, 3)}
+                        for start, end in windows
+                    ],
+                    "rendered_source": str(
+                        render_source.resolve().relative_to(artifacts.root.resolve())
+                    ),
+                },
             },
         )
         trace = _remap_trace_for_cuts(trace, windows)
@@ -318,10 +342,45 @@ def render_remotion(
     # in long route transitions and gradual scrolls.
     options = presentation_options or {}
     remotion_presentation_options = normalize_remotion_presentation_options(options)
-    scaled_captions = captions or []
+    def rendered_time(source_time: float) -> float:
+        elapsed = 0.0
+        for window_start, window_end in windows:
+            if source_time <= window_start:
+                return elapsed
+            if source_time <= window_end:
+                return elapsed + source_time - window_start
+            elapsed += window_end - window_start
+        return elapsed
+
+    edl_caption_rows = []
+    if (
+        sync_edl.get("schema_version") == 2
+        and sync_edl.get("authority") == "semantic_moments"
+    ):
+        for moment in sync_edl.get("moments", []):
+            if not isinstance(moment, dict):
+                continue
+            tracks = moment.get("tracks")
+            caption_track = tracks.get("caption") if isinstance(tracks, dict) else None
+            if not isinstance(caption_track, dict) or not caption_track.get("text"):
+                continue
+            start = rendered_time(float(caption_track.get("start_seconds", 0)))
+            end = rendered_time(float(caption_track.get("end_seconds", 0)))
+            if end > start:
+                edl_caption_rows.append(
+                    {
+                        "scene_id": moment.get("id"),
+                        "moment_id": moment.get("id"),
+                        "text": str(caption_track["text"]),
+                        "start": round(start, 3),
+                        "end": round(end, 3),
+                        "evidence_refs": moment.get("evidence_refs", []),
+                    }
+                )
+    scaled_captions = edl_caption_rows or captions or []
     if options.get("subtitles_enabled") is False:
         scaled_captions = []
-    if scaled_captions and narration_asset is None:
+    if scaled_captions and narration_asset is None and not edl_caption_rows:
         screen_seconds = screen_frames / frame_rate
         evidence_captions = _evidence_timed_captions(
             trace, scaled_captions, screen_seconds=screen_seconds
@@ -382,8 +441,12 @@ def render_remotion(
                 "start": start,
                 "end": max(start + 1, end),
                 "clickFrame": click_frame,
-                "x": rect.x if rect else 960,
-                "y": rect.y if rect else 540,
+                # Remotion consumes x/y as the visual action point. Rect
+                # coordinates are top-left based, so use the target centre;
+                # feeding the origin made fallback cursor paths and camera
+                # focus consistently miss the actual click target.
+                "x": rect.x + rect.width / 2 if rect else source_width / 2,
+                "y": rect.y + rect.height / 2 if rect else source_height / 2,
                 "width": rect.width if rect else 1,
                 "height": rect.height if rect else 1,
                 "zoom": _safe_camera_zoom(
@@ -454,6 +517,7 @@ def render_remotion(
         "narration": narration_asset,
         "captions": scaled_captions,
         "scenes": scenes or [],
+        "syncEdl": sync_edl,
         # Keep frontend-selected presentation preferences alongside the
         # render contract.  The compositor can evolve these independently,
         # while retries/rerenders remain faithful to the original request.

@@ -1,6 +1,7 @@
 """Guard browser-provider calls from becoming unbounded worker hangs."""
 
 import ast
+from pathlib import Path
 
 import pytest
 
@@ -106,3 +107,18 @@ async def test_cloud_lease_guard_releases_session_outside_the_cdp_operation():
     )
 
     assert provider.released == ["session-1"]
+
+
+def test_page_inspect_bounds_shadow_host_scan_and_evaluates():
+    source = Path("app/discovery/live/page_capture.py").read_text(encoding="utf-8")
+    assert "hostSample" in source
+    assert "slice(0, 1200)" in source
+    assert "querySelectorAll('*')).map(node => node.shadowRoot" not in source
+    assert "_bounded_evaluate" in source
+    assert "asyncio.wait_for(page.evaluate" in source
+
+
+def test_cloud_discovery_deadline_uses_adaptive_ceiling():
+    source = Path("app/services/generation/discover.py").read_text(encoding="utf-8")
+    assert "primary_route_count=max(12, int(budget.max_pages))" in source
+    assert "discovery/deadline.json" in source

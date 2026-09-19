@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-RUNTIME_ROOT = Path(__file__).resolve().parents[1] / "src" / "productlens"
+RUNTIME_ROOT = Path(__file__).resolve().parents[1] / "app"
 
 # These are deliberately exact acceptance-fixture identifiers. Generic words
 # such as "portfolio", "today", or "progress" are valid product concepts and
@@ -16,6 +16,7 @@ FORBIDDEN_RUNTIME_IDENTIFIERS = {
     "calmprep",
     "cookplan ai",
     "smartsevak",
+    "excalidraw",
     "datansh",
     "two sum",
     "group anagrams",

@@ -237,8 +237,13 @@ class FormField(BaseModel):
     name: str
     selector: str
     control_type: str
+    behavior_class: str = "unknown"
+    stable_id: str | None = None
     required: bool = False
+    enabled: bool = True
     options: list[str] = Field(default_factory=list)
+    observed_value: str | None = None
+    geometry_y: float | None = None
     # Relationships are discovered from live control state (for example a
     # dependent select enabled after another field changes), never inferred
     # from a product name or route.
@@ -316,6 +321,8 @@ class ProductContext(BaseModel):
     # runtime override. Full walkthroughs may expand it only after visible
     # primary navigation proves the default bound is insufficient.
     effective_discovery_budget: DiscoveryBudget | None = None
+    behavioral_model_ref: str | None = None
+    behavioral_uncertainties: list[str] = Field(default_factory=list, max_length=200)
 
 
 class ProductKnowledge(BaseModel):
@@ -340,6 +347,32 @@ class ProductKnowledge(BaseModel):
     successful_actions: list[dict[str, Any]] = Field(default_factory=list)
     captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     last_verified_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+from app.contracts.interaction import (
+    ControlDependency,
+    ControlDescriptor,
+    PageState,
+    StateTransition,
+    SurfaceState,
+)
+
+
+class BehavioralProductModel(BaseModel):
+    """Versioned, behavior-first graph consumed by planning and rehearsal."""
+
+    schema_version: int = Field(default=1, ge=1)
+    product_fingerprint: str = Field(min_length=8, max_length=128)
+    objective: ObjectiveSpec | None = None
+    states: list[PageState] = Field(default_factory=list, max_length=240)
+    surfaces: list[SurfaceState] = Field(default_factory=list, max_length=320)
+    controls: list[ControlDescriptor] = Field(default_factory=list, max_length=2_000)
+    dependencies: list[ControlDependency] = Field(default_factory=list, max_length=1_000)
+    safe_transitions: list[StateTransition] = Field(default_factory=list, max_length=1_000)
+    capabilities: list[RuntimeCapability] = Field(default_factory=list, max_length=400)
+    unresolved_uncertainties: list[str] = Field(default_factory=list, max_length=200)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=400)
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class UnderstandingPreview(BaseModel):

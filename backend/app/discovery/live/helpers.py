@@ -1202,6 +1202,80 @@ def _restore_missing_page_landmarks(
     return restored
 
 
+def _objective_nav_controls(
+    context: ProductContext, objective: ObjectiveSpec, *, limit: int = 4
+) -> list[ObservedElement]:
+    """Rank visible href-less shell controls that name the requested entity.
+
+    Many CRM shells expose primary destinations as clickable labels without an
+    ``href``. When the standard anchor inventory is empty, these controls are
+    the only same-origin evidence that can open the requested workflow area.
+    """
+    wanted = _tokens(
+        " ".join(
+            [
+                objective.primary_entity or "",
+                *objective.requested_features,
+                *objective.must_show,
+                objective.raw,
+            ]
+        )
+    ) - {
+        "create",
+        "creating",
+        "isolated",
+        "synthetic",
+        "verify",
+        "verified",
+        "using",
+        "details",
+        "fields",
+        "one",
+        "and",
+        "the",
+        "with",
+    }
+    if not wanted:
+        return []
+
+    def _expand(words: set[str]) -> set[str]:
+        expanded = set(words)
+        for word in words:
+            if word.endswith("s") and len(word) > 3:
+                expanded.add(word[:-1])
+            else:
+                expanded.add(f"{word}s")
+        return expanded
+
+    wanted = _expand(wanted)
+    ranked: list[tuple[int, ObservedElement]] = []
+    for item in context.elements:
+        if item.href or not item.actionable:
+            continue
+        if item.tag in {"input", "textarea", "select", "iframe", "canvas", "svg", "tr", "td"}:
+            continue
+        words = _expand(_tokens(f"{item.name} {item.text or ''}"))
+        if words & _UNSAFE_ACTION_WORDS:
+            continue
+        matched = words & wanted
+        if not matched:
+            continue
+        scope_bonus = 4 if item.navigation_scope == "primary" else 0
+        ranked.append((len(matched) * 10 + scope_bonus + len(item.name) * -0.01, item))
+    ranked.sort(key=lambda entry: entry[0], reverse=True)
+    selected: list[ObservedElement] = []
+    seen: set[str] = set()
+    for _, item in ranked:
+        key = item.name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(item)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def _bounded_page_navigation(
     elements: list[ObservedElement], *, per_page: int = 24, maximum: int = 240
 ) -> list[ObservedElement]:
@@ -1249,6 +1323,7 @@ __all__ = [
     "_derive_product_relationships",
     "_focused_relationship_evidence_complete",
     "_normalized_terms",
+    "_objective_nav_controls",
     "_objective_spec",
     "_page_knowledge",
     "_relationship_child_controls",

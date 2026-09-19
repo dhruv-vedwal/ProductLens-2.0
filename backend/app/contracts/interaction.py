@@ -165,6 +165,161 @@ class Affordance(BaseModel):
     enabled: bool = True
 
 
+class SurfaceState(BaseModel):
+    """One visible interaction surface and its ownership relationship."""
+
+    id: str = Field(min_length=1, max_length=160)
+    kind: Literal[
+        "page",
+        "modal",
+        "drawer",
+        "popover",
+        "menu",
+        "listbox",
+        "overlay",
+        "iframe",
+        "shadow_root",
+        "canvas",
+        "editor",
+    ]
+    label: str = Field(default="", max_length=240)
+    owner_id: str | None = Field(default=None, max_length=160)
+    geometry: Rect | None = None
+    visible: bool = True
+    blocking: bool = False
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+
+
+class ControlDescriptor(BaseModel):
+    """A behavior-classified control reconciled across observations."""
+
+    stable_id: str = Field(min_length=8, max_length=160)
+    surface_id: str = Field(min_length=1, max_length=160)
+    role: str = Field(default="", max_length=80)
+    label: str = Field(default="", max_length=240)
+    tag: str = Field(default="", max_length=40)
+    input_type: str = Field(default="", max_length=80)
+    behavior_class: Literal[
+        "text_input",
+        "email_input",
+        "phone_input",
+        "multiline_input",
+        "native_select",
+        "combobox",
+        "autocomplete",
+        "dependent_async",
+        "radio",
+        "checkbox",
+        "native_date",
+        "date_picker",
+        "time_slot",
+        "submit",
+        "button",
+        "tab",
+        "accordion",
+        "canvas_tool",
+        "canvas_surface",
+        "drag_target",
+        "file_picker",
+        "rich_text",
+        "unknown",
+    ] = "unknown"
+    value: str | None = Field(default=None, max_length=500)
+    options: list[str] = Field(default_factory=list, max_length=100)
+    geometry: Rect | None = None
+    visible: bool = True
+    enabled: bool = True
+    read_only: bool = False
+    expanded: bool | None = None
+    classification_confidence: float = Field(default=0.0, ge=0, le=1)
+    selector_hints: list[str] = Field(default_factory=list, max_length=8)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+
+
+class ControlDependency(BaseModel):
+    """An observed enabling/population relationship between two controls."""
+
+    parent_control_id: str = Field(min_length=8, max_length=160)
+    child_control_id: str = Field(min_length=8, max_length=160)
+    condition: str = Field(min_length=3, max_length=300)
+    effect: Literal["enabled", "visible", "populated", "filtered", "required"]
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+
+
+class PageState(BaseModel):
+    """Normalized live-page state shared by discovery, execution, and QA."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=160)
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    url: str
+    route_identity: str = Field(default="", max_length=500)
+    title: str = Field(default="", max_length=300)
+    viewport: Viewport | None = None
+    scroll: dict[str, float] = Field(default_factory=dict)
+    ready: bool = False
+    loading: bool = False
+    animating: bool = False
+    focused_control_id: str | None = Field(default=None, max_length=160)
+    visual_surface: Literal["dom", "canvas", "mixed", "unknown"] = "unknown"
+    surfaces: list[SurfaceState] = Field(default_factory=list, max_length=80)
+    controls: list[ControlDescriptor] = Field(default_factory=list, max_length=240)
+    dependencies: list[ControlDependency] = Field(default_factory=list, max_length=160)
+    screenshot_ref: str | None = None
+    dom_snapshot_ref: str | None = None
+    accessibility_snapshot_ref: str | None = None
+    fingerprint: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=64)
+
+
+class StateTransition(BaseModel):
+    """Evidence-backed difference between two normalized page states."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=160)
+    before_state_id: str = Field(min_length=1, max_length=160)
+    after_state_id: str = Field(min_length=1, max_length=160)
+    action_intent_id: str | None = Field(default=None, max_length=160)
+    changed_control_ids: list[str] = Field(default_factory=list, max_length=160)
+    added_control_ids: list[str] = Field(default_factory=list, max_length=160)
+    removed_control_ids: list[str] = Field(default_factory=list, max_length=160)
+    opened_surface_ids: list[str] = Field(default_factory=list, max_length=80)
+    closed_surface_ids: list[str] = Field(default_factory=list, max_length=80)
+    url_changed: bool = False
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=64)
+
+
+class DiagramNode(BaseModel):
+    id: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=1, max_length=160)
+    kind: str = Field(default="component", max_length=80)
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    visual_evidence_ref: str
+    label_evidence_ref: str | None = None
+
+
+class DiagramConnector(BaseModel):
+    id: str = Field(min_length=1, max_length=160)
+    source_node_id: str = Field(min_length=1, max_length=160)
+    target_node_id: str = Field(min_length=1, max_length=160)
+    kind: str = Field(default="directed", max_length=80)
+    visual_evidence_ref: str
+
+
+class DiagramState(BaseModel):
+    """Semantic editor result backed by committed surface-change evidence."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), max_length=160)
+    surface_control_id: str | None = Field(default=None, max_length=160)
+    nodes: list[DiagramNode] = Field(default_factory=list, max_length=80)
+    connectors: list[DiagramConnector] = Field(default_factory=list, max_length=160)
+    labels_verified: bool = False
+    topology_verified: bool = False
+    screenshot_ref: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=160)
+
+
 class StateSnapshot(BaseModel):
     """A redacted observation of the browser state at one evidence boundary."""
 
@@ -292,6 +447,7 @@ class InteractionSnapshot(BaseModel):
     visual_surface: Literal["dom", "canvas", "mixed", "unknown"] = "unknown"
     evidence_refs: list[str] = Field(default_factory=list, max_length=64)
     fingerprint: str | None = None
+    page_state: PageState | None = None
 
 
 class InteractionEvent(BaseModel):
@@ -393,6 +549,9 @@ class DemoTrace(BaseModel):
     action_attempts: list[ActionAttempt] = Field(default_factory=list, max_length=600)
     verification_results: list[VerificationResult] = Field(default_factory=list, max_length=600)
     moments: list[SemanticMoment] = Field(default_factory=list, max_length=600)
+    behavioral_states: list[PageState] = Field(default_factory=list, max_length=600)
+    state_transitions: list[StateTransition] = Field(default_factory=list, max_length=600)
+    diagram_states: list[DiagramState] = Field(default_factory=list, max_length=120)
 
 
 class InteractionTrace(BaseModel):

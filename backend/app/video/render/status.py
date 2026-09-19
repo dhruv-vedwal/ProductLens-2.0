@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -57,10 +60,18 @@ def _validate_recording_provenance(trace: DemoTrace, artifacts: RunArtifacts, ra
     if provider != "browserbase":
         return
     metadata_run = payload.get("run_id")
+    inherited_by = payload.get("inherited_by_run_id")
+    source_run = payload.get("source_run_id")
     if metadata_run is not None and str(metadata_run) != str(trace.run_id):
-        raise RecordingProvenanceError(
-            f"recording metadata belongs to run {metadata_run}, expected {trace.run_id}"
-        )
+        # Targeted narration/render retries reuse an immutable parent
+        # recording. The child envelope must name both this run and the
+        # original capture so a foreign replay cannot be substituted.
+        inherited_for_this_run = str(inherited_by or "") == str(trace.run_id)
+        sourced_from_parent = bool(source_run) and str(source_run) != str(trace.run_id)
+        if not (inherited_for_this_run and sourced_from_parent):
+            raise RecordingProvenanceError(
+                f"recording metadata belongs to run {metadata_run}, expected {trace.run_id}"
+            )
     expected = raw.resolve()
     artifact_ref = payload.get("artifact")
     if artifact_ref:
@@ -147,6 +158,65 @@ def _segment_is_complete(path: Path, *, expected_frames: int, frame_rate: int) -
         return False
 
 
+def _bounded_process_diagnostic(
+    *,
+    command: list[str],
+    renderer: Path,
+    elapsed_seconds: float,
+    return_code: int | str,
+    stdout: str | bytes | None,
+    stderr: str | bytes | None,
+    pid: int | None = None,
+    heartbeat_age_seconds: float | None = None,
+    frames_rendered: int | None = None,
+) -> str:
+    """Return an actionable, bounded render diagnostic even for silent failures."""
+
+    def text(value: str | bytes | None) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value or "")
+
+    output = f"{text(stdout)}\n{text(stderr)}".strip()
+    if not output:
+        output = "<renderer produced no stdout/stderr>"
+    rendered_command = shlex.join(str(item) for item in command)
+    if frames_rendered is None:
+        match = re.search(r"Rendered\s+(\d+)\s*/\s*\d+", output, flags=re.IGNORECASE)
+        if match:
+            frames_rendered = int(match.group(1))
+    heartbeat = (
+        f"{heartbeat_age_seconds:.2f}" if heartbeat_age_seconds is not None else "unknown"
+    )
+    frames = str(frames_rendered) if frames_rendered is not None else "unknown"
+    return (
+        f"return_code={return_code}; pid={pid if pid is not None else 'unknown'}; "
+        f"elapsed_seconds={elapsed_seconds:.2f}; heartbeat_age_seconds={heartbeat}; "
+        f"frames_rendered={frames}; cwd={renderer}; command={rendered_command}; "
+        f"output={output[-4_000:]}"
+    )
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Terminate a timed-out compositor and its descendants."""
+
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
 def _run_remotion_segment(command: list[str], *, renderer: Path, timeout_seconds: int) -> None:
     """Render a segment and absorb one known cold-Chrome startup failure.
 
@@ -157,32 +227,80 @@ def _run_remotion_segment(command: list[str], *, renderer: Path, timeout_seconds
     so the repair layer can own it.
     """
     for attempt in range(2):
+        started = time.monotonic()
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        process = subprocess.Popen(
+            command,
+            cwd=renderer,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            creationflags=creationflags,
+        )
+        last_heartbeat = time.monotonic()
+        heartbeat_path = renderer / ".remotion-heartbeat.json"
+        stop_heartbeat = threading.Event()
+
+        def _write_heartbeat() -> None:
+            nonlocal last_heartbeat
+            last_heartbeat = time.monotonic()
+            try:
+                heartbeat_path.write_text(
+                    json.dumps({"pid": process.pid, "heartbeat_at": last_heartbeat}),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+
+        _write_heartbeat()
+
+        def _heartbeat_loop() -> None:
+            while not stop_heartbeat.wait(5):
+                _write_heartbeat()
+
+        heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+        heartbeat_thread.start()
         try:
-            result = subprocess.run(
-                command,
-                cwd=renderer,
-                check=False,
-                timeout=timeout_seconds,
-                capture_output=True,
-                text=True,
-            )
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as error:
+            _terminate_process_tree(process)
             if _completed_segment_after_timeout(command):
                 return
+            diagnostic = _bounded_process_diagnostic(
+                command=command,
+                renderer=renderer,
+                elapsed_seconds=time.monotonic() - started,
+                return_code="timeout",
+                stdout=error.stdout,
+                stderr=error.stderr,
+                pid=process.pid,
+                heartbeat_age_seconds=time.monotonic() - last_heartbeat,
+            )
             raise RenderTimeoutError(
-                f"Remotion segment timed out after {timeout_seconds} seconds"
+                f"Remotion segment timed out after {timeout_seconds} seconds: {diagnostic}"
             ) from error
-        # Lightweight test/dry-run probes historically expose stdout only;
-        # subprocess itself always provides returncode. Treat that compatible
-        # shape as success while retaining strict handling in production.
-        if getattr(result, "returncode", 0) == 0:
+        finally:
+            stop_heartbeat.set()
+        if process.returncode == 0:
             return
-        diagnostics = f"{result.stdout}\n{result.stderr}"
+        diagnostics = f"{stdout}\n{stderr}"
         cold_browser_timeout = "trying to connect to the browser" in diagnostics.lower()
         if cold_browser_timeout and attempt == 0:
             time.sleep(2)
             continue
-        raise RuntimeError("REMOTION_SEGMENT_RENDER_FAILED: " + diagnostics.strip()[-1_000:])
+        raise RuntimeError(
+            "REMOTION_SEGMENT_RENDER_FAILED: "
+            + _bounded_process_diagnostic(
+                command=command,
+                renderer=renderer,
+                elapsed_seconds=time.monotonic() - started,
+                return_code=process.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                pid=process.pid,
+                heartbeat_age_seconds=time.monotonic() - last_heartbeat,
+            )
+        )
 
 
 def _render_concurrency() -> int:

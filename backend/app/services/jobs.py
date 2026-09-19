@@ -4,7 +4,7 @@ import asyncio
 import json
 from contextlib import suppress
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, time
 from typing import Any
 
 from app.artifacts.store import RunArtifacts
@@ -39,6 +39,7 @@ from app.providers.errors import ProviderError
 from app.quality.coverage import inspect_coverage
 from app.quality.delivery import delivery_report
 from app.quality.presentation import attach_presentation_qa, inspect_presentation
+from app.quality.repair import classify_repair
 from app.quality.synchronization import inspect_synchronization, secure_transition_intervals
 from app.quality.video import inspect_video
 from app.services.generation import UrlGenerationService
@@ -81,12 +82,16 @@ class DemoJobService:
         speech_provider: SpeechProvider | None = None,
         url_generator: UrlGenerationService | None = None,
         artifact_storage: object | None = None,
+        repair_wall_clock_budget_seconds: int = 3_600,
     ):
         self.repository, self.artifact_root = repository, artifact_root
         self.planner = planner or FixturePlanningService()
         self.speech_provider = speech_provider
         self.url_generator = url_generator
         self.artifact_storage = artifact_storage
+        self.repair_wall_clock_budget_seconds = max(
+            60, int(repair_wall_clock_budget_seconds)
+        )
 
     def _publish_delivery(self, run_id: str, artifacts: RunArtifacts) -> None:
         """Publish only accepted evidence; failed attempts stay retry-local."""
@@ -138,6 +143,205 @@ class DemoJobService:
                     stage=stage,
                     error_type=type(error).__name__,
                 )
+
+    def _persist_failed_browser_session(self, run_id: str) -> None:
+        """Keep cloud session identity after a failed stage, including repairs."""
+
+        artifacts = RunArtifacts(self.artifact_root, run_id)
+        for session_path in (
+            artifacts.root / "execution" / "browserbase-session.json",
+            artifacts.root / "discovery" / "browserbase-session.json",
+        ):
+            if not session_path.is_file():
+                continue
+            try:
+                session = json.loads(session_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            provider = session.get("provider")
+            session_id = session.get("session_id")
+            if provider and session_id:
+                self.repository.save_browser_session(
+                    run_id, str(provider), str(session_id), "FAILED"
+                )
+
+    def _schedule_automatic_repair(
+        self,
+        run_id: str,
+        stage: str,
+        *,
+        payload: dict[str, Any],
+        error: Exception,
+    ) -> str | None:
+        """Create a bounded targeted child run without consumer intervention."""
+
+        repair_attempt = int(payload.get("_repair_attempt", 0))
+        repair_started_epoch = float(payload.get("_repair_started_epoch", time()))
+        repair_elapsed_seconds = max(0.0, time() - repair_started_epoch)
+        artifacts = RunArtifacts(self.artifact_root, run_id)
+        decision_path = artifacts.qa / "repair-decision.json"
+        try:
+            decision_payload = (
+                json.loads(decision_path.read_text(encoding="utf-8"))
+                if decision_path.is_file()
+                else classify_repair(
+                    [f"{stage}_{type(error).__name__}".upper(), str(error).upper()]
+                ).model_dump(mode="json")
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+        action = str(decision_payload.get("action") or "fail")
+        category = str(decision_payload.get("category") or "internal")
+        attempts_by_category = {
+            str(key): int(value)
+            for key, value in dict(payload.get("_repair_attempts_by_category") or {}).items()
+        }
+        category_attempt = attempts_by_category.get(category, 0)
+        repair_budget_exhausted = (
+            category_attempt >= 3
+            or repair_elapsed_seconds >= self.repair_wall_clock_budget_seconds
+        )
+        if action in {"fail", "needs_input"} or repair_budget_exhausted:
+            artifacts.write_json(
+                "qa/repair-exhausted.json",
+                {
+                    "attempt": repair_attempt,
+                    "category_attempt": category_attempt,
+                    "max_attempts": 3,
+                    "action": action,
+                    "elapsed_seconds": round(repair_elapsed_seconds, 3),
+                    "reasons": decision_payload.get("reasons", []),
+                },
+            )
+            if action == "needs_input" or repair_budget_exhausted:
+                blocker_code = (
+                    "EXTERNAL_INPUT_REQUIRED"
+                    if action == "needs_input"
+                    else "REPAIR_BUDGET_EXHAUSTED"
+                )
+                self.repository.update_run(
+                    run_id,
+                    stage=stage,
+                    status="NEEDS_INPUT",
+                    error_code=blocker_code,
+                )
+                self._promote_repair_blocker(run_id, stage, blocker_code)
+            return None
+        stage_aliases = {
+            "RENDERING": "RENDER",
+            "PRODUCTION_EXECUTION": "EXECUTION",
+            "VIDEO_QA": "VIDEO_QA",
+        }
+        requested_stage = str(decision_payload.get("retry_from_stage") or stage).upper()
+        retry_from_stage = stage_aliases.get(requested_stage, requested_stage)
+        if retry_from_stage not in {
+            "DISCOVERY",
+            "PLANNING",
+            "EXECUTION",
+            "NARRATION",
+            "RENDER",
+            "VIDEO_QA",
+        }:
+            return None
+        try:
+            retry = self.repository.create_retry_run(run_id, str(self.artifact_root))
+            retry_id = str(retry["id"])
+            RunArtifacts.clone_for_targeted_retry(
+                self.artifact_root,
+                run_id,
+                retry_id,
+                start_stage=retry_from_stage,
+            )
+            self.repository.ensure_stage_jobs(retry_id)
+            self.repository.prepare_targeted_retry(retry_id, retry_from_stage)
+            self.repository.copy_run_evidence(
+                run_id, retry_id, through_stage=retry_from_stage
+            )
+            retry_payload = {
+                **payload,
+                "_repair_attempt": repair_attempt + 1,
+                "_repair_started_epoch": repair_started_epoch,
+                "_repair_parent_run_id": run_id,
+                "_repair_category": decision_payload.get("category"),
+                "_repair_attempts_by_category": {
+                    **attempts_by_category,
+                    category: category_attempt + 1,
+                },
+                "refresh_editorial": retry_from_stage == "NARRATION",
+            }
+            self.repository.enqueue_job(retry_id, "url", retry_payload)
+            artifacts.write_json(
+                "qa/repair-scheduled.json",
+                {
+                    "retry_run_id": retry_id,
+                    "retry_from_stage": retry_from_stage,
+                    "attempt": repair_attempt + 1,
+                    "category": decision_payload.get("category"),
+                    "reasons": decision_payload.get("reasons", []),
+                },
+            )
+            RunArtifacts(self.artifact_root, retry_id).write_json(
+                "repair/lineage.json",
+                {
+                    "parent_run_id": run_id,
+                    "attempt": repair_attempt + 1,
+                    "retry_from_stage": retry_from_stage,
+                },
+            )
+            self.repository.update_run(
+                run_id,
+                stage=stage,
+                status="REPAIRING",
+                error_code=None,
+            )
+            return retry_id
+        except Exception:
+            logger.exception(
+                "demo_job_repair_scheduling_failed",
+                run_id=run_id,
+                stage=stage,
+            )
+            return None
+
+    def _promote_repair_success(self, run_id: str, artifacts: RunArtifacts) -> None:
+        """Make the original consumer-visible run resolve to its repaired child."""
+
+        child_id = run_id
+        parent_id = self.repository.run_details(child_id).get("retry_of")
+        while parent_id:
+            self.repository.update_run(
+                parent_id,
+                stage=RunStage.COMPLETE,
+                status="COMPLETE",
+                error_code=None,
+            )
+            final_video = artifacts.root / "final" / "demo.mp4"
+            if final_video.is_file():
+                self.repository.save_location(
+                    parent_id, "final_video", str(final_video)
+                )
+            manifest = artifacts.root / "artifact-manifest.json"
+            if manifest.is_file():
+                self.repository.save_location(
+                    parent_id, "artifact_manifest", str(manifest)
+                )
+            child_id = str(parent_id)
+            parent_id = self.repository.run_details(child_id).get("retry_of")
+
+    def _promote_repair_blocker(
+        self, run_id: str, stage: str, error_code: str
+    ) -> None:
+        child_id = run_id
+        parent_id = self.repository.run_details(child_id).get("retry_of")
+        while parent_id:
+            self.repository.update_run(
+                parent_id,
+                stage=stage,
+                status="NEEDS_INPUT",
+                error_code=error_code,
+            )
+            child_id = str(parent_id)
+            parent_id = self.repository.run_details(child_id).get("retry_of")
 
     async def run_fixture_stage(self, run_id: str, stage: str, *, gate: int, render: bool) -> None:
         """Execute exactly one persisted fixture stage.
@@ -365,7 +569,17 @@ class DemoJobService:
                 error_code=error_code,
             )
             logger.error("demo_job_stage_failed", stage=stage, error_type=type(error).__name__)
-            raise
+            self._persist_failed_browser_session(run_id)
+            retry_id = self._schedule_automatic_repair(
+                run_id, stage, payload=payload, error=error
+            )
+            if retry_id is None:
+                raise
+            logger.info(
+                "demo_job_repair_scheduled",
+                stage=stage,
+                retry_run_id=retry_id,
+            )
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
@@ -606,6 +820,7 @@ class DemoJobService:
             self._checkpoint_stage(run_id, RunStage.QA_PASSED)
             self.repository.update_run(run_id, stage=RunStage.COMPLETE, status="COMPLETE")
             self._publish_delivery(run_id, artifacts)
+            self._promote_repair_success(run_id, artifacts)
         # Every URL stage may create one or more architectural artifacts.
         # Persist all evidence written so far; later stages replace only their
         # own singleton snapshots.
@@ -872,6 +1087,15 @@ class DemoJobService:
             "target_duration_seconds": target_duration_seconds,
             "presentation": {},
         }
+        queued_job = self.repository.job_for_run(run_id)
+        if isinstance(queued_job, dict) and isinstance(queued_job.get("payload"), dict):
+            stage_payload.update(
+                {
+                    key: value
+                    for key, value in queued_job["payload"].items()
+                    if str(key).startswith("_repair_") or key == "refresh_editorial"
+                }
+            )
         # Direct/supervised jobs do not pass through API enqueueing.  Provision
         # the same durable stage rows before discovery begins so artifacts,
         # progress, cancellation and recovery always agree.
@@ -879,9 +1103,41 @@ class DemoJobService:
         try:
             for stage in ("DISCOVERY", "PLANNING", "EXECUTION", "NARRATION", "RENDER", "VIDEO_QA"):
                 await self.run_url_stage(run_id, stage, payload=stage_payload)
+                current = self.repository.get_run(run_id)
+                if current["status"] == "REPAIRING":
+                    scheduled_path = artifacts.qa / "repair-scheduled.json"
+                    scheduled = json.loads(scheduled_path.read_text(encoding="utf-8"))
+                    retry_id = str(scheduled["retry_run_id"])
+                    await self._run_url(
+                        retry_id,
+                        allow_external_side_effects=allow_external_side_effects,
+                        render=render,
+                        cloud_discovery=cloud_discovery,
+                        budget=budget,
+                        stagehand_assist=stagehand_assist,
+                        credential_reference=credential_reference,
+                        audience=audience,
+                        target_duration_seconds=target_duration_seconds,
+                        allow_isolated_record_creation=allow_isolated_record_creation,
+                    )
+                    self.repository.finish_attempt(run_id, attempt, status="COMPLETE")
+                    return
+                if current["status"] == "NEEDS_INPUT":
+                    raise RuntimeError(
+                        current.get("error_code") or "EXTERNAL_INPUT_REQUIRED"
+                    )
             self.repository.finish_attempt(run_id, attempt, status="COMPLETE")
             return
         except Exception as error:
+            current = self.repository.get_run(run_id)
+            if current["status"] == "NEEDS_INPUT":
+                self.repository.finish_attempt(
+                    run_id,
+                    attempt,
+                    status="FAILED",
+                    failure_code=current.get("error_code") or "EXTERNAL_INPUT_REQUIRED",
+                )
+                raise
             code = (
                 "PROVIDER_FAILURE"
                 if isinstance(error, ProviderError)

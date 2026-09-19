@@ -129,14 +129,81 @@ class CapabilityProbeMixin:
                         scope = page.locator("body")
                 if scope is None:
                     if _canonical_route(page.url) != _canonical_route(prior_url):
-                        await page.go_back(wait_until="domcontentloaded")
+                        try:
+                            await page.go_back(wait_until="domcontentloaded", timeout=15_000)
+                        except PlaywrightError:
+                            await self._safe_escape(page)
                     else:
                         await self._safe_escape(page)
                     continue
-                observed = await self.inspect(page, objective)
-                schema: FormSchema = await self._enrich_choice_options(
-                    page, await self._form_schema_from_scope(scope, page.url)
-                )
+                try:
+                    observed = await asyncio.wait_for(
+                        self.inspect(page, objective), timeout=30
+                    )
+                except TimeoutError:
+                    blockers.append(f"capability_probe_inspect_timeout:{item.name}")
+                    await self._safe_escape(page)
+                    continue
+                try:
+                    schema: FormSchema = await asyncio.wait_for(
+                        self._form_schema_from_scope(scope, page.url), timeout=20
+                    )
+                except TimeoutError:
+                    blockers.append(f"capability_probe_schema_timeout:{item.name}")
+                    schema = FormSchema(source_url=page.url, fields=[], evidence=[])
+                # Enrichment opens choice lists and can consume the whole probe
+                # budget on dense CRM forms. Prefer a shallow labelled schema
+                # over discarding a successfully opened create surface.
+                if schema.fields:
+                    try:
+                        schema = await asyncio.wait_for(
+                            self._enrich_choice_options(page, schema), timeout=35
+                        )
+                    except TimeoutError:
+                        blockers.append(f"capability_probe_enrich_timeout:{item.name}")
+                        # A partial enrich is still useful: finish only the
+                        # selectable fields that would otherwise block rehearsal
+                        # compilation (non-optional selects without choices).
+                        try:
+                            critical = schema.model_copy(
+                                update={
+                                    "fields": [
+                                        field
+                                        for field in schema.fields
+                                        if field.control_type.casefold()
+                                        in {"select", "combobox"}
+                                        and not field.options
+                                        and "optional" not in " ".join(field.validation_messages).casefold()
+                                    ][:3]
+                                }
+                            )
+                            if critical.fields:
+                                enriched_critical = await asyncio.wait_for(
+                                    self._enrich_choice_options(page, critical), timeout=30
+                                )
+                                options_by_name = {
+                                    field.name.casefold(): field.options
+                                    for field in enriched_critical.fields
+                                    if field.options
+                                }
+                                schema = schema.model_copy(
+                                    update={
+                                        "fields": [
+                                            field.model_copy(
+                                                update={
+                                                    "options": options_by_name.get(
+                                                        field.name.casefold(), field.options
+                                                    )
+                                                }
+                                            )
+                                            for field in schema.fields
+                                        ]
+                                    }
+                                )
+                        except TimeoutError:
+                            blockers.append(
+                                f"capability_probe_critical_enrich_timeout:{item.name}"
+                            )
                 # A portal can expose a visible shell (or even a semantic
                 # dialog) while rendering its actual controls in a sibling
                 # subtree.  If the click produced a positive editable-control
@@ -159,12 +226,34 @@ class CapabilityProbeMixin:
                     except (PlaywrightError, TimeoutError):
                         after_editable_count = before_editable_count
                     if after_editable_count > 0:
-                        schema = await self._enrich_choice_options(
-                            page, await self._form_schema_from_scope(page.locator("body"), page.url)
-                        )
+                        try:
+                            schema = await asyncio.wait_for(
+                                self._form_schema_from_scope(page.locator("body"), page.url),
+                                timeout=20,
+                            )
+                        except TimeoutError:
+                            blockers.append(f"capability_probe_body_schema_timeout:{item.name}")
+                            schema = FormSchema(source_url=page.url, fields=[], evidence=[])
+                        if schema.fields:
+                            try:
+                                schema = await asyncio.wait_for(
+                                    self._enrich_choice_options(page, schema), timeout=20
+                                )
+                            except TimeoutError:
+                                blockers.append(
+                                    f"capability_probe_body_enrich_timeout:{item.name}"
+                                )
                 if not schema.fields:
                     await self._safe_escape(page)
                     continue
+                try:
+                    schema = await asyncio.wait_for(
+                        self._probe_form_dependencies(page, scope, schema), timeout=45
+                    )
+                except TimeoutError:
+                    # Dependency transitions are useful but optional. Keep the
+                    # grounded fields so rehearsal can still exercise the form.
+                    blockers.append(f"capability_probe_dependency_timeout:{item.name}")
                 submit_target = None
                 close_target = None
                 for candidate in observed.elements:
@@ -180,7 +269,11 @@ class CapabilityProbeMixin:
                         candidate.tag in {"button", "input"}
                         and submit_target is None
                         and (
-                            "submit" in name or "save" in name or "create" in name or "add" in name
+                            "submit" in name
+                            or "save" in name
+                            or "create" in name
+                            or "add" in name
+                            or name == "new lead"
                         )
                     ):
                         submit_target = _capability_target(candidate)
@@ -190,12 +283,54 @@ class CapabilityProbeMixin:
                         and any(word in name for word in ("close", "cancel", "dismiss"))
                     ):
                         close_target = _capability_target(candidate)
+                # Dialog submit controls are often labelled Save/Create inside
+                # the open form rather than in the pre-click page inventory.
+                if submit_target is None:
+                    try:
+                        dialog_submits = await asyncio.wait_for(
+                            page.locator(
+                                "[role='dialog'] button, [aria-modal='true'] button, form button[type='submit']"
+                            ).evaluate_all(
+                                """nodes => nodes.map(node => {
+                                    const text = (node.innerText || node.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+                                    const visible = !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+                                    return {text, visible, disabled: !!node.disabled};
+                                }).filter(item => item.visible && item.text && !item.disabled).slice(0, 20)"""
+                            ),
+                            timeout=5,
+                        )
+                    except (PlaywrightError, TimeoutError):
+                        dialog_submits = []
+                    for candidate in dialog_submits if isinstance(dialog_submits, list) else []:
+                        label = str(candidate.get("text") or "").casefold()
+                        if any(
+                            word in label
+                            for word in ("save", "create", "submit", "add", "continue")
+                        ):
+                            submit_target = _capability_target(
+                                ObservedElement(
+                                    tag="button",
+                                    role="button",
+                                    name=str(candidate.get("text") or "Save")[:200],
+                                    selector="button",
+                                    source_url=page.url,
+                                    actionable=True,
+                                )
+                            )
+                            break
                 if close_target is None:
                     await self._safe_escape(page)
                 else:
                     closer = page.get_by_role("button", name=close_target.name, exact=True)
-                    if await closer.count():
-                        await closer.first.click()
+                    try:
+                        closer_count = await asyncio.wait_for(closer.count(), timeout=3)
+                    except (PlaywrightError, TimeoutError):
+                        closer_count = 0
+                    if closer_count:
+                        try:
+                            await closer.first.click(timeout=3_000)
+                        except PlaywrightError:
+                            await self._safe_escape(page)
                     else:
                         await self._safe_escape(page)
                 await page.wait_for_timeout(250)

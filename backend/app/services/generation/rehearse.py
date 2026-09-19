@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from app.artifacts.store import RunArtifacts
 from app.contracts.models import (
     ActionCapability,
+    BehavioralProductModel,
     FormField,
     ObservedElement,
     OperationKind,
@@ -29,7 +30,9 @@ from app.execution.playwright_adapter import GroundingError, PlaywrightAdapter
 from app.planning.capabilities import (
     CapabilityCompilationError,
     compile_rehearsal_operations,
+    _is_transient_selector,
 )
+from app.planning.certification import certify_rehearsed_capability
 from app.planning.rehearsal import (
     CapabilitySelectionError,
     derive_outcome_witness,
@@ -45,6 +48,29 @@ from app.services.generation_policy import (
 )
 
 from .render import GenerationPreconditionError
+
+
+def _write_certified_workflow(
+    artifacts: RunArtifacts,
+    capability: ActionCapability,
+    *,
+    run_id: str,
+) -> None:
+    model_path = artifacts.root / "discovery" / "behavioral-product-model.json"
+    behavioral_model = None
+    if model_path.is_file():
+        behavioral_model = BehavioralProductModel.model_validate_json(
+            model_path.read_text(encoding="utf-8")
+        )
+    graph = certify_rehearsed_capability(
+        capability,
+        rehearsal_run_id=run_id,
+        behavioral_model=behavioral_model,
+    )
+    artifacts.write_json(
+        "planning/certified-workflow-graph.json",
+        graph.model_dump(mode="json"),
+    )
 
 
 async def _rehearsal_outcome_candidates(
@@ -346,7 +372,7 @@ async def _rehearsal_validation_recovery_operations(
               ? Array.from(node.options || [])
               : Array.from(document.querySelectorAll('[role="option"]')).filter(visible);
             const options = optionNodes.map(option => clean(option.innerText || option.textContent || option.value)).filter(Boolean).slice(0, 20);
-            return {label: labelFor(node), name: node.getAttribute('name') || '', value: node.getAttribute('value') || '', tag, type, role, selector: selectorFor(node), options, text: clean(node.innerText || node.textContent)};
+            return {label: labelFor(node), name: node.getAttribute('name') || '', value: node.getAttribute('value') || '', tag, type, role, selector: selectorFor(node), options, text: clean(node.innerText || node.textContent), invalid: node.getAttribute('aria-invalid') === 'true' || Boolean(node.validity && node.validity.valid === false), required: node.required === true || node.getAttribute('aria-required') === 'true'};
           }).filter(Boolean);
         }"""
     )
@@ -362,7 +388,10 @@ async def _rehearsal_validation_recovery_operations(
             :160
         ]
         selector = item.get("selector")
-        if not selector:
+        control_type = str(item.get("type") or item.get("tag") or "text").casefold()
+        role_hint = str(item.get("role") or "").casefold()
+        is_choice = control_type in {"select", "combobox"} or role_hint == "combobox"
+        if not selector and not (is_choice and name and name.casefold() != "field"):
             continue
         compact_name = re.sub(r"[^a-z0-9]", "", name.casefold())
         compact_attr_name = re.sub(r"[^a-z0-9]", "", str(item.get("name") or "").casefold())
@@ -380,14 +409,21 @@ async def _rehearsal_validation_recovery_operations(
                 ),
                 None,
             )
-        control_type = str(item.get("type") or item.get("tag") or "text").casefold()
         if compact_attr_name in {"type", "id"} or compact_name in {"type", "id"}:
+            continue
+        explicitly_optional = "optional" in name.casefold() or "not required" in name.casefold()
+        if explicitly_optional and not item.get("invalid") and not item.get("required"):
+            # Recovery inventories every dialog control. Explicitly optional
+            # fields that are not the blocking invalid control must not be
+            # promoted into the minimal create path or typed during recovery.
             continue
         if str(item.get("tag") or "").casefold() == "button":
             if not (
                 re.search(r"date|time|calendar|picker", name, re.IGNORECASE)
                 or str(item.get("role") or "").casefold() == "gridcell"
             ):
+                continue
+            if not selector:
                 continue
             operations.append(
                 SemanticOperation(
@@ -414,29 +450,163 @@ async def _rehearsal_validation_recovery_operations(
             # policy; a broad dialog inventory cannot safely toggle them.
             continue
         role = str(item.get("role") or "") or None
-        target = Target(
-            name=name,
-            label=name,
-            selector=str(selector),
-            role=role,
-            source_url=source_url,
-        )
         if control_type in {"checkbox", "radio"}:
             kind = OperationKind.CHECK if control_type == "checkbox" else OperationKind.CHOOSE_RADIO
             value = True
-        elif control_type in {"select", "combobox"} or role == "combobox":
+        elif is_choice:
             choices = [
                 str(value).strip()
                 for value in (item.get("options") or (field.options if field else []))
                 if str(value).strip().casefold()
                 not in {"select", "select an option", "choose", "choose an option"}
             ]
+            live = None
+            selector_usable = bool(selector) and not _is_transient_selector(str(selector))
             if not choices:
-                # A custom combobox may hide its listbox until focused. It is
-                # safer to leave it for a later targeted re-exploration than
-                # to type a value that the widget cannot commit.
+                # Closed design-system autocompletes hide their listbox until
+                # opened. Probe the live control once so validation recovery
+                # can commit an evidence-backed option instead of looping on
+                # unrelated text fields. Prefer stable role/label identity over
+                # mount-scoped React ids such as ``#:r2f:``.
+                try:
+                    candidates = []
+                    if selector_usable:
+                        candidates.append(page.locator(str(selector)))
+                    if name:
+                        candidates.extend(
+                            [
+                                page.get_by_role(
+                                    "combobox",
+                                    name=re.compile(rf"^{re.escape(name)}$", re.I),
+                                ),
+                                page.get_by_label(re.compile(rf"^{re.escape(name)}$", re.I)),
+                                page.get_by_role("combobox", name=name, exact=False),
+                            ]
+                        )
+                    for candidate in candidates:
+                        try:
+                            count = await candidate.count()
+                        except PlaywrightError:
+                            continue
+                        for index in range(count):
+                            node = candidate.nth(index)
+                            try:
+                                if await node.is_visible() and await node.is_enabled():
+                                    live = node
+                                    break
+                            except PlaywrightError:
+                                continue
+                        if live is not None:
+                            break
+                    if live is None and name:
+                        # MUI Autocomplete often has no accessible name; locate
+                        # by nearest labelled field container instead.
+                        semantic = await page.locator("[role='combobox']").evaluate_all(
+                            """(nodes, fieldName) => {
+                              const normal = value => (value || '').replace(/\\s+/g, ' ').trim().toLocaleLowerCase();
+                              const sought = normal(fieldName);
+                              return nodes.map((node, index) => {
+                                const invalid = node.getAttribute('aria-invalid') === 'true';
+                                let parent = node.parentElement;
+                                for (let depth = 1; parent && depth <= 6; depth += 1, parent = parent.parentElement) {
+                                  const label = normal(parent.innerText);
+                                  if (!label.includes(sought) || label.length > 420) continue;
+                                  return {index, depth, invalid: invalid ? 1 : 0, span: label.length};
+                                }
+                                return null;
+                              }).filter(Boolean);
+                            }""",
+                            name,
+                        )
+                        if semantic:
+                            semantic.sort(
+                                key=lambda item: (
+                                    -int(item.get("invalid") or 0),
+                                    int(item.get("depth") or 99),
+                                    int(item.get("span") or 10_000),
+                                )
+                            )
+                            candidate = page.locator("[role='combobox']").nth(
+                                int(semantic[0]["index"])
+                            )
+                            if await candidate.is_visible():
+                                live = candidate
+                    if live is not None:
+                        await live.click(timeout=3_000)
+                        try:
+                            await live.press("ArrowDown")
+                        except PlaywrightError:
+                            pass
+                        for _attempt in range(8):
+                            harvested = await page.evaluate(
+                                """() => {
+                                  const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+                                  const selected = document.querySelector(
+                                    '[role="option"][aria-selected="true"], [role="option"].Mui-focused, [role="option"].Mui-focusVisible'
+                                  );
+                                  if (selected) {
+                                    const label = clean(selected.innerText || selected.textContent);
+                                    if (label) return [label];
+                                  }
+                                  return Array.from(document.querySelectorAll(
+                                    "[role='option'], [role='listbox'] li, [role='menu'] [role='menuitem']"
+                                  ))
+                                    .map(node => clean(node.innerText || node.textContent))
+                                    .filter(Boolean)
+                                    .slice(0, 40);
+                                }"""
+                            )
+                            choices = [
+                                str(value).strip()
+                                for value in (harvested or [])
+                                if str(value).strip().casefold()
+                                not in {
+                                    "select",
+                                    "select an option",
+                                    "choose",
+                                    "choose an option",
+                                    "no options",
+                                    "no results",
+                                }
+                            ]
+                            if choices:
+                                break
+                            # Async autocompletes often require a keystroke
+                            # before any option nodes are mounted.
+                            if _attempt == 2 and live is not None:
+                                try:
+                                    await live.type("a", delay=40)
+                                    await live.press("ArrowDown")
+                                except PlaywrightError:
+                                    pass
+                            await page.wait_for_timeout(300)
+                        try:
+                            await page.keyboard.press("Escape")
+                        except PlaywrightError:
+                            pass
+                except PlaywrightError:
+                    choices = []
+            if not choices:
                 continue
-            kind, value = OperationKind.SELECT_OPTION, choices[0]
+            observed = str(
+                item.get("observed_value")
+                or item.get("value")
+                or (field.observed_value if field else "")
+                or ""
+            ).strip()
+            matching = next(
+                (choice for choice in choices if choice.casefold() == observed.casefold()),
+                None,
+            )
+            # An empty invalid combobox still needs a safe observed choice;
+            # reuse the deterministic first option rather than skipping the
+            # only control that blocked submit.
+            if matching is None:
+                matching = min(choices, key=str.casefold)
+            kind, value = OperationKind.SELECT_OPTION, matching
+            if not selector_usable:
+                selector = None
+            role = role or "combobox"
         elif "email" in control_type or "email" in name.casefold():
             kind, value = OperationKind.FILL_EMAIL, None
         elif any(
@@ -460,6 +630,19 @@ async def _rehearsal_validation_recovery_operations(
                 value = None
         else:
             kind, value = OperationKind.FILL_TEXT, None
+        if kind not in {
+            OperationKind.SELECT_OPTION,
+            OperationKind.CHOOSE_RADIO,
+            OperationKind.CHECK,
+        } and not selector:
+            continue
+        target = Target(
+            name=name,
+            label=name,
+            selector=str(selector) if selector else None,
+            role=role,
+            source_url=source_url,
+        )
         operations.append(
             SemanticOperation(
                 kind=kind,
@@ -711,6 +894,7 @@ class RehearseMixin:
                 ],
             )
             artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
+            _write_certified_workflow(artifacts, candidate, run_id=run_id)
             return context
         recover_dispatched_attempt = bool(
             prior_attempt
@@ -733,30 +917,38 @@ class RehearseMixin:
         # promotion bug. Keep the one native required field when it is the
         # only such field; when several are marked required they are stale
         # broad inventory and become explicitly promoted optional controls.
+        # Never stamp rehearsal:include onto optionless select/comboboxes —
+        # that made certify fail closed after an otherwise successful
+        # rehearsal when enrichment had not yet captured choices.
         if candidate.form_schema is not None and not any(
             "rehearsal:include" in field.validation_messages
             for field in candidate.form_schema.fields
         ):
             required_count = sum(1 for field in candidate.form_schema.fields if field.required)
+            migrated_fields: list[FormField] = []
+            for field in candidate.form_schema.fields:
+                optionless_choice = (
+                    field.control_type.casefold() in {"select", "combobox"}
+                    and not field.options
+                    and not (field.observed_value or "").strip()
+                )
+                migrated_fields.append(
+                    field.model_copy(
+                        update={
+                            "required": field.required
+                            if required_count <= 1
+                            else False,
+                            "validation_messages": [
+                                *field.validation_messages,
+                                *([] if optionless_choice else ["rehearsal:include"]),
+                            ],
+                        }
+                    )
+                )
             candidate = candidate.model_copy(
                 update={
                     "form_schema": candidate.form_schema.model_copy(
-                        update={
-                            "fields": [
-                                field.model_copy(
-                                    update={
-                                        "required": field.required
-                                        if required_count <= 1
-                                        else False,
-                                        "validation_messages": [
-                                            *field.validation_messages,
-                                            "rehearsal:include",
-                                        ],
-                                    }
-                                )
-                                for field in candidate.form_schema.fields
-                            ]
-                        }
+                        update={"fields": migrated_fields}
                     )
                 }
             )
@@ -1223,26 +1415,43 @@ class RehearseMixin:
                     # ``verified``/``outcome_target`` and made planning reject
                     # every otherwise successful isolated creation rehearsal.
                     candidate = witnessed
-                if witnessed is not None and rehearsal_operations_used and candidate.form_schema:
+                if witnessed is not None and candidate.form_schema:
                     # Promote controls proven necessary by the live validation
                     # loop into the capability contract. Production will then
                     # compile the same observed dependency sequence instead of
-                    # reverting to the initial shallow schema.
+                    # reverting to the initial shallow schema. Seed from the
+                    # initial hydrated fill as well as recovery so a first-pass
+                    # success still persists SELECT_OPTION choices (required comboboxes).
+                    promote_operations = [
+                        *operations,
+                        *rehearsal_operations_used,
+                    ]
                     fields = list(candidate.form_schema.fields)
-                    for operation in rehearsal_operations_used:
+
+                    def _compact_field_key(value: str) -> str:
+                        return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+                    for operation in promote_operations:
                         target = operation.target
                         if target is None or operation.kind is OperationKind.CHECK:
                             continue
+                        target_key = _compact_field_key(target.name)
                         match = next(
                             (
                                 field
                                 for field in fields
                                 if field.selector == target.selector
                                 or field.name.casefold() == target.name.casefold()
+                                or _compact_field_key(field.name) == target_key
                             ),
                             None,
                         )
                         if match is not None:
+                            if (
+                                operation.kind is OperationKind.SELECT_OPTION
+                                and not operation.value
+                            ):
+                                continue
                             options = list(match.options)
                             if (
                                 operation.kind is OperationKind.SELECT_OPTION
@@ -1250,18 +1459,36 @@ class RehearseMixin:
                                 and str(operation.value) not in options
                             ):
                                 options.append(str(operation.value))
+                            explicitly_optional = "optional" in match.name.casefold() or (
+                                "not required" in match.name.casefold()
+                            )
                             fields[fields.index(match)] = match.model_copy(
                                 update={
-                                    "required": match.required
-                                    or operation.kind
-                                    in {
-                                        OperationKind.FILL_TEXT,
-                                        OperationKind.FILL_EMAIL,
-                                        OperationKind.FILL_PHONE,
-                                        OperationKind.SELECT_DATE,
-                                    }
-                                    or "*" in target.name,
+                                    "required": (
+                                        False
+                                        if explicitly_optional
+                                        else match.required
+                                        or operation.kind
+                                        in {
+                                            OperationKind.FILL_TEXT,
+                                            OperationKind.FILL_EMAIL,
+                                            OperationKind.FILL_PHONE,
+                                            OperationKind.SELECT_DATE,
+                                            OperationKind.SELECT_OPTION,
+                                        }
+                                        or "*" in target.name
+                                    ),
                                     "options": options,
+                                    "observed_value": (
+                                        str(operation.value)
+                                        if operation.kind
+                                        in {
+                                            OperationKind.SELECT_OPTION,
+                                            OperationKind.SELECT_DATE,
+                                        }
+                                        and operation.value is not None
+                                        else match.observed_value
+                                    ),
                                     "selector": _normalise_observed_selector(
                                         match.selector or target.selector
                                     ),
@@ -1278,6 +1505,11 @@ class RehearseMixin:
                             OperationKind.SELECT_DATE,
                             OperationKind.SELECT_OPTION,
                         }:
+                            if (
+                                operation.kind is OperationKind.SELECT_OPTION
+                                and not operation.value
+                            ):
+                                continue
                             fields.append(
                                 FormField(
                                     name=target.name,
@@ -1297,19 +1529,49 @@ class RehearseMixin:
                                         OperationKind.FILL_EMAIL,
                                         OperationKind.FILL_PHONE,
                                         OperationKind.SELECT_DATE,
+                                        OperationKind.SELECT_OPTION,
                                     },
                                     options=[str(operation.value)]
                                     if operation.kind is OperationKind.SELECT_OPTION
                                     and operation.value
                                     else [],
+                                    observed_value=(
+                                        str(operation.value)
+                                        if operation.value is not None
+                                        else None
+                                    ),
                                     confidence=0.8,
                                     validation_messages=["rehearsal:include"],
                                 )
                             )
+                    # Drop hollow include markers left on optionless comboboxes
+                    # that were never selected in this rehearsal. Keeping them
+                    # blocked certify after an otherwise verified submit.
+                    cleaned: list[FormField] = []
+                    for field in fields:
+                        if (
+                            field.control_type.casefold() in {"select", "combobox"}
+                            and not field.options
+                            and not (field.observed_value or "").strip()
+                            and "rehearsal:include" in field.validation_messages
+                        ):
+                            cleaned.append(
+                                field.model_copy(
+                                    update={
+                                        "validation_messages": [
+                                            message
+                                            for message in field.validation_messages
+                                            if message != "rehearsal:include"
+                                        ]
+                                    }
+                                )
+                            )
+                        else:
+                            cleaned.append(field)
                     candidate = candidate.model_copy(
                         update={
                             "form_schema": candidate.form_schema.model_copy(
-                                update={"fields": fields}
+                                update={"fields": cleaned}
                             )
                         }
                     )
@@ -1357,5 +1619,6 @@ class RehearseMixin:
         )
         artifacts.write_json("discovery/capabilities.json", updated)
         artifacts.write_json("discovery/product-context.json", context.model_dump(mode="json"))
+        _write_certified_workflow(artifacts, candidate, run_id=run_id)
         return context
 

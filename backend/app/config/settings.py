@@ -30,6 +30,7 @@ _PROVIDER_ENV_NAMES = {
     "PRODUCTLENS_S3_REGION",
     "PRODUCTLENS_DATABASE_URL",
     "PRODUCTLENS_DATABASE",
+    "OPENROUTER_STRUCTURED_TIMEOUT_SECONDS",
     "PRODUCTLENS_CLOUD_CAPTURE_TIMEOUT_SECONDS",
     "BROWSERBASE_SESSION_TIMEOUT_SECONDS",
 }
@@ -123,6 +124,7 @@ class Settings:
     cloud_capture_timeout_seconds: int
     browserbase_session_timeout_seconds: int
     stagehand_observe_timeout_seconds: float
+    repair_wall_clock_budget_seconds: int
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -152,9 +154,9 @@ class Settings:
             database_url=database_url,
             openrouter_api_key=_setting_value("OPENROUTER_API_KEY", project_environment),
             openrouter_model=_setting_value(
-                "OPENROUTER_MODEL", project_environment, "openrouter/free"
+                "OPENROUTER_MODEL", project_environment, "google/gemini-2.5-flash"
             )
-            or "openrouter/free",
+            or "google/gemini-2.5-flash",
             openrouter_vision_model=_setting_value("OPENROUTER_VISION_MODEL", project_environment),
             multimodal_review_enabled=_boolean_setting(
                 _setting_value("PRODUCTLENS_MULTIMODAL_REVIEW_ENABLED", project_environment),
@@ -225,5 +227,14 @@ class Settings:
                 default=105.0,
                 minimum=30.0,
                 maximum=180.0,
+            ),
+            repair_wall_clock_budget_seconds=_bounded_int(
+                _setting_value(
+                    "PRODUCTLENS_REPAIR_WALL_CLOCK_BUDGET_SECONDS",
+                    project_environment,
+                ),
+                default=3600,
+                minimum=60,
+                maximum=21_600,
             ),
         )

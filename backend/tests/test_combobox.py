@@ -26,6 +26,20 @@ def test_accessible_combobox_is_a_typed_form_field_and_requires_an_observed_choi
     assert operation.value == "North"
 
 
+def test_combobox_without_observed_value_picks_deterministic_safe_option():
+    operation = _operation_for(
+        FormField(
+            name="Source",
+            selector="label:Source",
+            control_type="combobox",
+            options=["Website", "Referral", "Campaign"],
+        ),
+        "https://example.test/form",
+    )
+    assert operation.kind is OperationKind.SELECT_OPTION
+    assert operation.value == "Campaign"
+
+
 class _Option:
     def __init__(self) -> None:
         self.clicked = False

@@ -16,7 +16,18 @@ def order_form_fields(fields: list[FormField] | tuple[FormField, ...]) -> list[F
     dependencies and cycles fail closed instead of guessing an action order.
     """
 
-    ordered = list(fields)
+    indexed = list(enumerate(fields))
+    ordered = [
+        field
+        for _index, field in sorted(
+            indexed,
+            key=lambda item: (
+                item[1].geometry_y is None,
+                item[1].geometry_y if item[1].geometry_y is not None else float(item[0]),
+                item[0],
+            ),
+        )
+    ]
     by_name = {field.name.casefold(): field for field in ordered}
     position = {field.name.casefold(): index for index, field in enumerate(ordered)}
     for field in ordered:

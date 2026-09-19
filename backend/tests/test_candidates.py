@@ -555,16 +555,16 @@ def test_visual_editor_does_not_fabricate_connectors_without_observed_geometry()
         and isinstance(operation.value, dict)
         and operation.value.get("pattern") == "connector_segment"
     ]
-    # Explicitly requested labels are a generic composition intent. The
-    # planner derives their layout from the observed canvas at execution time
-    # and does not embed an editor/route-specific adapter.
-    assert len(connectors) == 2
+    # Labels and an arrow tool do not prove component geometry. The planner
+    # must not claim connected architecture until a shape/component affordance
+    # has been observed and can anchor semantic connector endpoints.
+    assert connectors == []
     assert sum(
         operation.kind is OperationKind.KEY_PRESS
         and isinstance(operation.value, dict)
         and operation.value.get("text") in {"client", "API", "database"}
         for operation in proposal.steps
-    ) == 3
+    ) == 0
 
 
 def test_candidate_scope_rejects_action_from_a_page_that_is_no_longer_active():

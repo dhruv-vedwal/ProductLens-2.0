@@ -108,4 +108,5 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
         speech_provider=speech,
         url_generator=generator,
         artifact_storage=artifact_storage,
+        repair_wall_clock_budget_seconds=settings.repair_wall_clock_budget_seconds,
     )

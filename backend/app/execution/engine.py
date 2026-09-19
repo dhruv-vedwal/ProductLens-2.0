@@ -18,25 +18,40 @@ from app.contracts.models import (
     ActionAttempt,
     ActionIntent,
     Affordance,
+    ControlDescriptor,
     DemoPlan,
     DemoTrace,
+    DiagramConnector,
+    DiagramNode,
+    DiagramState,
     FailureCode,
     InteractionEvent,
+    InteractionIntent,
     InteractionRecoveryDecision,
     InteractionSnapshot,
     OperationKind,
     OutcomeVerification,
+    PageState,
     Postcondition,
     ReplanDecision,
     SemanticOperation,
+    SurfaceState,
     Target,
     VerificationResult,
     WorkflowState,
     WorkflowStep,
 )
+from app.evaluation.witnesses import specific_entity_fields
 from app.execution.playwright_adapter import GroundingError, PlaywrightAdapter
 from app.execution.state_diff import state_delta
 from app.interaction import InteractionDirector, InteractionKernel
+from app.interaction.adapters import BehaviorAdapterRegistry
+from app.interaction.state import (
+    descriptor_from_observation,
+    page_state_fingerprint,
+    reconcile_page_states,
+    route_identity,
+)
 
 
 class VerificationError(RuntimeError):
@@ -201,6 +216,8 @@ class ExecutionEngine:
             objective=trace.objective,
         )
         self.interaction_director = InteractionDirector(self.interaction_kernel)
+        self.behavior_adapters = BehaviorAdapterRegistry()
+        self._registered_interaction_intents: set[str] = set()
 
     def _persist_interaction_trace(self, *, complete: bool = False) -> None:
         """Write the canonical provider-neutral interaction trace when possible."""
@@ -263,6 +280,13 @@ class ExecutionEngine:
                 safe_item = dict(item)
                 if "name" in safe_item:
                     safe_item["name"] = _redact_runtime_text(str(safe_item["name"]))[:240]
+                if "value" in safe_item:
+                    safe_item["value"] = (
+                        "[REDACTED]"
+                        if str(safe_item.get("type") or "").casefold()
+                        in {"password", "hidden"}
+                        else _redact_runtime_text(str(safe_item["value"]))[:500]
+                    )
                 safe_controls.append(safe_item)
             affordances: list[Affordance] = []
             for item in controls[:160]:
@@ -353,6 +377,88 @@ class ExecutionEngine:
                     screenshot_ref = None
             else:
                 accessibility_ref = None
+            page_surface = SurfaceState(
+                id=f"page:{route_identity(safe_url)}",
+                kind="page",
+                label=title,
+                visible=True,
+                blocking=False,
+                evidence_refs=["runtime:page-evidence"],
+            )
+            surfaces = [page_surface]
+            for overlay in evidence.get("overlays") or []:
+                if not isinstance(overlay, dict):
+                    continue
+                overlay_label = str(overlay.get("label") or overlay.get("role") or "overlay")[:240]
+                role = str(overlay.get("role") or "").casefold()
+                surfaces.append(
+                    SurfaceState(
+                        id=(
+                            f"surface:{role or 'overlay'}:"
+                            f"{re.sub(r'[^a-z0-9]+', '-', overlay_label.casefold()).strip('-')[:80]}"
+                        ),
+                        kind=(
+                            "modal"
+                            if role == "dialog"
+                            else "listbox"
+                            if role == "listbox"
+                            else "overlay"
+                        ),
+                        label=overlay_label,
+                        owner_id=page_surface.id,
+                        visible=True,
+                        blocking=bool(overlay.get("blocking", role == "dialog")),
+                        evidence_refs=["runtime:page-evidence"],
+                    )
+                )
+            descriptors = [
+                descriptor_from_observation(
+                    item,
+                    surface_id=page_surface.id,
+                    evidence_refs=["runtime:page-evidence", f"observation:{observation_index}"],
+                )
+                for item in safe_controls[:240]
+                if str(item.get("type") or "").casefold() not in {"password", "hidden"}
+            ]
+            focused_control_id = None
+            if focused_target is not None:
+                focused_control_id = next(
+                    (
+                        item.stable_id
+                        for item in descriptors
+                        if item.label.casefold() == focused_target.name.casefold()
+                    ),
+                    None,
+                )
+            page_state = PageState(
+                id=f"page-state:{observation_index}",
+                url=safe_url,
+                route_identity=route_identity(safe_url),
+                title=title,
+                viewport=viewport,
+                scroll=scroll,
+                ready=not bool(evidence.get("loading", False)),
+                loading=bool(evidence.get("loading", False)),
+                animating=bool(evidence.get("animating", False)),
+                focused_control_id=focused_control_id,
+                visual_surface=(
+                    "mixed"
+                    if isinstance(evidence.get("visualSurface"), dict)
+                    and evidence["visualSurface"].get("canvas")
+                    and evidence["visualSurface"].get("svg")
+                    else "canvas"
+                    if isinstance(evidence.get("visualSurface"), dict)
+                    and evidence["visualSurface"].get("canvas")
+                    else visual_surface
+                ),
+                surfaces=surfaces,
+                controls=descriptors,
+                screenshot_ref=screenshot_ref,
+                dom_snapshot_ref=dom_ref,
+                accessibility_snapshot_ref=accessibility_ref,
+                evidence_refs=["runtime:page-evidence", "runtime:view-state"],
+            )
+            page_state.fingerprint = page_state_fingerprint(page_state)
             observation = InteractionSnapshot(
                 url=safe_url,
                 title=title,
@@ -381,8 +487,11 @@ class ExecutionEngine:
                 ),
                 iframe_count=max(0, len(getattr(page, "frames", [])) - 1),
                 evidence_refs=["runtime:page-evidence", "runtime:view-state"],
+                fingerprint=page_state.fingerprint,
+                page_state=page_state,
             )
             self.interaction_director.observe(observation)
+            self.trace.behavioral_states.append(page_state)
             return observation
         except Exception:  # noqa: BLE001 - evidence must never mask browser truth
             return None
@@ -450,6 +559,220 @@ class ExecutionEngine:
         except ValueError:
             return None
 
+    def _select_grounded_operation(
+        self,
+        operation: SemanticOperation,
+        observation: InteractionSnapshot | None,
+    ) -> SemanticOperation:
+        """Select the current live affordance through the interaction kernel."""
+
+        if observation is None or operation.target is None:
+            return operation
+        if self._active_page() is None:
+            return operation
+        if operation.kind not in {
+            OperationKind.CLICK,
+            OperationKind.OPEN_NAVIGATION_ITEM,
+            OperationKind.OPEN_MODAL,
+            OperationKind.CLOSE_MODAL,
+            OperationKind.FILL_TEXT,
+            OperationKind.FILL_EMAIL,
+            OperationKind.FILL_PHONE,
+            OperationKind.SELECT_OPTION,
+            OperationKind.SELECT_DATE,
+            OperationKind.SELECT_DATE_RANGE,
+            OperationKind.CHECK,
+            OperationKind.UNCHECK,
+            OperationKind.CHOOSE_RADIO,
+            OperationKind.SEARCH,
+            OperationKind.APPLY_FILTER,
+            OperationKind.SUBMIT,
+            OperationKind.CREATE_RECORD,
+            OperationKind.UPLOAD,
+        }:
+            return operation
+
+        def normalized(value: str | None) -> str:
+            return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+        target_name = normalized(operation.target.label or operation.target.name)
+        target_selector = str(operation.target.selector or "")
+        matches = [
+            affordance
+            for affordance in observation.visible_affordances
+            if affordance.visible
+            and affordance.enabled
+            and (
+                (
+                    target_selector
+                    and affordance.target is not None
+                    and affordance.target.selector == target_selector
+                )
+                or normalized(affordance.label) == target_name
+                or (
+                    affordance.target is not None
+                    and normalized(affordance.target.name) == target_name
+                )
+            )
+        ]
+        if not matches:
+            # Affordances are advisory. Playwright remains the grounding
+            # authority when the live snapshot has not yet named the certified
+            # control, which is the normal case for lightweight test adapters
+            # and for first observation after a route change.
+            return operation
+        if operation.id not in self._registered_interaction_intents:
+            self.interaction_director.register_objective(
+                InteractionIntent(
+                    id=operation.id,
+                    objective=operation.intent,
+                    audience_value=f"Show verified progress toward {operation.intent}",
+                    safety_policy=(
+                        "authorized_mutation"
+                        if _is_non_replayable_operation(operation)
+                        else "read_only"
+                    ),
+                    required_outcomes=list(operation.postconditions),
+                )
+            )
+            self._registered_interaction_intents.add(operation.id)
+        rehearsal_proved = any(
+            "rehearsal" in reference.casefold() for reference in operation.evidence_refs
+        )
+        candidates = [
+            self.interaction_director.candidate_for_affordance(
+                intent_id=operation.id,
+                snapshot=observation,
+                affordance=affordance,
+                expected_outcomes=list(operation.postconditions),
+                preconditions=list(operation.preconditions),
+                value=operation.value,
+                safety_verified=(
+                    not _is_non_replayable_operation(operation) or rehearsal_proved
+                ),
+                rehearsal_required=(
+                    _is_non_replayable_operation(operation) and not rehearsal_proved
+                ),
+                side_effect_policy=(
+                    "authorized_mutation"
+                    if _is_non_replayable_operation(operation)
+                    else "read_only"
+                ),
+                goal=operation.intent,
+            )
+            for affordance in matches
+        ]
+        selected = self.interaction_director.select(candidates)
+        return operation.model_copy(
+            update={
+                "target": selected.action.target,
+                "evidence_refs": list(
+                    dict.fromkeys(
+                        [
+                            *operation.evidence_refs,
+                            *selected.action.evidence_refs,
+                            f"candidate:{selected.id}",
+                        ]
+                    )
+                ),
+            }
+        )
+
+    @staticmethod
+    def _descriptor_for_operation(
+        observation: InteractionSnapshot | None,
+        operation: SemanticOperation,
+    ) -> ControlDescriptor | None:
+        if observation is None or observation.page_state is None or operation.target is None:
+            return None
+        selector = str(operation.target.selector or "")
+        label = str(operation.target.label or operation.target.name).strip().casefold()
+        matches = [
+            descriptor
+            for descriptor in observation.page_state.controls
+            if (selector and selector in descriptor.selector_hints)
+            or descriptor.label.strip().casefold() == label
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _record_diagram_state(
+        self,
+        operation: SemanticOperation,
+        event: InteractionEvent,
+        action_result: object | None,
+    ) -> None:
+        if not isinstance(operation.value, dict) or not isinstance(action_result, dict):
+            return
+        changed = action_result.get("surface_changed")
+        surface_change = action_result.get("surface_change")
+        if changed is None and isinstance(surface_change, dict):
+            changed = surface_change.get("committed")
+        if changed is not True:
+            return
+        previous = self.trace.diagram_states[-1] if self.trace.diagram_states else DiagramState()
+        nodes = list(previous.nodes)
+        connectors = list(previous.connectors)
+        evidence_ref = event.screenshot_path or f"trace:event:{event.id}"
+        node_payload = operation.value.get("diagram_node")
+        if isinstance(node_payload, dict):
+            node = DiagramNode(
+                **node_payload,
+                visual_evidence_ref=evidence_ref,
+            )
+            nodes = [item for item in nodes if item.id != node.id]
+            nodes.append(node)
+        label_for = operation.value.get("diagram_label_for")
+        if isinstance(label_for, str):
+            nodes = [
+                item.model_copy(update={"label_evidence_ref": evidence_ref})
+                if item.id == label_for
+                else item
+                for item in nodes
+            ]
+        connector_payload = operation.value.get("diagram_connector")
+        if isinstance(connector_payload, dict):
+            node_ids = {item.id for item in nodes}
+            source = str(connector_payload.get("source_node_id") or "")
+            target = str(connector_payload.get("target_node_id") or "")
+            if source not in node_ids or target not in node_ids:
+                raise VerificationError(
+                    "Diagram connector endpoints are not verified component nodes"
+                )
+            connector = DiagramConnector(
+                id=str(connector_payload.get("id") or f"connector:{event.id}"),
+                source_node_id=source,
+                target_node_id=target,
+                kind=str(connector_payload.get("kind") or "directed"),
+                visual_evidence_ref=evidence_ref,
+            )
+            connectors = [item for item in connectors if item.id != connector.id]
+            connectors.append(connector)
+        labels_verified = bool(nodes) and all(item.label_evidence_ref for item in nodes)
+        node_ids = {item.id for item in nodes}
+        topology_verified = bool(connectors) and all(
+            item.source_node_id in node_ids and item.target_node_id in node_ids
+            for item in connectors
+        )
+        self.trace.diagram_states.append(
+            DiagramState(
+                surface_control_id=(
+                    operation.target.selector
+                    if operation.target and operation.target.selector
+                    else operation.target.name
+                    if operation.target
+                    else None
+                ),
+                nodes=nodes,
+                connectors=connectors,
+                labels_verified=labels_verified,
+                topology_verified=topology_verified,
+                screenshot_ref=event.screenshot_path,
+                evidence_refs=list(
+                    dict.fromkeys([*previous.evidence_refs, evidence_ref])
+                ),
+            )
+        )
+
     async def run(
         self, operation: SemanticOperation, *, next_state: WorkflowState | None = None
     ) -> InteractionEvent:
@@ -468,7 +791,7 @@ class ExecutionEngine:
         before_observation: InteractionSnapshot | None = None
         after_observation: InteractionSnapshot | None = None
         semantic_boundary: dict[str, object] | None = None
-        kernel_intent = self._action_intent_for_operation(operation)
+        kernel_intent: ActionIntent | None = None
         kernel_attempt: ActionAttempt | None = None
         # This is deliberately captured *before* the editorial reading hold.
         # ``occurred_at`` is the moment the verified state became visible; a
@@ -509,6 +832,8 @@ class ExecutionEngine:
                     # retry therefore re-grounds semantically, not by reusing an
                     # old coordinate or a cached element handle.
                     before_observation = await self._record_interaction_observation()
+                    operation = self._select_grounded_operation(operation, before_observation)
+                    kernel_intent = self._action_intent_for_operation(operation)
                     if kernel_intent is not None and before_observation is not None:
                         kernel_attempt = ActionAttempt(
                             intent=kernel_intent,
@@ -519,14 +844,63 @@ class ExecutionEngine:
                     if operation.kind is OperationKind.SCROLL_TO:
                         _, scroll_before = await self.adapter.view_state()
                     action_at = datetime.now(UTC)
-                    action_result = await self.adapter.execute(operation)
-                    if operation.kind in {
+                    descriptor = self._descriptor_for_operation(
+                        before_observation, operation
+                    )
+                    if descriptor is not None and operation.kind in {
+                        OperationKind.CLICK,
+                        OperationKind.OPEN_NAVIGATION_ITEM,
+                        OperationKind.OPEN_MODAL,
+                        OperationKind.CLOSE_MODAL,
                         OperationKind.FILL_TEXT,
+                        OperationKind.FILL_EMAIL,
                         OperationKind.FILL_PHONE,
                         OperationKind.SELECT_OPTION,
+                        OperationKind.SELECT_DATE,
+                        OperationKind.SELECT_DATE_RANGE,
+                        OperationKind.CHECK,
+                        OperationKind.UNCHECK,
+                        OperationKind.CHOOSE_RADIO,
+                        OperationKind.SEARCH,
+                        OperationKind.APPLY_FILTER,
+                        OperationKind.SUBMIT,
+                        OperationKind.CREATE_RECORD,
+                        OperationKind.POINTER_SEQUENCE,
+                        OperationKind.DRAG,
+                    }:
+                        action_result = await self.behavior_adapters.execute(
+                            operation, descriptor, self.adapter.execute
+                        )
+                    else:
+                        action_result = await self.adapter.execute(operation)
+                    if operation.kind in {
+                        OperationKind.FILL_TEXT,
+                        OperationKind.FILL_EMAIL,
+                        OperationKind.FILL_PHONE,
+                        OperationKind.SELECT_OPTION,
+                        OperationKind.SELECT_DATE,
                     }:
                         target_name = str(operation.target.name if operation.target else "")
                         value = str(operation.value or "").strip()
+                        # Synthetic fill values are sometimes applied inside the
+                        # adapter after planning left ``operation.value`` empty.
+                        # Prefer the live typing checkpoint so create-outcome
+                        # witnesses still retain the demonstrated identity.
+                        if not value and isinstance(action_result, dict):
+                            checkpoint = action_result.get("completed_value_checkpoint")
+                            if checkpoint in (None, "") and isinstance(
+                                action_result.get("selected"), str
+                            ):
+                                checkpoint = action_result.get("selected")
+                            value = str(checkpoint or "").strip()
+                        if not value:
+                            for condition in operation.postconditions:
+                                if condition.kind == "value" and condition.expected not in (
+                                    None,
+                                    "",
+                                ):
+                                    value = str(condition.expected).strip()
+                                    break
                         sensitive = re.search(
                             r"(?:password|passcode|secret|token|api[ _-]?key|otp|email)",
                             target_name,
@@ -541,6 +915,7 @@ class ExecutionEngine:
                         in {
                             "short_reversible_stroke",
                             "connector_segment",
+                            "shape_box",
                         }
                         and isinstance(action_result, dict)
                         and action_result.get("surface_changed") is False
@@ -641,6 +1016,7 @@ class ExecutionEngine:
                             # ``No deterministic grounding evidence`` failure.
                             if condition.kind == "url":
                                 visible_values: list[str] = []
+                                visible_fields: dict[str, str] = {}
                                 # A dynamic detail URL is not, by itself, proof
                                 # that the demonstrated form values reached the
                                 # resulting record. Require at least one
@@ -652,20 +1028,69 @@ class ExecutionEngine:
                                     readiness = getattr(self.adapter, "wait_for_page_readiness", None)
                                     if callable(readiness):
                                         await readiness(None)
-                                    body_text = await self._active_page().locator("body").inner_text()
-                                    visible_values = [
-                                        value
-                                        for value in self._non_sensitive_form_values.values()
-                                        if value.casefold() in body_text.casefold()
-                                    ]
-                                    if not visible_values:
-                                        raise VerificationError(
-                                            "Created record URL changed, but no demonstrated form value "
-                                            "is visible in the resulting state"
+
+                                    def _value_visible(candidate: str, body_fold: str, body_digits: str) -> bool:
+                                        cleaned = candidate.strip()
+                                        if not cleaned:
+                                            return False
+                                        if cleaned.casefold() in body_fold:
+                                            return True
+                                        # Phone/identity numbers are often
+                                        # reformatted on detail pages; compare
+                                        # digit spans when the demonstrated
+                                        # value is primarily numeric.
+                                        digits = re.sub(r"\D+", "", cleaned)
+                                        return bool(digits) and len(digits) >= 6 and digits in body_digits
+
+                                    has_explicit_entity_witness = any(
+                                        item.kind in {"text", "value", "visible"}
+                                        and item.target is not None
+                                        for item in operation.postconditions
+                                        if item is not condition
+                                    )
+                                    minimum_matches = 1 if has_explicit_entity_witness else 2
+                                    # Detail SPAs often paint chrome before the
+                                    # created entity fields hydrate. Poll the
+                                    # settled page (body text + input values)
+                                    # rather than rejecting on the first blank
+                                    # paint after navigation.
+                                    deadline = perf_counter() + max(
+                                        4.0, float(condition.timeout_ms or 5_000) / 1000.0
+                                    )
+                                    while True:
+                                        body_text = await self._active_page().evaluate(
+                                            """() => {
+                                              const chunks = [document.body ? (document.body.innerText || '') : ''];
+                                              for (const node of document.querySelectorAll(
+                                                'input, textarea, [contenteditable=\"true\"], [role=\"textbox\"], [role=\"combobox\"]'
+                                              )) {
+                                                chunks.push(String(node.value || node.textContent || ''));
+                                              }
+                                              return chunks.join('\\n');
+                                            }"""
                                         )
+                                        body_fold = str(body_text or "").casefold()
+                                        body_digits = re.sub(r"\D+", "", str(body_text or ""))
+                                        visible_fields = specific_entity_fields(
+                                            {
+                                                field: value
+                                                for field, value in self._non_sensitive_form_values.items()
+                                                if _value_visible(value, body_fold, body_digits)
+                                            }
+                                        )
+                                        visible_values = list(visible_fields.values())
+                                        if len(visible_fields) >= minimum_matches:
+                                            break
+                                        if perf_counter() >= deadline:
+                                            raise VerificationError(
+                                                "Created record URL changed, but the resulting state lacks "
+                                                "enough demonstrated entity fields"
+                                            )
+                                        await asyncio.sleep(0.35)
                                 verified_outcome = await self.adapter.snapshot(None)
                                 verified_outcome["expected_url"] = str(condition.expected)
                                 verified_outcome["matched_form_values"] = visible_values
+                                verified_outcome["matched_form_fields"] = visible_fields
                             else:
                                 snapshot_visible = getattr(self.adapter, "snapshot_visible", None)
                                 verified_outcome = (
@@ -715,11 +1140,20 @@ class ExecutionEngine:
                         raise
                     # A fresh production context can have a safe, dismissible
                     # dialog layered over the discovered page (for example a
-                    # branch chooser).  Clear only that semantic overlay, then
-                    # re-ground the same target; the recovery is attached to
-                    # the scene event so it remains auditable.
+                    # branch chooser). Dismiss only when the requested target
+                    # is outside that overlay. Cancelling an in-progress form
+                    # dialog would hide the control we are trying to use.
+                    overlay_blocks_target = False
+                    if callable(blocking_overlay):
+                        overlay_blocks_target = bool(
+                            await blocking_overlay(operation.target)
+                        )
                     dismiss = getattr(self.adapter, "dismiss_safe_overlay", None)
-                    if callable(dismiss) and await dismiss():
+                    if (
+                        overlay_blocks_target
+                        and callable(dismiss)
+                        and await dismiss()
+                    ):
                         recovery.append(
                             {"strategy": "dismiss_safe_overlay", "reason": str(error)[:500]}
                         )
@@ -756,6 +1190,19 @@ class ExecutionEngine:
             if semantic_boundary is not None:
                 after["semantic_boundary"] = semantic_boundary
             after_observation = await self._record_interaction_observation()
+            if (
+                before_observation is not None
+                and before_observation.page_state is not None
+                and after_observation is not None
+                and after_observation.page_state is not None
+            ):
+                self.trace.state_transitions.append(
+                    reconcile_page_states(
+                        before_observation.page_state,
+                        after_observation.page_state,
+                        action_intent_id=operation.id,
+                    )
+                )
             if kernel_attempt is not None:
                 kernel_attempt.dispatched = action_at is not None
                 kernel_attempt.completed_at = datetime.now(UTC)
@@ -873,6 +1320,18 @@ class ExecutionEngine:
                 # reproduce a real drag/path rather than drawing a decorative
                 # cursor jump from the source screenshot.
                 event.after["gesture"] = action_result
+            if isinstance(action_result, dict) and operation.kind in {
+                OperationKind.FILL_TEXT,
+                OperationKind.FILL_EMAIL,
+                OperationKind.FILL_PHONE,
+                OperationKind.SELECT_OPTION,
+                OperationKind.SELECT_DATE,
+                OperationKind.SELECT_DATE_RANGE,
+                OperationKind.CHECK,
+                OperationKind.UNCHECK,
+                OperationKind.CHOOSE_RADIO,
+            } or isinstance(action_result, dict) and action_result.get("behavior_adapter"):
+                event.after["interaction_evidence"] = action_result
             # Production may turn off routine per-event screenshots for a
             # lightweight rehearsal, but an authorised mutation with a
             # viewer-facing visible postcondition is never optional evidence.
@@ -889,6 +1348,7 @@ class ExecutionEngine:
                 screenshot = self.artifacts.screenshot_path(len(self.trace.events) + 1)
                 await self._active_page().screenshot(path=str(screenshot), full_page=False)
                 event.screenshot_path = str(screenshot.relative_to(self.artifacts.root))
+            self._record_diagram_state(operation, event, action_result)
             self.trace.events.append(event)
             # Keep a compact page-state index on the trace in addition to the
             # full Playwright trace.  Presentation and QA can therefore reason

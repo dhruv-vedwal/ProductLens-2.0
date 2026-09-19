@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "status": "historical_diagnostics_not_accepted",
+  "note": "These runs produced green delivery reports without entity-specific, multimodal, or diagram proof. Keep traces for regression, never as MVP goldens.",
+  "runs": [
+    {
+      "run_id": "8c578338",
+      "scenario": "SmartSevak Lead",
+      "reasons": [
+        "URL change plus a weak non-unique visible value was treated as creation proof",
+        "multimodal review JSONDecodeError was treated as complete"
+      ]
+    },
+    {
+      "run_id": "5d5cbb1d",
+      "scenario": "SmartSevak Booking",
+      "reasons": [
+        "booking accepted without an observed available-slot selection witness"
+      ]
+    },
+    {
+      "run_id": "90837ff3",
+      "scenario": "Excalidraw Chat Architecture",
+      "reasons": [
+        "unresolved overlay recovery",
+        "native-scale-only framing",
+        "weak visual samples without verified labels and connectors"
+      ]
+    }
+  ]
+}

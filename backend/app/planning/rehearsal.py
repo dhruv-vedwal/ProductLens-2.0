@@ -103,6 +103,17 @@ def select_rehearsal_capability(
             or (capability.verified and capability.outcome_target is not None)
         )
     ]
+    # Sibling artifact forms that share an entity noun (templates, imports)
+    # are not create-record surfaces unless the request names them.
+    artifact_terms = {"template", "templates", "import", "imports", "integration"}
+    if not (requested & artifact_terms):
+        eligible = [
+            capability
+            for capability in eligible
+            if not (
+                _words(f"{capability.purpose} {capability.source_url}") & artifact_terms
+            )
+        ]
     # Older/public callers may explicitly authorise one isolated safe record
     # without naming its entity.  A unique fully observed form is then the
     # only non-guessing choice; multiple forms remain an ambiguity failure.

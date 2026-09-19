@@ -1,7 +1,11 @@
 import pytest
 
 from app.contracts.models import OperationKind, SemanticOperation, Target
-from app.execution.playwright_adapter import PlaywrightAdapter
+from app.execution.playwright_adapter import (
+    PlaywrightAdapter,
+    _canonical_date,
+    _visible_date_keystrokes,
+)
 
 
 class _TypingLocator:
@@ -45,5 +49,12 @@ async def test_all_text_controls_use_visible_typing_even_when_a_test_id_is_prese
         ("click", None),
         ("press", "ControlOrMeta+A"),
         ("press", "Backspace"),
-        ("press_sequentially", ("Maya Shah", 70)),
+        ("press_sequentially", ("Maya", 70)),
+        ("press_sequentially", (" Shah", 70)),
     ]
+
+
+def test_date_keystrokes_keep_iso_and_locale_visible_forms():
+    assert _canonical_date("2026-09-15") == "2026-09-15"
+    assert _canonical_date("09/15/2026") == "2026-09-15"
+    assert "09152026" in _visible_date_keystrokes("2026-09-15")
