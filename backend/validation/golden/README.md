@@ -1,8 +1,7 @@
-# Golden evidence fixtures
+# Moved
 
-These provider-neutral fixtures are the regression contract for the execution
-and presentation layers. They intentionally contain no product route or
-choreography. Tests validate that a trace with semantic navigation, continuous
-scroll witnesses, geometry, native browser scale, and a verified outcome stays
-compatible with the typed contracts and presentation QA. Rendered golden media
-is generated in CI from this trace; binary artifacts are not committed.
+Golden fixture purpose is documented in the root [README.md](../../../README.md)
+under *Verification commands → Golden fixtures*.
+
+These directories remain the provider-neutral regression contract for execution and
+presentation; binary golden media is not committed.
