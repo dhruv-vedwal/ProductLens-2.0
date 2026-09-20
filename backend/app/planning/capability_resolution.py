@@ -85,9 +85,37 @@ def _required_kinds(intent: str) -> list[str]:
         required.append("shadow_dom")
     if words & {"grid", "table", "rows", "records"}:
         required.append("table")
-    if words & {"draw", "whiteboard", "shape", "sketch", "paint"}:
+    visual_request = bool(
+        words
+        & {
+            "draw",
+            "drawing",
+            "design",
+            "diagram",
+            "architecture",
+            "whiteboard",
+            "shape",
+            "sketch",
+            "paint",
+        }
+    )
+    if visual_request:
+        # “Create” in a visual objective means create an artifact, not submit
+        # a form. Keep form as a requirement only when explicit form language
+        # is also present in the request.
+        required = [kind for kind in required if kind != "form"]
+    if words & {"draw", "whiteboard", "shape", "sketch", "paint", "architecture"}:
         required.extend(["canvas", "pointer"])
-    if words & {"node", "graph", "workflow", "connect", "edge"}:
+    if words & {
+        "node",
+        "graph",
+        "workflow",
+        "connect",
+        "edge",
+        "edges",
+        "arrow",
+        "arrows",
+    }:
         required.extend(["graph", "drag_drop"])
     return list(dict.fromkeys(required)) or ["inspect"]
 

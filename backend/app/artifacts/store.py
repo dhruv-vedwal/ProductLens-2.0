@@ -197,6 +197,22 @@ class RunArtifacts:
                 time.sleep(0.05 * (attempt + 1))
         return path
 
+    def write_text(self, relative_path: str, value: str) -> Path:
+        """Atomically write a UTF-8 text artifact (for JSONL/audit streams)."""
+        path = self.root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        temporary.write_text(value, encoding="utf-8")
+        for attempt in range(4):
+            try:
+                temporary.replace(path)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        return path
+
     def save_trace(self, trace: DemoTrace) -> Path:
         trace = materialize_trace_lifecycle(trace)
         self.write_json(

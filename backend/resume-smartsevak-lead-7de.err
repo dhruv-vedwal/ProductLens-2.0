@@ -1,0 +1,37 @@
+Traceback (most recent call last):
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\services\generation\rehearse.py", line 798, in rehearsal_stage
+    candidate = select_rehearsal_capability(context, capabilities)
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\planning\rehearsal.py", line 165, in select_rehearsal_capability
+    raise CapabilitySelectionError(f"ambiguous form capability sources: {sources}")
+app.planning.rehearsal.CapabilitySelectionError: ambiguous form capability sources: https://dashboard.smartsevak.com/contactManagement/customers, https://dashboard.smartsevak.com/leads-v3?view=list&src=live&filters=%7B%22startDate%22%3A%222026-08-20%22%2C%22endDate%22%3A%222026-09-19%22%2C%22leadStatus%22%3A%22open%22%7D&page=1&limit=50&lck=leadIndex%3Aorg%3A64d347f139dfe4b8f1a60cab%3Aresult%3Af9a725fbceb5fa213a4c20c754b3c6c09c449eec&sf=lastUpdatedAt&sd=desc
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\scripts\resume_run.py", line 116, in <module>
+    asyncio.run(resume(parse_args()))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\vedwa\AppData\Local\Programs\Python\Python314\Lib\asyncio\runners.py", line 205, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Users\vedwa\AppData\Local\Programs\Python\Python314\Lib\asyncio\runners.py", line 128, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\vedwa\AppData\Local\Programs\Python\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\scripts\resume_run.py", line 102, in resume
+    await service.run_url_stage(args.run_id, stage, payload=payload)
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\services\jobs.py", line 639, in run_url_stage
+    await self._run_url_stage_impl(run_id, stage, payload=payload)
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\services\jobs.py", line 827, in _run_url_stage_impl
+    await self.url_generator.rehearsal_stage(
+    ...<7 lines>...
+    )
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\services\generation\rehearse.py", line 800, in rehearsal_stage
+    raise GenerationPreconditionError(
+        f"REHEARSAL_CAPABILITY_UNAVAILABLE: {error}"
+    ) from error
+app.services.generation.render.GenerationPreconditionError: REHEARSAL_CAPABILITY_UNAVAILABLE: ambiguous form capability sources: https://dashboard.smartsevak.com/contactManagement/customers, https://dashboard.smartsevak.com/leads-v3?view=list&src=live&filters=%7B%22startDate%22%3A%222026-08-20%22%2C%22endDate%22%3A%222026-09-19%22%2C%22leadStatus%22%3A%22open%22%7D&page=1&limit=50&lck=leadIndex%3Aorg%3A64d347f139dfe4b8f1a60cab%3Aresult%3Af9a725fbceb5fa213a4c20c754b3c6c09c449eec&sf=lastUpdatedAt&sd=desc

@@ -267,7 +267,30 @@ class GroundingMixin:
                 if requirement != specification.primary_entity
             )
         )
-        if primary_words and not primary_grounded and not broad_walkthrough_grounded:
+        # For an action-led visual objective, the named artifact is the
+        # output to create (for example, a chat architecture diagram), not a
+        # noun that must already be present in the opening DOM.  Requiring
+        # that phrase to be visible would reject unfamiliar canvas/graph
+        # editors before the agent can create it.  The selected surface,
+        # tools, and post-action topology remain evidence-grounded below.
+        visual_artifact_objective = bool(
+            re.search(
+                r"\b(?:create|build|draw|design|make|edit|sketch)\b",
+                specification.raw,
+                re.IGNORECASE,
+            )
+            and re.search(
+                r"\b(?:diagram|architecture|whiteboard|canvas|drawing|flowchart|graph)\b",
+                specification.raw,
+                re.IGNORECASE,
+            )
+        )
+        if (
+            primary_words
+            and not primary_grounded
+            and not broad_walkthrough_grounded
+            and not visual_artifact_objective
+        ):
             raise PlanningValidationError(
                 f"requested entity is not grounded by the selected candidate: {specification.primary_entity}"
             )
@@ -279,6 +302,29 @@ class GroundingMixin:
             ):
                 continue
             required_words = vocabulary(required)
+            # Results requested by an action-led visual objective are
+            # intentionally absent from the opening page.  For example,
+            # “completed design” is the post-action canvas state that
+            # execution must create and verify, not content discovery should
+            # expect to find before any drawing occurs.  Keep this exception
+            # narrow to result-state language and only when the objective has
+            # already established a visual artifact workflow above.
+            result_state_words = {
+                "completed",
+                "created",
+                "configured",
+                "connected",
+                "drawn",
+                "filled",
+                "generated",
+                "resulting",
+                "saved",
+                "selected",
+                "submitted",
+                "updated",
+            }
+            if visual_artifact_objective and required_words & result_state_words:
+                continue
             # Objective-understanding models sometimes promote an explanatory
             # sentence (for example, "what the product helps a learner plan
             # and track") into ``must_show``.  That is a story intent, not a

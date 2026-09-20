@@ -120,7 +120,7 @@ async def run_forever(poll_seconds: float = 0.75) -> None:
                     # The local mode consumes the same persisted stage queue as
                     # Dramatiq; it never falls back to FastAPI background tasks.
                     continue
-                if job["kind"] == "url":
+                if job["kind"] in {"url", "interaction"}:
                     # URL jobs use the identical durable stage pipeline as broker
                     # workers.  The root claim must enqueue the first stage;
                     # discarding it leaves production runs stuck in QUEUED.

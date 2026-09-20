@@ -4,6 +4,7 @@ import os
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -138,8 +139,42 @@ class EnvironmentCredentialService:
         reference: str | None,
         *,
         action_observer: Callable[[str, str, str, str], Awaitable[None]] | None = None,
+        captcha_event_observer: Callable[[dict[str, str]], None] | None = None,
     ) -> bool:
         """Authenticate and optionally report redacted login UI actions."""
+        # Browserbase emits these provider-neutral console markers when its
+        # CAPTCHA service detects and completes a supported challenge. Keep
+        # only the marker and timestamp; console payloads can contain page or
+        # credential data and must never enter ProductLens artifacts.
+        captured_captcha_events: list[dict[str, str]] = []
+        if captcha_event_observer is not None:
+            def _capture_captcha_event(message: Any) -> None:
+                text = str(getattr(message, "text", "") or "").strip()
+                if text in {"browserbase-solving-started", "browserbase-solving-finished"}:
+                    event = {"event": text, "captured_at": datetime.now(UTC).isoformat()}
+                    captured_captcha_events.append(event)
+                    captcha_event_observer(event)
+
+            try:
+                page.on("console", _capture_captcha_event)
+            except (AttributeError, TypeError, PlaywrightError):
+                # Some test adapters and non-Playwright pages do not expose
+                # console events. Authentication remains valid; observability
+                # is best effort and never changes the dispatch path.
+                pass
+
+        async def _captcha_is_present() -> bool:
+            try:
+                return (
+                    await page.locator(
+                        "iframe[src*='captcha' i], iframe[src*='challenge' i], "
+                        "[data-sitekey], [data-captcha], [class*='captcha' i], "
+                        "[id*='captcha' i]"
+                    ).count()
+                ) > 0
+            except (AttributeError, TypeError, PlaywrightError):
+                return False
+
         # Public products often keep a sign-in dialog/template in the DOM
         # while the visitor experience is already available.  Only a visible
         # password control is evidence that authentication is required; hidden
@@ -218,13 +253,48 @@ class EnvironmentCredentialService:
                     const r = el.getBoundingClientRect();
                     return !el.disabled && r.width > 0 && r.height > 0;
                 })""",
-                timeout=45_000,
+                # Browserbase emits a completion marker asynchronously. In
+                # the first instrumented SmartSevak run the solver took 81s,
+                # so a 45s UI timeout could fail while a supported challenge
+                # was still being solved. Keep this bounded, but allow the
+                # provider's solver event to complete before classifying the
+                # form as blocked.
+                timeout=120_000,
             )
         except PlaywrightError as error:
+            captcha_present = await _captcha_is_present()
+            event_names = {item["event"] for item in captured_captcha_events}
+            # A solver start marker is sufficient evidence when a challenge is
+            # temporarily hidden while its token is being computed.
+            solver_started = "browserbase-solving-started" in event_names
+            solver_finished = "browserbase-solving-finished" in event_names
             raise CredentialError(
                 "AUTH_CAPTCHA_UNSOLVED: login submit remained disabled after credential fill"
+                if (captcha_present or solver_started) and not solver_finished
+                else "AUTH_LOGIN_FORM_BLOCKED: login submit remained disabled after credential fill"
             ) from error
-        await submit.click()
+        try:
+            await submit.click()
+        except PlaywrightError as error:
+            # A CAPTCHA iframe can retain a transparent overlay for a short
+            # period after Browserbase reports solving-finished. If the DOM
+            # already reports an enabled submit control, a force click is a
+            # bounded semantic retry of the same login action—not a second
+            # mutation—and avoids waiting for an overlay that is no longer
+            # part of the form state.
+            solver_finished = "browserbase-solving-finished" in {
+                item["event"] for item in captured_captcha_events
+            }
+            if not solver_finished:
+                raise CredentialError(
+                    "AUTH_LOGIN_FORM_BLOCKED: login submit could not be activated"
+                ) from error
+            try:
+                await submit.click(force=True)
+            except PlaywrightError as forced_error:
+                raise CredentialError(
+                    "AUTH_LOGIN_FORM_BLOCKED: login submit remained obstructed after CAPTCHA solving"
+                ) from forced_error
         if action_observer is not None:
             await action_observer(
                 "auth:submit", "Submit", "Sign in", 'button[type="submit"], input[type="submit"]'
@@ -246,9 +316,17 @@ class EnvironmentCredentialService:
                 ).count()
             except PlaywrightError:
                 captcha_count = 0
+            solver_finished = "browserbase-solving-finished" in {
+                item["event"] for item in captured_captcha_events
+            }
+            # A CAPTCHA iframe remains in the DOM after a successful solve,
+            # so its presence alone cannot explain an unchanged login state.
+            # Once Browserbase has emitted solving-finished, classify the
+            # remaining failure as an application/authentication transition
+            # problem instead of repeatedly blaming the provider.
             code = (
                 "AUTH_CAPTCHA_UNSOLVED_AFTER_SUBMIT"
-                if captcha_count
+                if captcha_count and not solver_finished
                 else "AUTH_LOGIN_STATE_UNCHANGED"
             )
             raise CredentialError(f"{code}: login did not reach an authenticated state") from error

@@ -1,0 +1,38 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\scripts\resume_run.py", line 116, in <module>
+    asyncio.run(resume(parse_args()))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\vedwa\AppData\Local\Programs\Python\Python314\Lib\asyncio\runners.py", line 205, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Users\vedwa\AppData\Local\Programs\Python\Python314\Lib\asyncio\runners.py", line 128, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\vedwa\AppData\Local\Programs\Python\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\scripts\resume_run.py", line 102, in resume
+    await service.run_url_stage(args.run_id, stage, payload=payload)
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\services\jobs.py", line 639, in run_url_stage
+    await self._run_url_stage_impl(run_id, stage, payload=payload)
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\services\jobs.py", line 860, in _run_url_stage_impl
+    trace = await self.url_generator.execute_stage(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\services\generation\execute.py", line 792, in execute_stage
+    result = await engine.run_adaptive(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<22 lines>...
+    )
+    ^
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\execution\engine.py", line 1455, in run_adaptive
+    await self.run(step.operation, next_state=step.to_state)
+  File "F:\Productlens_2.0\ProductLensAI 2.0\backend\app\execution\engine.py", line 923, in run
+    raise VerificationError(
+        "Drawing gesture produced no observable change on the grounded surface"
+    )
+app.execution.engine.VerificationError: Drawing gesture produced no observable change on the grounded surface

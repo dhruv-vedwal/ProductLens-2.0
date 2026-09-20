@@ -138,6 +138,45 @@ def test_cloud_discovery_resolution_uses_capability_only_for_unspecified_request
     assert resolve_cloud_discovery(True, browserbase_configured=False) is True
 
 
+def test_interaction_harness_endpoint_queues_trace_only_job(monkeypatch: pytest.MonkeyPatch):
+    client = TestClient(app)
+    headers, _ = account(client, f"harness-{uuid4().hex}@example.test")
+    monkeypatch.setattr(api_state, "dispatch_generation_job", lambda job_id: None)
+    response = client.post(
+        "/interaction-harness/runs",
+        headers=headers,
+        json={
+            "url": "https://example.test",
+            "objective": "Open the dashboard and verify the overview is visible",
+            "mode": "capability",
+            "cloud_browser": False,
+            "limits": {"max_steps": 8, "max_pages": 2},
+        },
+    )
+    assert response.status_code == 200
+    run_id = response.json()["run_id"]
+    job = repository.job_for_run(run_id)
+    assert job is not None
+    assert job["kind"] == "interaction"
+    assert job["payload"]["harness_mode"] == "capability"
+    result = client.get(f"/interaction-harness/runs/{run_id}", headers=headers)
+    assert result.status_code == 200
+    assert result.json()["result"] is None
+    duplicate = client.post(
+        "/interaction-harness/runs",
+        headers=headers,
+        json={
+            "url": "https://example.test",
+            "objective": "Open the dashboard and verify the overview is visible",
+            "mode": "capability",
+            "cloud_browser": False,
+            "limits": {"max_steps": 8, "max_pages": 2},
+        },
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["run_id"] == run_id
+
+
 def test_projects_and_runs_are_user_scoped():
     client = TestClient(app)
     alice_headers, alice = account(client, f"alice-{uuid4().hex}@example.test")

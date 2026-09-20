@@ -199,6 +199,14 @@ class DiscoverMixin:
                 for relation in candidate.supporting_relationships
                 if grounded_phrase(relation.source)
                 and grounded_phrase(relation.target)
+                # Pronoun references such as “the application supports them”
+                # are prose qualifiers, not product relationships. Keeping
+                # them would create an impossible setup/detail page
+                # requirement during planning.
+                and not (
+                    set(re.findall(r"[a-z0-9]{3,}", relation.source.casefold()))
+                    | set(re.findall(r"[a-z0-9]{3,}", relation.target.casefold()))
+                ) & {"it", "them", "this", "that", "these", "those"}
                 and explicitly_related(relation.source, relation.target)
             ]
             model_generic_entities = {
@@ -541,18 +549,26 @@ class DiscoverMixin:
                             page.goto(url, wait_until="domcontentloaded", timeout=30_000),
                             timeout=35,
                         )
+                        captcha_events: list[dict[str, str]] = []
+
+                        def observe_captcha_event(event: dict[str, str]) -> None:
+                            captcha_events.append(event)
+                            artifacts.write_json("discovery/captcha-events.json", captcha_events)
+
                         authenticated = await asyncio.wait_for(
                             self.credential_service.authenticate_if_required(
-                                page, credential_reference
+                                page,
+                                credential_reference,
+                                captcha_event_observer=observe_captcha_event,
                             ),
                             # Authentication deliberately includes sequential
-                            # typing, CAPTCHA enablement (up to 45 seconds),
+                            # typing, CAPTCHA enablement (up to 120 seconds),
                             # and a post-submit authenticated-state check.
                             # Keep the provider boundary finite, but leave
                             # enough room for those intentional phases and
                             # remote CDP latency so an otherwise valid login
                             # is not cancelled into an opaque TimeoutError.
-                            timeout=120,
+                            timeout=240,
                         )
                         # The exploration budget is a hard product-owned
                         # deadline; the Browserbase lease is only an outer
@@ -780,10 +796,12 @@ class DiscoverMixin:
             raise GenerationPreconditionError(
                 "AUTH_REQUIRED: credentials must be supplied through a secret reference"
             )
-        # Interaction objectives need at least one grounded form capability.
-        # Completing discovery on an unrelated landing shell and failing later
-        # in rehearsal hides the real blocker and skips the discovery retry
-        # boundary. Fail closed here so repairs re-explore.
+        # Interaction objectives need at least one grounded, executable
+        # interaction surface. A form is only one possible surface: canvas,
+        # graph, rich text, dialogs, keyboard controls, and custom controls
+        # must be allowed to establish their own evidence contract. Requiring
+        # a submit-capable form here made unfamiliar applications fail before
+        # the generic resolver could select their actual interaction model.
         interactive_terms = re.search(
             r"\b(create|add|fill|type|select|submit|draw|diagram|connect|drag|book|lead|workflow|automate)\b",
             objective.casefold(),
@@ -793,19 +811,40 @@ class DiscoverMixin:
             for item in product.capabilities
             if isinstance(item, dict) and item.get("kind") == "form" and item.get("submit_target")
         ]
-        if interactive_terms and not form_capabilities:
+        resolved_kinds = {
+            candidate.kind
+            for resolution in product.capability_resolutions
+            for candidate in resolution.candidates
+        }
+        observed_interaction_surface = bool(
+            form_capabilities
+            or resolved_kinds
+            & {
+                "canvas",
+                "graph",
+                "drag_drop",
+                "rich_text",
+                "modal",
+                "keyboard",
+                "pointer",
+                "navigate",
+                "form",
+                "virtualized_table",
+            }
+        )
+        if interactive_terms and not observed_interaction_surface:
             product = product.model_copy(
                 update={
                     "blockers": [
                         *product.blockers,
-                        "behavior_observation_required:no_submit_capable_form",
+                        "behavior_observation_required:no_executable_interaction_surface",
                     ]
                 }
             )
             artifacts.write_json("discovery/product-context.json", product.model_dump(mode="json"))
             artifacts.write_json("discovery/capabilities.json", product.capabilities)
             raise GenerationPreconditionError(
-                "BEHAVIOR_OBSERVATION_REQUIRED: no submit-capable form was grounded for an interaction objective"
+                "BEHAVIOR_OBSERVATION_REQUIRED: no executable interaction surface was grounded for an interaction objective"
             )
         behavioral_model = build_behavioral_product_model(product)
         product = product.model_copy(

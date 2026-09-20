@@ -45,6 +45,16 @@ from app.contracts.editorial import (
     NarrationSegment,
     PresentationPlan,
 )
+from app.contracts.harness import (
+    HarnessFailure,
+    HarnessFailureCode,
+    HarnessLimits,
+    HarnessMode,
+    HarnessOutcome,
+    HarnessStatus,
+    InteractionHarnessRequest,
+    InteractionHarnessResult,
+)
 from app.contracts.interaction import (
     ActionAttempt,
     ActionCandidate,
@@ -121,7 +131,15 @@ __all__ = [
     "FeatureKnowledge",
     "FormField",
     "FormSchema",
+    "HarnessFailure",
+    "HarnessFailureCode",
+    "HarnessLimits",
+    "HarnessMode",
+    "HarnessOutcome",
+    "HarnessStatus",
     "InteractionEvent",
+    "InteractionHarnessRequest",
+    "InteractionHarnessResult",
     "InteractionIntent",
     "InteractionRecoveryDecision",
     "InteractionSnapshot",

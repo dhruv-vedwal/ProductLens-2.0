@@ -113,8 +113,13 @@ def certify_rehearsed_capability(
     entity_fields = list(
         dict.fromkeys(field for outcome in outcomes for field in outcome.identity_fields)
     )
-    if len(entity_fields) < 2:
-        raise ValueError("certified creation workflow lacks two entity-specific witness fields")
+    # A witness is required, but the minimum is determined by the observed
+    # form rather than a hard-coded field count. Some valid products expose a
+    # single unique identifier (for example a phone number or ticket key),
+    # while richer forms provide multiple identity fields. Requiring two
+    # fields universally rejects otherwise verifiable generic workflows.
+    if not entity_fields:
+        raise ValueError("certified creation workflow lacks an entity-specific witness field")
     return CertifiedWorkflowGraph(
         product_fingerprint=fingerprint,
         objective=capability.purpose,

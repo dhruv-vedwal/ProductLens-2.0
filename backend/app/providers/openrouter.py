@@ -207,7 +207,17 @@ class OpenRouterVisualReviewer:
                 response_content = "".join(
                     str(part.get("text", "")) for part in response_content if isinstance(part, dict)
                 )
-            result = json.loads(str(response_content))
+            # Some OpenRouter-compatible models still wrap a valid JSON object
+            # in a markdown fence or a short preamble despite response_format.
+            # Parse the object conservatively instead of rejecting an otherwise
+            # usable visual review; never invent fields or repair malformed JSON.
+            raw_content = str(response_content).strip()
+            try:
+                result = json.loads(raw_content)
+            except json.JSONDecodeError:
+                fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_content, re.DOTALL | re.IGNORECASE)
+                candidate = fenced.group(1) if fenced else raw_content[raw_content.find("{") : raw_content.rfind("}") + 1]
+                result = json.loads(candidate)
             if not isinstance(result, dict):
                 raise TypeError("visual review did not return an object")
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:

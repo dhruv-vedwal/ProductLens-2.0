@@ -157,7 +157,11 @@ class CapabilityProbeMixin:
                 if schema.fields:
                     try:
                         schema = await asyncio.wait_for(
-                            self._enrich_choice_options(page, schema), timeout=35
+                            # Choice lists in dynamic applications may wait on
+                            # a network-backed dependency. Give the bounded
+                            # enrichment enough time to open the required
+                            # controls, while retaining a finite probe budget.
+                            self._enrich_choice_options(page, schema), timeout=90
                         )
                     except TimeoutError:
                         blockers.append(f"capability_probe_enrich_timeout:{item.name}")
@@ -179,7 +183,7 @@ class CapabilityProbeMixin:
                             )
                             if critical.fields:
                                 enriched_critical = await asyncio.wait_for(
-                                    self._enrich_choice_options(page, critical), timeout=30
+                                    self._enrich_choice_options(page, critical), timeout=60
                                 )
                                 options_by_name = {
                                     field.name.casefold(): field.options
@@ -237,7 +241,7 @@ class CapabilityProbeMixin:
                         if schema.fields:
                             try:
                                 schema = await asyncio.wait_for(
-                                    self._enrich_choice_options(page, schema), timeout=20
+                                    self._enrich_choice_options(page, schema), timeout=60
                                 )
                             except TimeoutError:
                                 blockers.append(

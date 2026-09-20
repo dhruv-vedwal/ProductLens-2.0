@@ -129,7 +129,7 @@ class CertifiedDemoScript(BaseModel):
     """The planning certificate shared by execution, narration, and QA."""
 
     schema_version: int = Field(default=1, ge=1)
-    outcomes: list[OutcomeSpec] = Field(min_length=1, max_length=60)
+    outcomes: list[OutcomeSpec] = Field(min_length=1, max_length=180)
     stop_conditions: list[str] = Field(min_length=1, max_length=24)
     minimum_duration_seconds: int = Field(ge=5, le=900)
     target_duration_seconds: int = Field(ge=5, le=900)
@@ -171,7 +171,7 @@ class CertifiedWorkflowGraph(BaseModel):
     objective: str = Field(min_length=3, max_length=500)
     start_state_id: str = Field(min_length=1, max_length=160)
     terminal_state_ids: list[str] = Field(min_length=1, max_length=32)
-    outcomes: list[OutcomeSpec] = Field(min_length=1, max_length=60)
+    outcomes: list[OutcomeSpec] = Field(min_length=1, max_length=180)
     edges: list[CertifiedWorkflowEdge] = Field(min_length=1, max_length=160)
     entity_witness_fields: list[str] = Field(default_factory=list, max_length=32)
     rehearsal_run_id: str = Field(min_length=1, max_length=160)
@@ -250,13 +250,13 @@ class WorkflowProposal(BaseModel):
 
     narrative_goal: str = Field(min_length=3, max_length=500)
     selected_workflow: str = Field(min_length=1, max_length=500)
-    # Editorial full walkthroughs legitimately need more than twenty semantic
-    # beats: Home content, then meaningful local exploration on each primary
-    # page. The bound still prevents unbounded crawling while allowing a
-    # two-to-three-minute story.
-    steps: list[SemanticOperation] = Field(min_length=1, max_length=60)
-    expected_outcomes: list[str] = Field(min_length=1, max_length=60)
-    important_elements: list[str] = Field(default_factory=list, max_length=60)
+    # Editorial walkthroughs and visual artifacts may require several
+    # evidence-backed beats per requested item (tool, gesture, label, and
+    # verification). Keep a finite ceiling to prevent crawler plans while
+    # allowing detailed diagrams and multi-step workflows.
+    steps: list[SemanticOperation] = Field(min_length=1, max_length=180)
+    expected_outcomes: list[str] = Field(min_length=1, max_length=180)
+    important_elements: list[str] = Field(default_factory=list, max_length=180)
     excluded_areas: list[str] = Field(default_factory=list, max_length=30)
     risk_flags: list[str] = Field(default_factory=list, max_length=30)
 

@@ -27,7 +27,7 @@ async def execute_generation_job(job_id: str) -> None:
     job = repository.claim_job(job_id)
     if job is None:
         return
-    if job["kind"] in {"fixture", "url"}:
+    if job["kind"] in {"fixture", "url", "interaction"}:
         next_stage = next(
             (
                 item["stage"]
@@ -102,6 +102,9 @@ async def execute_generation_stage(
     if job is None:
         repository.update_stage_job(run_id, stage, status="FAILED", error_code="ROOT_JOB_MISSING")
         return
+    if job["kind"] == "interaction" and stage not in {"DISCOVERY", "PLANNING", "EXECUTION"}:
+        repository.update_stage_job(run_id, stage, status="SKIPPED")
+        return
     try:
         if job["kind"] == "fixture":
             await jobs.run_fixture_stage(
@@ -110,7 +113,7 @@ async def execute_generation_stage(
                 gate=int(job["payload"]["gate"]),
                 render=bool(job["payload"]["render"]),
             )
-        elif job["kind"] == "url":
+        elif job["kind"] in {"url", "interaction"}:
             await jobs.run_url_stage(
                 run_id,
                 stage,
@@ -126,6 +129,10 @@ async def execute_generation_stage(
         repository.update_run(run_id, stage="FAILED", status="FAILED", error_code=code)
         repository.finish_job(job["id"], status="FAILED", error_code=code)
         raise
+    if job["kind"] == "interaction" and stage == "EXECUTION":
+        # The harness finalizer has already either completed or failed the
+        # root job and terminalized downstream presentation stages.
+        return
     if _finish_if_terminal(repository, run_id):
         return
     next_index = STAGES.index(stage) + 1

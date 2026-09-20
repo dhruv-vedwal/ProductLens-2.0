@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import re
 from typing import Any
 
 from app.contracts.models import DemoTrace, OperationKind, SemanticMoment
@@ -174,6 +175,13 @@ def sync_edl_from_moments(trace: DemoTrace) -> dict:
     moment_rows = []
     source_windows: list[dict[str, Any]] = []
     event_by_id = {event.id: event for event in trace.events}
+    visual_story = bool(
+        re.search(
+            r"\b(?:draw|drawing|diagram|architecture|whiteboard|canvas|flowchart|map)\b",
+            str(trace.objective or ""),
+            flags=re.IGNORECASE,
+        )
+    )
     for moment in trace.moments:
         events = [event_by_id[event_id] for event_id in moment.event_ids if event_id in event_by_id]
         protected_spans = []
@@ -207,6 +215,21 @@ def sync_edl_from_moments(trace: DemoTrace) -> dict:
                 OperationKind.UNCHECK,
                 OperationKind.CHOOSE_RADIO,
             }:
+                # Toolbar/tool-selection clicks in a visual editor are
+                # transitional beats. Preserve the visible click itself, but
+                # do not carry the remote DOM round-trip that follows it into
+                # the final cut; the next drawing/typing scene proves the
+                # resulting state.
+                if visual_story and event.kind is OperationKind.CLICK:
+                    protected_spans.append(
+                        {
+                            "event_id": event.id,
+                            "start_seconds": round(action_start, 3),
+                            "end_seconds": round(action_start + 0.95, 3),
+                            "reason": "visible-tool-selection",
+                        }
+                    )
+                    continue
                 # Keep the full native gesture through its visible result.
                 # ``duration_ms`` often includes post-result editorial holds and
                 # cloud round-trips; prefer action→reveal plus a short settle
@@ -262,10 +285,31 @@ def sync_edl_from_moments(trace: DemoTrace) -> dict:
                     "reason": reason,
                 }
             )
-        reading_hold = min(
-            8.0,
-            max(2.6, len(str(moment.viewer_value or "").split()) / 2.8 + 0.45),
+        # Dense visual editors produce many short, causal beats (choose a
+        # tool, draw, label, connect).  Holding every beat for the generic
+        # eight-second reading ceiling turns a human interaction into a long
+        # slideshow and can push a detailed but valid canvas story past its
+        # requested delivery envelope. Keep a compact, readable native hold
+        # for these gesture-heavy moments; form fields and ordinary page
+        # explanations retain the fuller editorial dwell.
+        visual_gesture = any(
+            event.kind
+            in {
+                OperationKind.POINTER_SEQUENCE,
+                OperationKind.KEY_PRESS,
+            }
+            for event in events
         )
+        if visual_gesture or visual_story:
+            reading_hold = min(
+                1.9,
+                max(1.55, len(str(moment.viewer_value or "").split()) / 7.0 + 0.2),
+            )
+        else:
+            reading_hold = min(
+                8.0,
+                max(2.6, len(str(moment.viewer_value or "").split()) / 2.8 + 0.45),
+            )
         interaction_start = min(
             (float(span["start_seconds"]) for span in protected_spans),
             default=seconds(moment.start_at),

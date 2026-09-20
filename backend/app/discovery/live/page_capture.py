@@ -353,7 +353,7 @@ class PageCaptureMixin:
             pending_choice_enrichment += 1
             try:
                 enriched_field = await asyncio.wait_for(
-                    self._enrich_one_choice_field(page, field), timeout=10
+                    self._enrich_one_choice_field(page, field), timeout=15
                 )
             except TimeoutError:
                 enriched.append(field)
@@ -376,8 +376,8 @@ class PageCaptureMixin:
             label = field.selector.removeprefix("label:").strip() or field.name
             locators.extend(
                 [
-                    page.get_by_role("combobox", name=re.compile(rf"^{re.escape(label)}$", re.I)),
-                    page.get_by_label(re.compile(rf"^{re.escape(label)}$", re.I)),
+                    page.get_by_role("combobox", name=re.compile(rf"^{re.escape(label)}$", re.IGNORECASE)),
+                    page.get_by_label(re.compile(rf"^{re.escape(label)}$", re.IGNORECASE)),
                     page.get_by_text(label, exact=True),
                 ]
             )
@@ -498,7 +498,10 @@ class PageCaptureMixin:
                 except PlaywrightError:
                     pass
             values: list[str] = []
-            for _attempt in range(10):
+            # Keep each reversible choice probe bounded. Six short observation
+            # passes are enough for a portal list to mount while preventing a
+            # dense form's optional selectors from starving the required ones.
+            for _attempt in range(6):
                 try:
                     await page.wait_for_selector(
                         "[role='listbox'], [role='option'], [role='menu']",
@@ -536,7 +539,7 @@ class PageCaptureMixin:
                         values.append(str(label))
                 if values:
                     break
-                if _attempt in {2, 5}:
+                if _attempt in {1, 3}:
                     try:
                         await control.click(timeout=2_000)
                         await control.press("Control+A")
@@ -544,7 +547,7 @@ class PageCaptureMixin:
                         await control.press("ArrowDown")
                     except PlaywrightError:
                         pass
-                await page.wait_for_timeout(350)
+                await page.wait_for_timeout(250)
             await self._safe_escape(page)
             unique = list(dict.fromkeys(values))[:40]
             if not unique:
@@ -821,10 +824,20 @@ class PageCaptureMixin:
                 // roots remain represented by their host geometry/text.
                 const roots = [document];
                 const hostSample = Array.from(document.querySelectorAll('body *')).slice(0, 1200);
+                const shadowHosts = [];
                 for (const host of hostSample) {
-                    if (host.shadowRoot) roots.push(host.shadowRoot);
+                    if (host.shadowRoot) {
+                        roots.push(host.shadowRoot);
+                        // The host itself is the stable, observable target for
+                        // an open shadow root. It is not matched by the
+                        // semantic selector list above (custom elements often
+                        // have no ARIA role), so retain it explicitly while
+                        // keeping the scan bounded.
+                        shadowHosts.push(host);
+                    }
                 }
-                const nodes = roots.flatMap(root => Array.from(root.querySelectorAll(selector))).slice(0, 2000);
+                const nodes = [...roots.flatMap(root => Array.from(root.querySelectorAll(selector))), ...shadowHosts]
+                    .slice(0, 2000);
                 return nodes.map((node, index) => ({
                 // Keep the same human field identity used by scoped form
                 // discovery. A placeholder is an implementation hint, not

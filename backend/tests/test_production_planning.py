@@ -752,6 +752,40 @@ def test_planner_accepts_generic_editorial_descriptor_for_unfamiliar_canvas_app(
     ProductionPlanningService._validate_objective_grounding(scoped, candidate)
 
 
+def test_visual_artifact_result_requirement_is_verified_after_planning_not_discovery():
+    """A canvas result is a post-action requirement, not opening-page evidence."""
+    root = "https://example.test/editor"
+    scoped = context().model_copy(
+        update={
+            "url": root,
+            "objective": ObjectiveSpec(
+                raw="Create a detailed chat architecture diagram on the canvas",
+                primary_entity="chat architecture diagram",
+                must_show=["completed design"],
+            ),
+            "page_knowledge": [
+                PageKnowledge(
+                    url=root,
+                    title="Canvas Editor",
+                    purpose="Diagram canvas",
+                    visible_sections=["Canvas", "Toolbar"],
+                    actionable_controls=["Text", "Arrow"],
+                    visible_facts=["Create a diagram on the canvas."],
+                    fingerprint="canvas-editor",
+                )
+            ],
+        }
+    )
+    candidate = CandidateDemoFlow(
+        name="chat architecture canvas",
+        page_urls=[root],
+        score=0.9,
+        evidence_coverage=["canvas", "toolbar"],
+    )
+
+    ProductionPlanningService._validate_objective_grounding(scoped, candidate)
+
+
 def test_planner_rejects_one_configuration_page_as_proof_of_both_relationship_sides():
     scoped = context().model_copy(
         update={

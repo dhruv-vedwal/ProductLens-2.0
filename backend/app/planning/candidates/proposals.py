@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from urllib.parse import urlsplit
 
@@ -687,7 +688,12 @@ def build_page_complete_proposal(
                 # observed canvas at execution time, so responsive layouts do
                 # not invalidate the gesture.
                 label_match = re.search(
-                    r"\b(?:components?|nodes?|boxes?|items?)\s+(?:for|including|named|:)?\s*(?P<labels>.+?)(?=\s*(?:,?\s*(?:connect|link|join)\b)|[.;]|$)",
+                    # Require an explicit list introducer after the noun. A
+                    # relation clause such as "connect the components with
+                    # clear arrows" must not be mistaken for component
+                    # labels; it is handled by the imperative/list parsers
+                    # below.
+                    r"\b(?:components?|nodes?|boxes?|items?)\s+(?:(?:for|including|named)\s+|:\s*)(?P<labels>.+?)(?=\s*(?:,?\s*(?:connect|link|join)\b)|[.;]|$)",
                     objective_text,
                     flags=re.IGNORECASE,
                 )
@@ -701,7 +707,74 @@ def build_page_complete_proposal(
                         " ".join(item.split())[:80]
                         for item in raw_labels.split(",")
                         if 1 <= len(item.split()) <= 6 and item.strip()
-                    ][:8]
+                    ][:16]
+                if not labels:
+                    # Natural objectives often describe an artifact as “with
+                    # a client, service, database, and arrows”. Extract the
+                    # bounded noun list before the first relationship term;
+                    # target/tool resolution still comes exclusively from
+                    # live page evidence.
+                    natural_match = re.search(
+                        r"\b(?:with|including|containing)\s+(?P<labels>.+?)"
+                        r"(?=\s+(?:and\s+)?(?:arrows?|connect(?:ed|ions?)?|links?|relationships?)\b)",
+                        objective_text,
+                        flags=re.IGNORECASE,
+                    )
+                    if natural_match:
+                        raw_labels = natural_match.group("labels")
+                        # A relationship phrase such as "with clear
+                        # directional arrows" is not a component list. Keep
+                        # this fallback for an actual enumerated list or an
+                        # explicitly introduced singular noun.
+                        if "," not in raw_labels and not re.match(
+                            r"^(?:a|an|the)\s+", raw_labels, flags=re.IGNORECASE
+                        ):
+                            natural_match = None
+                    if natural_match:
+                        raw_labels = re.sub(
+                            r"^(?:a|an|the)\s+",
+                            "",
+                            raw_labels,
+                            flags=re.IGNORECASE,
+                        )
+                        raw_labels = re.sub(r"\band\b", ",", raw_labels, flags=re.IGNORECASE)
+                        labels = [
+                            " ".join(
+                                re.sub(r"^(?:a|an|the)\s+", "", item).split()
+                            )[:80]
+                            for item in raw_labels.split(",")
+                            if 1 <= len(item.split()) <= 6 and item.strip()
+                        ][:16]
+                if not labels:
+                    # A visual request may use an imperative list instead of
+                    # the noun phrase "components for ...", for example
+                    # "Place and label a client, API gateway, and database.
+                    # Connect ...".  Extract only that bounded list; the
+                    # canvas/tool targets still come from live evidence.
+                    imperative_match = re.search(
+                        r"\b(?:place|add|create|draw)\s+and\s+label\s+(?P<labels>.+?)"
+                        r"(?=\.|;|\s+(?:then\s+)?(?:connect|link|join|verify|explain)\b)",
+                        objective_text,
+                        flags=re.IGNORECASE,
+                    )
+                    if imperative_match:
+                        raw_labels = re.sub(
+                            r"^(?:a|an|the)\s+", "", imperative_match.group("labels"), flags=re.IGNORECASE
+                        )
+                        raw_labels = re.sub(r"\band\b", ",", raw_labels, flags=re.IGNORECASE)
+                        raw_labels = re.sub(r"\bor\b", " / ", raw_labels, flags=re.IGNORECASE)
+                        labels = [
+                            " ".join(
+                                re.sub(
+                                    r"\s+(?:visible|shown|available)\s+in\s+(?:the\s+)?(?:canvas|editor|workspace)\s+tools?$",
+                                    "",
+                                    re.sub(r"^(?:a|an|the|any|relevant)\s+", "", item),
+                                    flags=re.IGNORECASE,
+                                ).split()
+                            )[:80]
+                            for item in raw_labels.split(",")
+                            if 1 <= len(item.split()) <= 12 and item.strip()
+                        ][:16]
                 text_tool = next(
                     (candidate for candidate in tool_candidates if _tokens(candidate.name) & {"text", "label"}),
                     None,
@@ -724,13 +797,33 @@ def build_page_complete_proposal(
                     None,
                 )
                 if labels and text_tool and shape_tool:
+                    # Keep a requested architecture readable and within a
+                    # bounded cloud-session budget.  When a prompt names more
+                    # than six components, pair adjacent evidence-backed
+                    # labels into multi-line component cards rather than
+                    # producing a long crawler-like sequence of tiny nodes.
+                    # No product names or routes are assumed; the grouping is
+                    # purely a layout/readability constraint.
+                    if len(labels) > 6:
+                        group_size = math.ceil(len(labels) / 6)
+                        labels = [
+                            "\n".join(labels[index : index + group_size])
+                            for index in range(0, len(labels), group_size)
+                        ]
                     # A bounded, readable grid is a layout algorithm, not a
                     # product recipe. It gives every requested label a
                     # distinct drop point while leaving generous canvas space.
+                    # Derive a bounded grid for any small requested set. The
+                    # layout is deliberately product-agnostic and keeps the
+                    # canvas readable for 3--16 components.
+                    column_count = max(2, min(4, math.ceil(math.sqrt(len(labels)))))
+                    row_count = math.ceil(len(labels) / column_count)
                     positions = [
-                        (0.22, 0.28), (0.52, 0.28), (0.22, 0.56),
-                        (0.52, 0.56), (0.78, 0.28), (0.78, 0.56),
-                        (0.36, 0.78), (0.64, 0.78),
+                        (
+                            0.18 + 0.64 * (index % column_count) / max(column_count - 1, 1),
+                            0.22 + 0.62 * (index // column_count) / max(row_count - 1, 1),
+                        )
+                        for index in range(len(labels))
                     ]
                     for index, label in enumerate(labels):
                         x, y = positions[index]

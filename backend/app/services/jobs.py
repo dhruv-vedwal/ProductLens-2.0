@@ -10,6 +10,12 @@ from typing import Any
 from app.artifacts.store import RunArtifacts
 from app.benchmark.fixture_planning import FixturePlanningService
 from app.benchmark.runner import run as run_fixture_gate
+from app.contracts.harness import (
+    HarnessLimits,
+    HarnessMode,
+    HarnessStatus,
+    InteractionHarnessRequest,
+)
 from app.contracts.models import (
     ActionCapability,
     DemoPlan,
@@ -17,6 +23,11 @@ from app.contracts.models import (
     DiscoveryBudget,
     PresentationPlan,
     ProductKnowledge,
+)
+from app.interaction.harness import (
+    load_and_validate,
+    persist_validation,
+    validation_for_exception,
 )
 from app.narration.audio import audio_duration_seconds
 from app.narration.script import (
@@ -165,6 +176,76 @@ class DemoJobService:
                     run_id, str(provider), str(session_id), "FAILED"
                 )
 
+    def _harness_request_for_run(
+        self, run_id: str, payload: dict[str, Any]
+    ) -> InteractionHarnessRequest:
+        """Materialize a secret-free harness request from the durable job."""
+
+        run = self.repository.get_run(run_id)
+        request = self.repository.get_request(run["request_id"])
+        mode = HarnessMode(str(payload.get("harness_mode") or "production_trace"))
+        return InteractionHarnessRequest.model_validate(
+            {
+                "request_id": request.get("request_id"),
+                "url": request["url"],
+                "objective": request["objective"],
+                "mode": mode.value,
+                "audience": str(payload.get("audience") or "product prospect"),
+                "auth_reference": payload.get("credential_reference"),
+                "side_effect_policy": (
+                    "explicitly_authorized"
+                    if payload.get("allow_external_side_effects")
+                    or payload.get("allow_isolated_record_creation")
+                    else "read_only"
+                ),
+                "limits": HarnessLimits(
+                    max_pages=int(payload.get("max_pages", 6)),
+                    max_steps=int(payload.get("max_steps", 24)),
+                    max_exploration_steps=int(payload.get("max_exploration_steps", 12)),
+                    max_model_calls=int(payload.get("max_model_calls", 3)),
+                    max_duration_seconds=int(payload.get("max_duration_seconds", 900)),
+                ).model_dump(mode="json"),
+                "required_outcomes": list(payload.get("required_outcomes") or []),
+                "excluded_actions": list(payload.get("excluded_actions") or []),
+                "cloud_browser": payload.get("cloud_discovery"),
+                "project_id": request.get("project_id"),
+            }
+        )
+
+    def finalize_interaction_harness(self, run_id: str, payload: dict[str, Any]) -> bool:
+        """Promote a verified trace or terminally block the harness run."""
+
+        artifacts = RunArtifacts(self.artifact_root, run_id)
+        harness_request = self._harness_request_for_run(run_id, payload)
+        validation = load_and_validate(artifacts, harness_request)
+        if validation.result.status != HarnessStatus.VERIFIED:
+            code = (
+                validation.result.failure.code.value
+                if validation.result.failure is not None
+                else "OUTCOME_UNVERIFIED"
+            )
+            error_code = f"HARNESS_{code}"
+            self.repository.fail_active_stage_jobs(run_id, error_code)
+            self.repository.update_stage_job(
+                run_id, "EXECUTION", status="FAILED", error_code=error_code
+            )
+            self.repository.update_run(
+                run_id, stage="EXECUTION", status="FAILED", error_code=error_code
+            )
+            job = self.repository.job_for_run(run_id)
+            if job:
+                self.repository.finish_job(job["id"], status="FAILED", error_code=error_code)
+            self.repository.persist_run_documents(run_id, artifacts.root)
+            return False
+        for downstream in ("NARRATION", "RENDER", "VIDEO_QA"):
+            self.repository.update_stage_job(run_id, downstream, status="SKIPPED")
+        self.repository.update_run(run_id, stage="COMPLETE", status="COMPLETE")
+        job = self.repository.job_for_run(run_id)
+        if job:
+            self.repository.finish_job(job["id"], status="COMPLETE")
+        self.repository.persist_run_documents(run_id, artifacts.root)
+        return True
+
     def _schedule_automatic_repair(
         self,
         run_id: str,
@@ -234,6 +315,35 @@ class DemoJobService:
         }
         requested_stage = str(decision_payload.get("retry_from_stage") or stage).upper()
         retry_from_stage = stage_aliases.get(requested_stage, requested_stage)
+        # A repair decision may be produced by an editorial/planning check
+        # before production has created a trace.  Never create a child whose
+        # durable ledger marks NARRATION/RENDER as runnable while the evidence
+        # those stages consume is absent; that turns a recoverable planning
+        # rejection into a misleading FileNotFoundError.  Move the boundary
+        # back to the earliest stage with the persisted prerequisite.  This is
+        # intentionally artifact-based and therefore applies to every product,
+        # not just a particular workflow or site.
+        parent_root = artifacts.root
+        has_plan = (parent_root / "plan.json").is_file() or (
+            parent_root / "planning" / "validated-scene-plan.json"
+        ).is_file()
+        has_trace = (parent_root / "execution" / "trace.json").is_file()
+        has_narration = (parent_root / "narration" / "narration-script.json").is_file() or (
+            parent_root / "presentation" / "narration-script.json"
+        ).is_file()
+        stage_order = {
+            "DISCOVERY": 0,
+            "PLANNING": 1,
+            "EXECUTION": 2,
+            "NARRATION": 3,
+            "RENDER": 4,
+            "VIDEO_QA": 5,
+        }
+        boundary_is_downstream = stage_order.get(retry_from_stage, 99) > stage_order.get(stage, 99)
+        if boundary_is_downstream and retry_from_stage in {"NARRATION", "RENDER", "VIDEO_QA"} and not has_trace:
+            retry_from_stage = "EXECUTION" if has_plan else "PLANNING"
+        elif boundary_is_downstream and retry_from_stage in {"RENDER", "VIDEO_QA"} and not has_narration:
+            retry_from_stage = "NARRATION"
         if retry_from_stage not in {
             "DISCOVERY",
             "PLANNING",
@@ -552,10 +662,63 @@ class DemoJobService:
             )
         if not owns_claim and self.repository.claim_stage_job(run_id, stage) is None:
             return
+        job = self.repository.job_for_run(run_id)
         heartbeat = asyncio.create_task(self._heartbeat_stage(run_id, stage))
         try:
             await self._run_url_stage_impl(run_id, stage, payload=payload)
+            # Interaction jobs deliberately stop at the verified-trace
+            # boundary. They never enter narration, rendering, or video QA.
+            if job is not None and job["kind"] == "interaction" and stage == "EXECUTION":
+                self.finalize_interaction_harness(run_id, payload)
         except Exception as error:
+            if job is not None and job["kind"] == "interaction":
+                # Capability runs terminate at the typed harness boundary. Do
+                # not schedule a full-generation repair that could replay a
+                # dispatched mutation; persist the owning failure and leave
+                # the run at its safe checkpoint instead.
+                try:
+                    harness_request = self._harness_request_for_run(run_id, payload)
+                    artifacts = RunArtifacts(self.artifact_root, run_id)
+                    existing_failure_path = artifacts.root / "harness" / "failure.json"
+                    existing_failure = None
+                    if existing_failure_path.is_file():
+                        try:
+                            existing_failure = json.loads(
+                                existing_failure_path.read_text(encoding="utf-8")
+                            )
+                        except (OSError, ValueError):
+                            existing_failure = None
+                    if isinstance(existing_failure, dict) and existing_failure.get("code"):
+                        # A strict promotion gate may already have persisted a
+                        # more specific witness failure. Preserve it instead
+                        # of replacing it with the wrapper RuntimeError.
+                        error_code = f"HARNESS_{existing_failure['code']}"
+                        validation = None
+                    else:
+                        validation = None
+                    if validation is None and existing_failure is None:
+                        try:
+                            trace = self._load_trace(artifacts)
+                        except (FileNotFoundError, OSError, ValueError):
+                            trace = None
+                        validation = validation_for_exception(
+                            harness_request, trace, error, run_id=run_id
+                        )
+                        persist_validation(artifacts, harness_request, validation)
+                        error_code = f"HARNESS_{validation.result.failure.code.value}"
+                except Exception:  # noqa: BLE001 - preserve a typed terminal state
+                    error_code = "HARNESS_INTERNAL_ERROR"
+                self.repository.fail_active_stage_jobs(run_id, error_code)
+                self.repository.update_stage_job(
+                    run_id, stage, status="FAILED", error_code=error_code
+                )
+                self.repository.update_run(
+                    run_id, stage=stage, status="FAILED", error_code=error_code
+                )
+                self.repository.finish_job(job["id"], status="FAILED", error_code=error_code)
+                self.repository.persist_run_documents(run_id, RunArtifacts(self.artifact_root, run_id).root)
+                logger.error("interaction_harness_blocked", stage=stage, error_code=error_code)
+                return
             # A direct CLI/supervised invocation does not have the broker's
             # exception wrapper. Without this checkpoint, validation failures
             # leave a stage RUNNING forever and invite an unsafe duplicate
@@ -704,11 +867,12 @@ class DemoJobService:
                 objective=request["objective"],
                 artifact_root=self.artifact_root,
                 allow_external_side_effects=(
-                    bool(payload["allow_external_side_effects"])
+                    bool(payload.get("allow_external_side_effects", False))
                     or bool(payload.get("allow_isolated_record_creation", False))
                 ),
                 audience=str(payload.get("audience", "product prospect")),
                 target_duration_seconds=int(payload.get("target_duration_seconds", 120)),
+                trace_only=bool(payload.get("trace_only", False)),
             )
             self.repository.replace_json_artifact(
                 "demo_plans", run_id, plan.model_dump(mode="json")
@@ -732,6 +896,16 @@ class DemoJobService:
                     payload.get("cloud_production", payload.get("cloud_discovery", False))
                 ),
             )
+            if bool(payload.get("harness_gate", False)):
+                # The trace-only harness is the promotion boundary. A normal
+                # URL job may proceed to narration/rendering only after the
+                # same certificate used by capability runs has passed.
+                harness_request = self._harness_request_for_run(run_id, payload)
+                validation = load_and_validate(artifacts, harness_request)
+                if validation.result.status != HarnessStatus.VERIFIED:
+                    failure = validation.result.failure
+                    code = failure.code.value if failure is not None else "OUTCOME_UNVERIFIED"
+                    raise RuntimeError(f"HARNESS_{code}: trace was not certified")
             self.repository.replace_interaction_events(
                 run_id, [item.model_dump(mode="json") for item in trace.events]
             )

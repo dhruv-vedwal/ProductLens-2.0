@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -34,7 +34,7 @@ def _canonical_date(value: str) -> str | None:
         return None
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d-%m-%Y", "%Y%m%d", "%m%d%Y", "%d%m%Y"):
         try:
-            parsed = datetime.strptime(cleaned, fmt).date()
+            parsed = datetime.strptime(cleaned, fmt).replace(tzinfo=UTC).date()
         except ValueError:
             continue
         return parsed.isoformat()
@@ -76,9 +76,16 @@ def _navigation_reached(current: str, expected: str, base: str) -> bool:
 
 
 class PlaywrightAdapter:
-    def __init__(self, page: Any, *, cloud_mode: bool = False):
+    def __init__(
+        self,
+        page: Any,
+        *,
+        cloud_mode: bool = False,
+        typing_delay_ms: int = 70,
+    ):
         self.page = page
         self.cloud_mode = cloud_mode
+        self.typing_delay_ms = max(0, int(typing_delay_ms))
 
     def ensure_page(self) -> Any:
         """Reconnect to the live page after a remote navigation replacement.
@@ -373,7 +380,7 @@ class PlaywrightAdapter:
                     try:
                         if await locator.nth(index).is_visible():
                             visible_indexes.append(index)
-                    except PlaywrightError:
+                    except (PlaywrightError, TypeError):
                         continue
                 if visible_indexes:
                     # An application can intentionally expose the same primary
@@ -454,7 +461,7 @@ class PlaywrightAdapter:
                     try:
                         if await candidate.is_visible():
                             return candidate, f"{strategy}:visible"
-                    except PlaywrightError:
+                    except (PlaywrightError, TypeError):
                         continue
                 attempts.append(f"{strategy}:{count}-hidden")
                 continue
@@ -589,7 +596,6 @@ class PlaywrightAdapter:
                             continue
                         # The requested target is unavailable while the dialog
                         # is visible, which is exactly the blocked-state case.
-                        pass
                 label = (await dialog.inner_text()).strip().replace("\n", " ")
                 return label[:240] or "visible dialog"
         except PlaywrightError:
@@ -1024,6 +1030,80 @@ class PlaywrightAdapter:
                 payload = {**payload, "points": points}
             if not isinstance(points, list) or len(points) < 2:
                 raise GroundingError("PointerSequence requires at least two observed points")
+            # Tool palettes, inspector drawers, and onboarding overlays often
+            # sit above a full-viewport canvas.  The canvas bounding box alone
+            # therefore does not prove that a point is dispatchable: in the
+            # first Excalidraw gesture the planned rectangle began beneath the
+            # open style panel and was silently ignored.  Rebase the observed
+            # path to the nearest unobstructed region while preserving its
+            # shape and relative geometry.  This is DOM/geometry based and
+            # works for any canvas editor that exposes a canvas surface.
+            if surface is not None and pattern in {
+                "short_reversible_stroke",
+                "connector_segment",
+                "text_placement",
+                "shape_box",
+            }:
+                try:
+                    rebased = await surface.evaluate(
+                        """
+                        (surface, original) => {
+                          const pts = Array.isArray(original) ? original : [];
+                          const rect = surface.getBoundingClientRect();
+                          if (!pts.length || rect.width < 16 || rect.height < 16) return null;
+                          const allowed = (x, y) => {
+                            const hit = document.elementFromPoint(x, y);
+                            if (!hit) return false;
+                            if (hit === surface || surface.contains(hit)) return true;
+                            // Layered editors commonly put an interactive
+                            // canvas over a paint canvas; accept that sibling
+                            // only when it is itself an interactive canvas.
+                            return hit.tagName === 'CANVAS' &&
+                              hit.classList.contains('interactive');
+                          };
+                          const minX = Math.min(...pts.map(p => Number(p.x)));
+                          const maxX = Math.max(...pts.map(p => Number(p.x)));
+                          const minY = Math.min(...pts.map(p => Number(p.y)));
+                          const maxY = Math.max(...pts.map(p => Number(p.y)));
+                          const width = maxX - minX;
+                          const height = maxY - minY;
+                          const centerX = (minX + maxX) / 2;
+                          const centerY = (minY + maxY) / 2;
+                          const step = 24;
+                          if (pts.every(p => allowed(Number(p.x), Number(p.y)))) {
+                            return { points: pts, translated: false };
+                          }
+                          for (let dy = rect.top + 24 - (centerY - height / 2);
+                               dy <= rect.bottom - 24 - (centerY + height / 2);
+                               dy += step) {
+                            for (let dx = rect.left + 24 - (centerX - width / 2);
+                                 dx <= rect.right - 24 - (centerX + width / 2);
+                                 dx += step) {
+                              const candidate = pts.map(p => ({
+                                x: Number(p.x) + dx,
+                                y: Number(p.y) + dy,
+                              }));
+                              if (candidate.every(p =>
+                                p.x >= rect.left && p.x <= rect.right &&
+                                p.y >= rect.top && p.y <= rect.bottom &&
+                                allowed(p.x, p.y))) {
+                                return { points: candidate, translated: dx !== 0 || dy !== 0 };
+                              }
+                            }
+                          }
+                          return null;
+                        }
+                        """,
+                        points,
+                    )
+                    if isinstance(rebased, dict) and isinstance(rebased.get("points"), list):
+                        points = rebased["points"]
+                        if rebased.get("translated"):
+                            payload = {**payload, "points": points, "geometry_rebased": True}
+                except (PlaywrightError, TypeError, ValueError):
+                    # Keep the evidence-backed coordinates when a browser
+                    # does not expose elementFromPoint reliably.
+                    pass
             duration_ms = max(0, int(payload.get("duration_ms", 450)))
             shortcut = payload.get("tool_shortcut")
             if isinstance(shortcut, str) and len(shortcut.strip()) == 1 and shortcut.isalnum():
@@ -1347,14 +1427,18 @@ class PlaywrightAdapter:
             await locator.press("Backspace")
             visible_value = str(operation.value)
             split_at = max(1, len(visible_value) // 2)
-            await locator.press_sequentially(visible_value[:split_at], delay=90)
+            await locator.press_sequentially(
+                visible_value[:split_at], delay=self.typing_delay_ms
+            )
             try:
                 partial_value = await locator.evaluate(
                     "element => String(element.value || element.textContent || '')"
                 )
             except (AttributeError, PlaywrightError):
                 partial_value = visible_value[:split_at]
-            result = await locator.press_sequentially(visible_value[split_at:], delay=90)
+            result = await locator.press_sequentially(
+                visible_value[split_at:], delay=self.typing_delay_ms
+            )
             # Lightweight adapter fakes used by unit tests (and a few remote
             # wrappers) expose the action methods but not Playwright's
             # ``evaluate`` helper.  Keep the browser witness when available;
@@ -1392,8 +1476,46 @@ class PlaywrightAdapter:
                 return {"start": start, "end": end}
             return {"start": start}
         if operation.kind == OperationKind.SELECT_OPTION:
+            # ``get_by_label`` can resolve both the input and the transient
+            # listbox that a custom combobox opens.  Keep the evidence-backed
+            # target, but narrow the action surface to the actual control
+            # before keyboard fallback.  This is important for any design
+            # system that renders an aria-labelled listbox beside its input;
+            # pressing Control+A on the broad label locator is a strict-mode
+            # failure and makes an otherwise valid option look unavailable.
+            selection_locator = locator
+            target = operation.target
+            if target is not None:
+                control_candidates: list[Any] = []
+                if target.selector:
+                    control_candidates.append(self.page.locator(target.selector))
+                control_name = target.label or target.name
+                if control_name:
+                    try:
+                        control_candidates.append(
+                            self.page.get_by_role(
+                                "combobox",
+                                name=re.compile(re.escape(control_name.rstrip(" *")), re.IGNORECASE),
+                                exact=False,
+                            )
+                        )
+                    except (PlaywrightError, AttributeError):
+                        pass
+                for candidate in control_candidates:
+                    try:
+                        count = await candidate.count()
+                        visible = [
+                            i
+                            for i in range(count)
+                            if await candidate.nth(i).is_visible()
+                        ]
+                        if len(visible) == 1:
+                            selection_locator = candidate.nth(visible[0])
+                            break
+                    except (PlaywrightError, TypeError, AttributeError):
+                        continue
             native = await self._select_native_option_human_visible(
-                locator, str(operation.value)
+                selection_locator, str(operation.value)
             )
             if native is not None:
                 return native
@@ -1407,32 +1529,37 @@ class PlaywrightAdapter:
                 # with force + keyboard fallbacks before treating as failed.
                 opened = False
                 for open_attempt in (
-                    lambda: locator.click(timeout=8_000),
-                    lambda: locator.click(timeout=5_000, force=True),
-                    lambda: locator.focus(),
+                    lambda: selection_locator.click(timeout=8_000),
+                    lambda: selection_locator.click(timeout=5_000, force=True),
+                    lambda: selection_locator.click(),
+                    lambda: selection_locator.focus(),
                 ):
                     try:
                         await open_attempt()
                         opened = True
                         break
-                    except PlaywrightError:
+                    except (PlaywrightError, TypeError):
                         continue
                 if not opened:
                     raise GroundingError(
                         f"Could not open observed combobox for option {operation.value!r}"
                     )
                 try:
-                    await locator.press("ArrowDown")
-                except PlaywrightError:
+                    press = getattr(selection_locator, "press", None)
+                    if callable(press):
+                        await press("ArrowDown")
+                except (PlaywrightError, AttributeError, TypeError):
                     pass
                 option = self.page.get_by_role("option", name=str(operation.value), exact=True)
                 try:
-                    await self.page.wait_for_selector(
-                        "[role='listbox'], [role='option']",
-                        state="attached",
-                        timeout=2_500,
-                    )
-                except PlaywrightError:
+                    wait_for_selector = getattr(self.page, "wait_for_selector", None)
+                    if callable(wait_for_selector):
+                        await wait_for_selector(
+                            "[role='listbox'], [role='option']",
+                            state="attached",
+                            timeout=2_500,
+                        )
+                except (PlaywrightError, AttributeError, TypeError):
                     pass
                 count = await option.count()
                 for index in range(count):
@@ -1441,22 +1568,29 @@ class PlaywrightAdapter:
                         if await candidate.is_visible():
                             try:
                                 await candidate.click(timeout=5_000)
+                            except TypeError:
+                                await candidate.click()
                             except PlaywrightError:
-                                await candidate.click(timeout=3_000, force=True)
+                                try:
+                                    await candidate.click(timeout=3_000, force=True)
+                                except TypeError:
+                                    await candidate.click()
                             return {
                                 "selected": str(operation.value),
                                 "options_visible": True,
                                 "interaction": "custom-listbox-visible-choice",
                             }
-                    except PlaywrightError:
+                    except (PlaywrightError, TypeError):
                         continue
                 # Fallback: type the observed label into the open combobox and
                 # commit with Enter when the listbox option node is transient.
                 try:
-                    await locator.press("ControlOrMeta+A")
-                    await locator.press("Backspace")
-                    await locator.press_sequentially(str(operation.value), delay=90)
-                    await locator.press("Enter")
+                    await selection_locator.press("ControlOrMeta+A")
+                    await selection_locator.press("Backspace")
+                    await selection_locator.press_sequentially(
+                        str(operation.value), delay=self.typing_delay_ms
+                    )
+                    await selection_locator.press("Enter")
                     return {
                         "selected": str(operation.value),
                         "options_visible": False,

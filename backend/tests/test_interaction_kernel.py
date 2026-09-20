@@ -60,6 +60,30 @@ def test_kernel_rejects_unverified_candidate():
         kernel.select([_candidate(intent, snapshot, safe=False)])
 
 
+def test_kernel_fails_closed_on_near_tied_targets():
+    kernel = InteractionKernel(run_id="run-ambiguous", objective="Open the feature")
+    intent = _intent()
+    snapshot = StateSnapshot(url="https://example.test", title="Home")
+    kernel.register_intent(intent)
+    kernel.record_snapshot(snapshot)
+    first_base = _candidate(intent, snapshot)
+    second_base = _candidate(intent, snapshot)
+    first = first_base.model_copy(
+        update={
+            "confidence": 0.90,
+            "action": first_base.action.model_copy(update={"target": Target(name="First")}),
+        }
+    )
+    second = second_base.model_copy(
+        update={
+            "confidence": 0.89,
+            "action": second_base.action.model_copy(update={"target": Target(name="Second")}),
+        }
+    )
+    with pytest.raises(ValueError, match="ambiguous"):
+        kernel.select([first, second])
+
+
 def test_dispatched_attempt_cannot_be_replayed_as_retry():
     kernel = InteractionKernel(run_id="run-1", objective="Open the feature")
     intent = _intent()

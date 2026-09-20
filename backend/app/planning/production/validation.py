@@ -105,7 +105,12 @@ class ValidationMixin:
                 # with no points and let the executor draw a synthetic grid
                 # path, producing false success on empty editors.
                 generated_surface_pattern = (
-                    pattern in {"short_reversible_stroke", "text_placement", "connector_segment"}
+                    pattern in {
+                        "short_reversible_stroke",
+                        "shape_box",
+                        "text_placement",
+                        "connector_segment",
+                    }
                     and operation.target is not None
                     and isinstance(relative_points, list)
                     and len(relative_points) >= 2

@@ -644,10 +644,17 @@ class ExecuteMixin:
                     # provision/navigation prelude because the page has
                     # already reached its settled DOM state.
                     trace.recording_started_at = datetime.now(UTC)
+                    captcha_events: list[dict[str, str]] = []
+
+                    def observe_captcha_event(event: dict[str, str]) -> None:
+                        captcha_events.append(event)
+                        artifacts.write_json("execution/captcha-events.json", captcha_events)
+
                     await self.credential_service.authenticate_if_required(
                         page,
                         credential_reference,
                         action_observer=observe_auth_action,
+                        captcha_event_observer=observe_captcha_event,
                     )
                     # A walkthrough always establishes its opening state before
                     # the first gesture. This footage is real product time, not

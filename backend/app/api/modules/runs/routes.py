@@ -12,13 +12,64 @@ from app.api import deps_state as api
 from app.api.modules.runs.schemas import (
     FixtureRequest,
     GenerationRequest,
+    InteractionHarnessAPIRequest,
     RetentionRequest,
     RetryRequest,
 )
 from app.artifacts.store import RunArtifacts
+from app.interaction import objective_fingerprint
 from app.video.poster import write_video_poster
 
 router = APIRouter(tags=["runs"])
+
+
+@router.post("/interaction-harness/runs")
+async def create_interaction_harness_run(
+    payload: InteractionHarnessAPIRequest,
+    user: dict = Depends(api.current_user),
+) -> dict[str, str]:
+    """Queue a trace-only capability run; narration and rendering never run."""
+
+    if api.url_generator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenRouter structured planning is not configured; configure an active LLM provider first",
+        )
+    try:
+        project_id = payload.project_id or (
+            api.repository.ensure_user_project(user["id"])["id"]
+            if api.settings.auth_required
+            else api.repository.ensure_local_project()["id"]
+        )
+        if api.settings.auth_required:
+            api.repository.get_project_for_user(project_id, user["id"])
+        request = api.repository.create_request(
+            payload.request_id
+            or f"harness:{project_id}:{objective_fingerprint(payload)[:48]}",
+            str(payload.url),
+            payload.objective,
+            project_id,
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="project not found") from error
+    run, created = api.repository.create_idempotent_run(
+        request["id"], str(api.settings.artifact_root)
+    )
+    if created:
+        job_payload = payload.model_dump(mode="json")
+        limits = job_payload.pop("limits", {})
+        if isinstance(limits, dict):
+            job_payload.update(limits)
+        job_payload["harness_gate"] = True
+        job_payload["trace_only"] = True
+        job_payload["cloud_discovery"] = api.resolve_cloud_discovery(
+            job_payload.pop("cloud_browser"),
+            browserbase_configured=bool(api.settings.browserbase_api_key),
+        )
+        job_payload["harness_mode"] = payload.mode.value
+        job = api.repository.enqueue_job(run["id"], "interaction", job_payload)
+        api.dispatch_generation_job(job["id"])
+    return {"run_id": run["id"], "status": run["status"]}
 
 
 @router.post("/fixture-runs")
@@ -82,6 +133,7 @@ async def create_generation_run(
     )
     if created:
         job_payload = payload.model_dump(mode="json")
+        job_payload["harness_gate"] = True
         job_payload["cloud_discovery"] = api.resolve_cloud_discovery(
             job_payload["cloud_discovery"],
             browserbase_configured=bool(api.settings.browserbase_api_key),
@@ -131,6 +183,16 @@ async def retry_generation_run(
                 # A malformed diagnostic must never silently select a stage;
                 # fall back to the explicit full retry path instead.
                 retry_from_stage = None
+    if (previous_job or {}).get("kind") == "interaction" and retry_from_stage not in {
+        None,
+        "DISCOVERY",
+        "PLANNING",
+        "EXECUTION",
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail="interaction harness retries cannot start in a presentation stage",
+        )
     if retry_from_stage and request["url"].startswith("fixture://gate-"):
         raise HTTPException(
             status_code=422, detail="targeted retry is currently available for URL runs only"
@@ -154,10 +216,14 @@ async def retry_generation_run(
                 status_code=503, detail="OpenRouter structured planning is not configured"
             )
         original = (previous_job or {}).get("payload", {})
+        previous_kind = (previous_job or {}).get("kind", "url")
+        interaction_retry = previous_kind == "interaction"
         # Retain the prior run's non-secret intent/settings so the retry remains
         # comparable. Side effects are intentionally *not* inherited: a user
         # must opt in again for every replayable external mutation.
         job_payload = {
+            "harness_gate": bool(original.get("harness_gate", True)),
+            "harness_mode": original.get("harness_mode", "production_trace"),
             "allow_external_side_effects": payload.allow_external_side_effects,
             "allow_isolated_record_creation": payload.allow_isolated_record_creation,
             "cloud_discovery": api.resolve_cloud_discovery(
@@ -188,7 +254,9 @@ async def retry_generation_run(
             # boundaries retain their approved presentation artifact.
             "refresh_editorial": retry_from_stage == "NARRATION",
         }
-        job = api.repository.enqueue_job(retry["id"], "url", job_payload)
+        job = api.repository.enqueue_job(
+            retry["id"], "interaction" if interaction_retry else "url", job_payload
+        )
     if retry_from_stage:
         try:
             RunArtifacts.clone_for_targeted_retry(
@@ -211,6 +279,45 @@ def get_run_stages(run_id: str, user: dict = Depends(api.current_user)) -> dict:
         "job": api.repository.job_for_run(run_id),
         "stages": api.repository.stage_jobs(run_id),
     }
+
+
+@router.get("/interaction-harness/runs/{run_id}")
+def get_interaction_harness_result(run_id: str, user: dict = Depends(api.current_user)) -> dict:
+    """Return the trace-only result without exposing provider secrets."""
+
+    run = api.owned_run_or_404(run_id, user)
+    result_path = api.settings.artifact_root / "runs" / run_id / "harness" / "result.json"
+    if not result_path.is_file():
+        return {"run_id": run_id, "status": run["status"], "result": None}
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=409, detail="harness result is unreadable") from error
+    return {"run_id": run_id, "status": run["status"], "result": result}
+
+
+@router.get("/interaction-harness/runs/{run_id}/trace")
+def get_interaction_harness_trace(run_id: str, user: dict = Depends(api.current_user)) -> dict:
+    """Return the redacted authoritative trace after a capability run."""
+
+    api.owned_run_or_404(run_id, user)
+    trace_path = api.settings.artifact_root / "runs" / run_id / "execution" / "trace.json"
+    if not trace_path.is_file():
+        raise HTTPException(status_code=404, detail="interaction trace is not available")
+    try:
+        return json.loads(trace_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=409, detail="interaction trace is unreadable") from error
+
+
+@router.post("/interaction-harness/runs/{run_id}/cancel")
+def cancel_interaction_harness_run(run_id: str, user: dict = Depends(api.current_user)) -> dict:
+    api.owned_run_or_404(run_id, user)
+    try:
+        run = api.repository.cancel_run(run_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"run_id": run_id, "status": run["status"]}
 
 
 @router.get("/runs/{run_id}/events")

@@ -4,6 +4,18 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
+from app.contracts.harness import InteractionHarnessRequest
+
+
+class InteractionHarnessAPIRequest(InteractionHarnessRequest):
+    """Public trace-only capability request.
+
+    Keeping this as a contract subclass prevents the API from accepting raw
+    credentials or silently turning a capability test into a video job.
+    """
+
+    """Public alias retaining the shared harness contract."""
+
 
 class FixtureRequest(BaseModel):
     gate: int = Field(ge=1, le=6)

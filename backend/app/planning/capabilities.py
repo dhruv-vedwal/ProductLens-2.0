@@ -200,24 +200,37 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
         capability = capability.model_copy(
             update={"form_schema": capability.form_schema.model_copy(update={"fields": healed_fields})}
         )
+    has_required_field = any(field.required for field in capability.form_schema.fields)
+    has_non_choice_field = any(
+        field.control_type.casefold() not in {"select", "combobox"}
+        for field in capability.form_schema.fields
+    )
     unresolved_choices = [
         field.name
         for field in capability.form_schema.fields
         if field.control_type.casefold() in {"select", "combobox"}
         and not field.options
-        and not field.required
         and not _explicitly_optional(field)
-        # Provisional label-only selectors still need an observed choice once
-        # rehearsal has promoted them into the create path. Keeping them out of
-        # this gate allowed production to submit past an empty required combobox.
+        # A custom combobox may be optional at the initial state and only
+        # become relevant after a dependency is chosen (or after the first
+        # validation submit). Do not reject an otherwise usable capability
+        # merely because discovery could not enumerate a closed widget. The
+        # rehearsal recovery pass re-observes the live listbox and promotes a
+        # field only when the application proves it is required. Natively
+        # required or explicitly promoted controls still fail closed here.
         and (
-            "rehearsal:include" in field.validation_messages
-            or not str(field.selector or "").startswith("label:")
+            field.required
+            or "rehearsal:include" in field.validation_messages
+            # If a form consists only of unobserved selectors, there is no
+            # safe minimal flow to compile. Keep the fail-closed boundary for
+            # that case while allowing mixed forms to demonstrate their
+            # observed text fields without inventing an optional choice.
+            or (not has_required_field and not has_non_choice_field)
         )
     ]
     if unresolved_choices:
         raise CapabilityCompilationError(
-            "Creation capability has non-optional selectable fields without safe observed choices: "
+            "Creation capability has no safe observed option for non-optional selectable fields: "
             + ", ".join(unresolved_choices)
         )
     if capability.submit_target is None or (

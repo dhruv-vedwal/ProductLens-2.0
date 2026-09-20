@@ -353,6 +353,15 @@ def render_remotion(
         return elapsed
 
     edl_caption_rows = []
+    # Semantic moments are presentation containers, while browser beats and
+    # approved narration are keyed by the underlying trace event.  Keep that
+    # stable event identity at the renderer boundary; using ``moment-*`` IDs
+    # here made every caption appear unbound to its visible beat in QA.
+    approved_caption_by_event = {
+        str(item.get("scene_id")): item
+        for item in (captions or [])
+        if str(item.get("scene_id", "")).strip()
+    }
     if (
         sync_edl.get("schema_version") == 2
         and sync_edl.get("authority") == "semantic_moments"
@@ -369,9 +378,21 @@ def render_remotion(
             if end > start:
                 edl_caption_rows.append(
                     {
-                        "scene_id": moment.get("id"),
+                        "scene_id": (
+                            str((moment.get("event_ids") or [moment.get("id")])[0])
+                        ),
                         "moment_id": moment.get("id"),
-                        "text": str(caption_track["text"]),
+                        # Preserve the approved, evidence-grounded editorial
+                        # copy when a matching event caption exists. The EDL
+                        # track remains the authoritative native timing.
+                        "text": str(
+                            (
+                                approved_caption_by_event.get(
+                                    str((moment.get("event_ids") or [""])[0]), {}
+                                ).get("text")
+                                or caption_track["text"]
+                            )
+                        ),
                         "start": round(start, 3),
                         "end": round(end, 3),
                         "evidence_refs": moment.get("evidence_refs", []),

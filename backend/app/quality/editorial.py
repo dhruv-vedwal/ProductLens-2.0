@@ -636,18 +636,32 @@ def inspect_editorial(
                         re.findall(r"[a-z0-9]{4,}", semantic_match.group(1).lower())
                     ) | {"label"}
                 else:
-                    connector_match = re.search(
-                        r"connect\s+(?:the\s+)?(?:requested|observed)?\s*(.+?)\s+and\s+(.+?)\s+components",
+                    # Canvas/editor traces often target the generic surface
+                    # even though the operation intent names the semantic
+                    # component being drawn.  Ground the caption against that
+                    # immutable component intent, not the SVG/canvas shell.
+                    component_match = re.search(
+                        r"(?:requested|observed)\s+(.+?)\s+component\s+node\b",
                         operation.intent,
-                        flags=re.IGNORECASE,
+                        flags=re.IGNORECASE | re.DOTALL,
                     )
-                    if connector_match:
+                    if component_match:
                         target_words = set(
-                            re.findall(
-                                r"[a-z0-9]{4,}",
-                                f"{connector_match.group(1)} {connector_match.group(2)}",
-                            )
-                        ) | {"connector"}
+                            re.findall(r"[a-z0-9]{4,}", component_match.group(1).lower())
+                        ) | {"component"}
+                    else:
+                        connector_match = re.search(
+                            r"connect\s+(?:the\s+)?(?:requested|observed)?\s*(.+?)\s+and\s+(.+?)\s+components",
+                            operation.intent,
+                            flags=re.IGNORECASE,
+                        )
+                        if connector_match:
+                            target_words = set(
+                                re.findall(
+                                    r"[a-z0-9]{4,}",
+                                    f"{connector_match.group(1)} {connector_match.group(2)}",
+                                )
+                            ) | {"connector"}
             fact_words: set[str] = set()
             for page in context.page_knowledge:
                 if f"page:{page.url}" not in scene.evidence:

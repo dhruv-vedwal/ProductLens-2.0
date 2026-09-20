@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 from app.contracts.models import ActionCapability, ObservedElement, ProductContext, Target
 
@@ -125,7 +126,7 @@ def select_rehearsal_capability(
         )
 
     page_by_url = {page.url.rstrip("/"): page for page in context.page_knowledge}
-    ranked: list[tuple[int, ActionCapability, set[str], set[str]]] = []
+    ranked: list[tuple[int, int, ActionCapability, set[str], set[str]]] = []
     for capability in eligible:
         page = page_by_url.get(capability.source_url.rstrip("/"))
         page_evidence = " ".join(
@@ -138,23 +139,29 @@ def select_rehearsal_capability(
         )
         source_terms = _words(page_evidence) - _PAGE_NOISE
         matched = requested & source_terms
+        # A capability's canonical route is strong generic evidence of its
+        # entity.  This resolves sibling forms whose surrounding navigation
+        # mentions the same nouns (for example a contact form shown beside a
+        # lead workspace) without encoding any application-specific route.
+        path_terms = _words(urlsplit(capability.source_url).path) - _PAGE_NOISE
+        url_matched = requested & path_terms
         # A form on "Invoice templates" is not as relevant to an Invoice
         # walkthrough as one on "Invoices".  This generic penalty favours the
         # page whose visible purpose adds the least unrelated taxonomy.
         unrelated = source_terms - requested - _PAGE_NOISE
         if not matched:
             continue
-        score = len(matched) * 10 - min(6, len(unrelated))
-        ranked.append((score, capability, matched, unrelated))
+        score = len(matched) * 10 + len(url_matched) * 20 - min(6, len(unrelated))
+        ranked.append((score, len(url_matched), capability, matched, unrelated))
     if not ranked:
         raise CapabilitySelectionError(
             "no safe submit-capable form is grounded in the requested feature"
         )
-    ranked.sort(key=lambda entry: entry[0], reverse=True)
-    best_score, best, _, _ = ranked[0]
-    tied = [entry for entry in ranked if entry[0] == best_score]
+    ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    best_score, best_url_matches, best, _, _ = ranked[0]
+    tied = [entry for entry in ranked if (entry[0], entry[1]) == (best_score, best_url_matches)]
     if len(tied) > 1:
-        sources = ", ".join(sorted({entry[1].source_url for entry in tied}))
+        sources = ", ".join(sorted({entry[2].source_url for entry in tied}))
         raise CapabilitySelectionError(f"ambiguous form capability sources: {sources}")
     return best
 

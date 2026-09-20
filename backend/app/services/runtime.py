@@ -61,6 +61,7 @@ def build_job_service(settings: Settings | None = None) -> tuple[RunRepository, 
                 settings.browserbase_api_key,
                 settings.browserbase_project_id,
                 session_timeout_seconds=settings.browserbase_session_timeout_seconds,
+                use_proxies=settings.browserbase_use_proxies,
             )
             if settings.browserbase_api_key
             else None,

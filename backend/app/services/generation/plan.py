@@ -34,6 +34,7 @@ class PlanMixin:
         allow_external_side_effects: bool,
         audience: str,
         target_duration_seconds: int,
+        trace_only: bool = False,
     ) -> DemoPlan:
         """Plan from persisted discovery evidence; no browser or provider session is reused."""
         artifacts = RunArtifacts(artifact_root, run_id)
@@ -139,6 +140,14 @@ class PlanMixin:
             for relation in context.objective.supporting_relationships:
                 source_phrase = " ".join(re.findall(r"[a-z0-9]{3,}", relation.source.casefold()))
                 target_phrase = " ".join(re.findall(r"[a-z0-9]{3,}", relation.target.casefold()))
+                relation_words = set(
+                    re.findall(
+                        r"[a-z0-9]{3,}",
+                        f"{relation.source} {relation.target}".casefold(),
+                    )
+                )
+                if relation_words & {"it", "them", "this", "that", "these", "those"}:
+                    continue
                 if (
                     source_phrase
                     and target_phrase
@@ -213,6 +222,20 @@ class PlanMixin:
                 [step.operation for step in plan.workflow_steps]
             ).artifact(),
         )
+        if trace_only:
+            # Capability/certification runs prove browser behavior only. Do
+            # not spend provider calls on editorial prose or reject a valid
+            # interaction because a future narration brief is still being
+            # refined; the verified trace is the sole promotion boundary.
+            artifacts.write_json(
+                "planning/trace-only.json",
+                {
+                    "mode": "trace_only",
+                    "presentation_stages": "not_started",
+                    "trace_consumers": ["verification", "scene_segmentation"],
+                },
+            )
+            return plan
         storyboard = build_editorial_storyboard(context, plan)
         storyboard = await enrich_editorial_brief(context, storyboard, self.planner.provider)
         storyboard = await enrich_editorial_storyboard(context, storyboard, self.planner.provider)

@@ -690,7 +690,7 @@ def _viewer_ready(text: str, title: str = "") -> bool:
     # ``Here, Product Sections Controls Workspace.``; it can overlap evidence
     # yet still says nothing about what the viewer should understand.
     if not normalized.casefold().startswith("welcome to ") and not re.search(
-        r"\b(?:is|are|was|were|has|have|lets|helps|shows|keeps|brings|groups|gathers|contains|connects|supports|organizes|tracks|lists|offers|provides|explains|uses|creates|draws|draw|moves|opens|opening|captures|gives|makes|enables|demonstrates|appears|remains|becomes|causes|caused|prevents|reduces|handles|processes|integrates|improves|requires|highlights|presents|introduces|focuses|describes|details|documents|covers|summarizes|summarises|includes|preserves|records|selects|select|selecting|choosing|adds|completes|can|will|names|prepares|places|types|enters|sketches|connects|stays|surfaces|reveals|confirms|distinguishes|carries|checks)\b",
+        r"\b(?:is|are|was|were|has|have|lets|helps|shows|keeps|brings|groups|gathers|contains|connects|supports|organizes|tracks|lists|offers|provides|explains|uses|creates|draws|draw|moves|open|opens|opening|captures|gives|makes|enables|demonstrates|appears|remains|becomes|causes|caused|prevents|reduces|handles|processes|integrates|improves|requires|highlights|presents|introduces|focuses|describes|details|documents|covers|summarizes|summarises|includes|preserves|records|selects|select|selecting|choosing|choose|adds|completes|can|will|names|prepares|places|types|type|enters|enter|fills|fill|sketches|connects|stays|surfaces|reveals|confirms|distinguishes|carries|checks|switch|switches|label|labeled|labelled|engineer|builds|designs|develops|see|sees|contributing|contributes)\b",
         normalized,
         flags=re.IGNORECASE,
     ):
@@ -767,7 +767,7 @@ def _readable_fact(value: str) -> str:
         r"Have\s+(?:an|a)|(?:An?|The)\s+[a-z][\w-]*|Real-world\s+|Generates\s+|"
         r"Proxies\s+|Webhooks\s+|Fill\s+out\s+|Here\s+is\s+how|Learn\s+how|How\s+to\s+|"
         r"Explore\s+(?:a|an)\s+|Open\s+(?:a|an|the)\s+|Tap\s+(?:the|a|an)\s+|"
-        r"Saved\s+|Auto[- ]calculated\s+|Tracks\s+|Shows\s+|Provides\s+|"
+        r"Saved\s+|Auto[- ]calculated\s+|Tracks\s+|Shows\s+|Provides\s+|You\s+see\s+|"
         r"Instead\s+of\s+|Architecting\s+|Building\s+|Designing\s+|"
         r"Integrating\s+|Translating\s+|Optimized\s+|Direct\s+|"
         r"Engineered\s+|Developed\s+|Improved\s+)",
@@ -1253,7 +1253,15 @@ def _repair_repeated_narration(
             ),
             None,
         )
-        if previous is not None and scene.operation_id is not None:
+        if (
+            previous is not None
+            and scene.operation_id is not None
+            and not re.search(
+                r"architecture card|directional connection|chat flow|architecture map|text tool|visible controls and information|starting context|field is visible|open .*fields|type the observed|choose the observed|submit .*observed",
+                scene.narration,
+                flags=re.IGNORECASE,
+            )
+        ):
             page = next(
                 (
                     item
@@ -1560,10 +1568,22 @@ def _fallback_presenter_intro(product: str, opening: str, subject: str = "") -> 
             else " ".join(opening_words[:24])
         )
     parts = [f"Welcome to {product}."]
-    if opening and _viewer_ready(opening):
+    if (
+        opening
+        and _viewer_ready(opening)
+        and "control in focus for this step on screen" not in opening.casefold()
+    ):
         parts.append(_human_sentence(opening))
     elif subject:
-        parts.append(_interaction_skeleton(subject))
+        # A missing/weak page fact should not leak an internal locator
+        # template ("control in focus") into the presenter opening.  Keep the
+        # fallback product-neutral while naming the requested subject so the
+        # audience knows what this walkthrough will establish.
+        subject_text = _clean(subject, 72)
+        parts.append(
+            f"Today we'll walk through {subject_text} and show the visible workflow "
+            "from its starting context to the verified result."
+        )
     return " ".join(parts)
 
 

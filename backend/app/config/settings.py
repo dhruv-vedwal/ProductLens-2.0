@@ -33,6 +33,7 @@ _PROVIDER_ENV_NAMES = {
     "OPENROUTER_STRUCTURED_TIMEOUT_SECONDS",
     "PRODUCTLENS_CLOUD_CAPTURE_TIMEOUT_SECONDS",
     "BROWSERBASE_SESSION_TIMEOUT_SECONDS",
+    "BROWSERBASE_USE_PROXIES",
 }
 
 
@@ -123,6 +124,7 @@ class Settings:
     s3_region: str | None
     cloud_capture_timeout_seconds: int
     browserbase_session_timeout_seconds: int
+    browserbase_use_proxies: bool
     stagehand_observe_timeout_seconds: float
     repair_wall_clock_budget_seconds: int
 
@@ -219,6 +221,10 @@ class Settings:
                 default=1800,
                 minimum=60,
                 maximum=1800,
+            ),
+            browserbase_use_proxies=_boolean_setting(
+                _setting_value("BROWSERBASE_USE_PROXIES", project_environment),
+                default=False,
             ),
             stagehand_observe_timeout_seconds=_bounded_float(
                 _setting_value(

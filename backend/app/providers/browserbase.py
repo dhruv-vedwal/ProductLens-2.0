@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
@@ -29,11 +28,13 @@ class BrowserbaseProvider:
         project_id: str | None = None,
         *,
         session_timeout_seconds: int = 1800,
+        use_proxies: bool = False,
         stagehand_extension_path: Path | None = None,
     ):
         self.api_key = api_key
         self.project_id = project_id
         self.session_timeout_seconds = max(60, min(1800, int(session_timeout_seconds)))
+        self.use_proxies = bool(use_proxies)
         self.stagehand_extension_path = stagehand_extension_path or (
             Path(__file__).resolve().parents[2]
             / "stagehand/node_modules/@browserbasehq/stagehand/dist/assets/stagehand-extension.zip"
@@ -101,7 +102,11 @@ class BrowserbaseProvider:
                         "timeout": self.session_timeout_seconds,
                         **({"region": region} if region else {}),
                         **({"keepAlive": keep_alive} if keep_alive is not None else {}),
-                        **({"proxies": proxies} if proxies is not None else {}),
+                        **(
+                            {"proxies": proxies}
+                            if proxies is not None
+                            else ({"proxies": True} if self.use_proxies else {})
+                        ),
                         **({"userMetadata": user_metadata} if user_metadata else {}),
                         # Developer-plan Identity includes automatic CAPTCHA
                         # solving. Keep it explicit so a project-level setting
@@ -356,42 +361,60 @@ class BrowserbaseProvider:
             # completed.  Callers still provide the bound; this provider does
             # not invent a shorter product-duration limit.
             assembly_timeout = self._bounded_deadline(timeout_seconds, minimum=30)
+            command = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file,http,https,tcp,tls,crypto",
+                "-i",
+                str(playlist_path),
+                "-map",
+                "0:v:0",
+                "-an",
+                "-c",
+                "copy",
+                str(output),
+            ]
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
             try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        subprocess.run,
-                        [
-                            "ffmpeg",
-                            "-y",
-                            "-hide_banner",
-                            "-loglevel",
-                            "error",
-                            "-protocol_whitelist",
-                            "file,http,https,tcp,tls,crypto",
-                            "-i",
-                            str(playlist_path),
-                            "-map",
-                            "0:v:0",
-                            "-an",
-                            "-c",
-                            "copy",
-                            str(output),
-                        ],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=assembly_timeout,
-                    ),
-                    timeout=assembly_timeout + 5,
+                _, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=assembly_timeout
                 )
-            except (TimeoutError, subprocess.TimeoutExpired) as error:
+            except TimeoutError as error:
+                # ``wait_for(to_thread(subprocess.run))`` leaves ffmpeg alive
+                # after the coroutine is cancelled.  On Windows that process
+                # retains the temporary playlist and the cleanup then raises
+                # WinError 32, masking the actual bounded timeout.  Own the
+                # child process explicitly so it is terminated before cleanup.
+                try:
+                    process.kill()
+                finally:
+                    await process.communicate()
                 raise RuntimeError(
                     f"Browserbase replay assembly timed out after {assembly_timeout}s"
                 ) from error
-        except (OSError, subprocess.CalledProcessError) as error:
+            if process.returncode != 0:
+                detail = stderr.decode("utf-8", errors="replace")[-500:]
+                raise RuntimeError(
+                    f"Browserbase replay assembly failed (exit {process.returncode}): {detail}"
+                )
+        except OSError as error:
             raise RuntimeError(f"Browserbase replay assembly failed: {error}") from error
         finally:
-            playlist_path.unlink(missing_ok=True)
+            try:
+                playlist_path.unlink(missing_ok=True)
+            except PermissionError:
+                # A provider/runtime antivirus handle may close a few ticks
+                # after ffmpeg exits.  Cleanup is non-evidence; do not replace
+                # a completed/diagnostic recording with a misleading failure.
+                pass
         if not output.is_file() or output.stat().st_size == 0:
             raise RuntimeError("Browserbase replay assembly produced an empty video")
         return {

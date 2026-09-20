@@ -831,7 +831,20 @@ class ExecutionEngine:
                     # Both calls resolve a fresh locator from the live DOM. A
                     # retry therefore re-grounds semantically, not by reusing an
                     # old coordinate or a cached element handle.
-                    before_observation = await self._record_interaction_observation()
+                    # Low-level drawing gestures already carry their own
+                    # target-local DOM/pixel witness from the adapter.  A full
+                    # accessibility/DOM observation before and after every
+                    # stroke is both redundant and prohibitively slow on
+                    # cloud browsers (a detailed canvas can contain dozens of
+                    # strokes/connectors).  Keep the canonical event
+                    # snapshots, but reserve the expensive semantic boundary
+                    # observation for operations whose target can change the
+                    # page state.
+                    before_observation = (
+                        None
+                        if operation.kind is OperationKind.POINTER_SEQUENCE
+                        else await self._record_interaction_observation()
+                    )
                     operation = self._select_grounded_operation(operation, before_observation)
                     kernel_intent = self._action_intent_for_operation(operation)
                     if kernel_intent is not None and before_observation is not None:
@@ -1113,7 +1126,6 @@ class ExecutionEngine:
                             OperationKind.SUBMIT,
                             OperationKind.CREATE_RECORD,
                             OperationKind.DRAG,
-                            OperationKind.POINTER_SEQUENCE,
                             OperationKind.VERIFY_STATE,
                         }
                     ):
@@ -1189,7 +1201,11 @@ class ExecutionEngine:
                 after["verified_outcome"] = verified_outcome
             if semantic_boundary is not None:
                 after["semantic_boundary"] = semantic_boundary
-            after_observation = await self._record_interaction_observation()
+            after_observation = (
+                None
+                if operation.kind is OperationKind.POINTER_SEQUENCE
+                else await self._record_interaction_observation()
+            )
             if (
                 before_observation is not None
                 and before_observation.page_state is not None

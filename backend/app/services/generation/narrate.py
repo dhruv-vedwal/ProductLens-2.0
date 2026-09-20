@@ -450,6 +450,54 @@ class NarrateMixin:
                     }
                 )
             script = visual_lines
+            # Visual-editor traces are intentionally rich: a complete
+            # drawing journey includes every verified placement, label entry,
+            # and connector.  ``script_from_trace`` may compress pointer
+            # events for ordinary walkthroughs, which can leave the selected
+            # last connector scene paired with the first connector's event
+            # (and therefore fail scene/evidence QA).  Rebind visual captions
+            # directly from the approved storyboard so every scene ID owns
+            # its exact browser event and semantic narration.
+            if storyboard is not None:
+                events_by_operation = {
+                    event.operation_id: event
+                    for event in trace.events
+                    if event.success and event.operation_id
+                }
+                visual_storyboard_lines: list[dict[str, object]] = []
+                for scene in storyboard.scenes:
+                    if not scene.operation_id:
+                        continue
+                    event = events_by_operation.get(scene.operation_id)
+                    if event is None:
+                        continue
+                    visual_storyboard_lines.append(
+                        {
+                            "event_id": event.id,
+                            "scene_id": scene.id,
+                            "text": scene.narration,
+                            "facts": list(scene.evidence[:8]),
+                        }
+                    )
+                if visual_storyboard_lines:
+                    first_line = visual_storyboard_lines[0]
+                    opening_scene = next(
+                        (
+                            scene
+                            for scene in storyboard.scenes
+                            if scene.interaction == "opening" or scene.id == "opening"
+                        ),
+                        None,
+                    )
+                    if opening_scene is not None:
+                        opening_text = str(opening_scene.narration or "").strip()
+                        if opening_text and opening_text not in str(first_line["text"]):
+                            first_line = {
+                                **first_line,
+                                "opening": True,
+                                "text": f"{opening_text} {first_line['text']}".strip(),
+                            }
+                    script = [first_line, *visual_storyboard_lines[1:]]
         # Authentication is part of the visible journey whenever a clean
         # production context had to sign in, even if the user phrased the
         # objective as an already-authenticated experience.  Keep these
@@ -573,7 +621,7 @@ class NarrateMixin:
                     first["opening"] = True
                     product_lines = [first, *product_lines[1:]]
                 script = [*auth_lines, *product_lines]
-        elif trace.moments:
+        elif trace.moments and not visual_request:
             script = script_from_moments(
                 trace,
                 product_title=context.title or "the product",
@@ -610,7 +658,10 @@ class NarrateMixin:
                     **line,
                     "text": (
                         str(line.get("text") or "")
-                        if str(line.get("scene_id") or "").startswith("auth:")
+                        if (
+                            str(line.get("scene_id") or "").startswith("auth:")
+                            or bool(line.get("opening"))
+                        )
                         else _storyboard_line_text(line)
                     ),
                 }

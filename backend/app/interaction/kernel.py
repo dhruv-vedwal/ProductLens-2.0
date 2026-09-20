@@ -30,12 +30,15 @@ class InteractionPolicy:
     """Bounds applied before a provider is permitted to dispatch an action."""
 
     minimum_confidence: float = 0.80
+    ambiguity_margin: float = 0.03
     allow_high_risk: bool = False
     max_recovery_decisions: int = 8
 
     def __post_init__(self) -> None:
         if not 0 <= self.minimum_confidence <= 1:
             raise ValueError("minimum_confidence must be between 0 and 1")
+        if not 0 <= self.ambiguity_margin <= 1:
+            raise ValueError("ambiguity_margin must be between 0 and 1")
         if self.max_recovery_decisions < 0:
             raise ValueError("max_recovery_decisions cannot be negative")
 
@@ -114,7 +117,16 @@ class InteractionKernel:
         ]
         if not eligible:
             raise ValueError("no safe, sufficiently grounded action candidate")
-        return max(eligible, key=lambda item: (item.confidence, item.id))
+        ranked = sorted(eligible, key=lambda item: (item.confidence, item.id), reverse=True)
+        if len(ranked) > 1:
+            first, second = ranked[0], ranked[1]
+            first_target = first.action.target.model_dump(mode="json") if first.action.target else {}
+            second_target = second.action.target.model_dump(mode="json") if second.action.target else {}
+            if first_target != second_target and (
+                first.confidence - second.confidence
+            ) <= self.policy.ambiguity_margin:
+                raise ValueError("target selection is ambiguous; re-observe before dispatch")
+        return ranked[0]
 
     def record_attempt(self, attempt: ActionAttempt) -> None:
         """Persist an attempt and enforce the no-replay-after-dispatch rule."""
