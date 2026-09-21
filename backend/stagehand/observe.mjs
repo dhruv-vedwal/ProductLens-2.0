@@ -13,6 +13,16 @@ const read = await new Promise((resolve, reject) => {
 let stagehand;
 let browser;
 let extensionDiscoverySocket;
+// ProductLens owns the Browserbase session in this mode. Stagehand attaches
+// only to enrich an already-authenticated state; closing the Stagehand client
+// must not close the shared remote context that Playwright is recording.
+const attachedExistingSession = Boolean(
+  read.environment === "BROWSERBASE" &&
+  // A session id is sufficient ownership proof.  The signed CDP URL may be
+  // unavailable on a transient provider response, but Stagehand must still
+  // never close ProductLens' shared production session on process teardown.
+  read.browserbaseSessionID
+);
 // URL equality must be about the product origin, not the exact serialized
 // URL. Browserbase may expose an HTTP entry URL as HTTPS after redirect, and
 // sessions can retain query/hash state from the previous page. Comparing the
@@ -464,6 +474,8 @@ try {
   process.exitCode = 1;
 } finally {
   try { extensionDiscoverySocket?.close(); } catch (_) {}
-  if (stagehand) await stagehand.close();
-  else if (browser) await browser.close();
+  if (!attachedExistingSession) {
+    if (stagehand) await stagehand.close();
+    else if (browser) await browser.close();
+  }
 }

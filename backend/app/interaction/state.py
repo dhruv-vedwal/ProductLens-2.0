@@ -37,6 +37,9 @@ def _route_identity(url: str) -> str:
 def classify_control(raw: Mapping[str, object]) -> tuple[str, float]:
     """Classify from observable semantics; names are not behavior authority."""
 
+    semantic_name = _clean(
+        raw.get("name") or raw.get("label") or raw.get("placeholder")
+    ).casefold()
     role = _clean(raw.get("role")).casefold()
     tag = _clean(raw.get("tag")).casefold()
     input_type = _clean(raw.get("type") or raw.get("input_type")).casefold()
@@ -52,7 +55,18 @@ def classify_control(raw: Mapping[str, object]) -> tuple[str, float]:
         return "file_picker", 0.99
     if contenteditable:
         return "rich_text", 0.9
+    # Accessibility semantics are stronger evidence than an HTML input type:
+    # custom date/time widgets can expose an input[type=date] while actually
+    # presenting a list-backed slot picker.
+    if role == "combobox" or haspopup == "listbox":
+        if raw.get("depends_on") and bool(raw.get("disabled") or raw.get("loading")):
+            return "dependent_async", 0.9
+        return ("autocomplete" if autocomplete in {"list", "both"} else "combobox", 0.96)
+    if input_type in {"time", "datetime-local"}:
+        return "time_input", 0.99
     if input_type == "date":
+        if re.search(r"\b(?:time|slot|appointment|schedule)\b", semantic_name):
+            return "time_slot", 0.86
         return "native_date", 0.99
     if input_type == "email":
         return "email_input", 0.99
@@ -64,10 +78,6 @@ def classify_control(raw: Mapping[str, object]) -> tuple[str, float]:
         return "radio", 0.99
     if tag == "select":
         return "native_select", 0.99
-    if role == "combobox" or haspopup == "listbox":
-        if raw.get("depends_on") and bool(raw.get("disabled") or raw.get("loading")):
-            return "dependent_async", 0.9
-        return ("autocomplete" if autocomplete in {"list", "both"} else "combobox", 0.96)
     if role == "option" and raw.get("time_value"):
         return "time_slot", 0.9
     if role in {"gridcell", "option"} and raw.get("date_value"):

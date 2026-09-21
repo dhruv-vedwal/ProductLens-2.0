@@ -24,6 +24,310 @@ from app.planning.production.shared import *
 
 class GroundingMixin:
     @staticmethod
+    def _repair_missing_postconditions(proposal: WorkflowProposal) -> WorkflowProposal:
+        """Add portable state witnesses when a structured action omitted one.
+
+        Model output often captures the intended operation but forgets the
+        small verification predicate required by ProductLens' executor.  The
+        predicate can be derived from the universal operation contract for
+        reversible actions; submit/create operations deliberately remain
+        fail-closed because only an independently observed outcome may prove
+        them successful.
+        """
+        repaired: list[SemanticOperation] = []
+        value_kinds = {
+            OperationKind.FILL_TEXT,
+            OperationKind.FILL_EMAIL,
+            OperationKind.FILL_PHONE,
+            OperationKind.SEARCH,
+            OperationKind.SELECT_OPTION,
+            OperationKind.SELECT_DATE,
+            OperationKind.SELECT_DATE_RANGE,
+        }
+        visible_kinds = {OperationKind.OPEN_MODAL}
+        changed_kinds = {
+            OperationKind.CLICK,
+            OperationKind.OPEN_NAVIGATION_ITEM,
+            OperationKind.CLOSE_MODAL,
+            OperationKind.APPLY_FILTER,
+            OperationKind.CHECK,
+            OperationKind.UNCHECK,
+            OperationKind.CHOOSE_RADIO,
+            OperationKind.DRAG,
+            OperationKind.KEY_PRESS,
+        }
+        for operation in proposal.steps:
+            if operation.postconditions or operation.target is None:
+                repaired.append(operation)
+                continue
+            condition: Postcondition | None = None
+            if operation.kind in value_kinds and operation.value not in (None, ""):
+                condition = Postcondition(
+                    kind="value", expected=operation.value, target=operation.target
+                )
+            elif operation.kind in visible_kinds:
+                condition = Postcondition(kind="visible", expected=True, target=operation.target)
+            elif operation.kind in changed_kinds:
+                condition = Postcondition(kind="changed", expected=True, target=operation.target)
+            if condition is None:
+                repaired.append(operation)
+            else:
+                repaired.append(operation.model_copy(update={"postconditions": [condition]}))
+        return proposal.model_copy(update={"steps": repaired})
+
+    @staticmethod
+    def _repair_visual_gestures(
+        proposal: WorkflowProposal, context: ProductContext
+    ) -> WorkflowProposal:
+        """Complete underspecified visual gestures from observed surface geometry.
+
+        Structured models sometimes identify the right canvas and intent but
+        omit the concrete path required by the execution contract.  Rejecting
+        that plan is safer than drawing a guessed path, but silently falling
+        back to a page tour is worse: it produces a video that claims to
+        demonstrate an editor without changing it.  When the target is an
+        observed canvas/SVG/application surface, derive a bounded, relative
+        gesture from that surface and preserve the model's semantic intent.
+        This is a universal browser gesture repair, not a product or route
+        recipe; non-surface targets remain a hard planning failure.
+        """
+        visual_tags = {"canvas", "svg"}
+        surface_items = [
+            item
+            for item in [*context.elements, *context.navigation]
+            if item.tag.casefold() in visual_tags
+            or (item.role or "").casefold() in {"application", "img"}
+            or "workspace" in item.name.casefold()
+            or "canvas" in item.name.casefold()
+        ]
+        if not surface_items:
+            return proposal
+
+        def match_surface(operation: SemanticOperation) -> ObservedElement | None:
+            target = operation.target
+            if target is None:
+                return None
+            candidates = [
+                item
+                for item in surface_items
+                if (not target.source_url or item.source_url == target.source_url)
+                and (
+                    (target.selector and item.selector == target.selector)
+                    or item.name.casefold() == target.name.casefold()
+                )
+            ]
+            if len(candidates) == 1:
+                return candidates[0]
+            # Models may shorten an observed surface label (``canvas`` for
+            # ``canvas workspace``) or choose the implementation tag as the
+            # selector. Resolve that shorthand only when one surface has the
+            # strongest semantic token overlap; never pick an arbitrary DOM
+            # element from a dense editor.
+            wanted = set(re.findall(r"[a-z0-9]{3,}", target.name.casefold()))
+            scored = []
+            for item in surface_items:
+                if target.source_url and item.source_url != target.source_url:
+                    continue
+                observed = set(re.findall(r"[a-z0-9]{3,}", item.name.casefold()))
+                if target.selector and target.selector.casefold() == item.tag.casefold():
+                    observed.add(item.tag.casefold())
+                score = len(wanted & observed)
+                if score:
+                    scored.append((score, item))
+            if scored:
+                best = max(score for score, _item in scored)
+                best_items = [item for score, item in scored if score == best]
+                if len(best_items) == 1:
+                    return best_items[0]
+                # A visual editor can expose an SVG accessibility overlay and
+                # the underlying canvas with the same ``workspace`` label. In
+                # that generic tie, the real canvas is the safer drawing
+                # surface; this does not rely on a product name or selector.
+                canvas_items = [item for item in best_items if item.tag.casefold() == "canvas"]
+                if len(canvas_items) == 1:
+                    return canvas_items[0]
+            return None
+
+        def visual_pattern(operation: SemanticOperation, value: dict) -> str:
+            explicit = str(value.get("pattern") or "").strip()
+            if explicit:
+                return explicit
+            intent = operation.intent.casefold()
+            if re.search(r"\b(connect|arrow|link|flow|between)\b", intent):
+                return "connector_segment"
+            if re.search(r"\b(box|rectangle|component|shape|node|service)\b", intent):
+                return "shape_box"
+            if re.search(r"\b(label|text|name|title|type)\b", intent):
+                return "text_placement"
+            return "short_reversible_stroke"
+
+        def path_signature(candidate: object) -> tuple[tuple[float, float], ...] | None:
+            if not isinstance(candidate, list):
+                return None
+            points = [
+                (round(float(point["x"]), 3), round(float(point["y"]), 3))
+                for point in candidate
+                if isinstance(point, dict)
+                and isinstance(point.get("x"), (int, float))
+                and isinstance(point.get("y"), (int, float))
+            ]
+            return tuple(points) if len(points) >= 2 else None
+
+        shape_signatures = [
+            path_signature(
+                (operation.value or {}).get("relative_points")
+                if isinstance(operation.value, dict)
+                else None
+            )
+            for operation in proposal.steps
+            if operation.kind is OperationKind.POINTER_SEQUENCE
+            and visual_pattern(
+                operation, operation.value if isinstance(operation.value, dict) else {}
+            )
+            == "shape_box"
+        ]
+        normalize_shape_layout = len(shape_signatures) > 1 and len(
+            {signature for signature in shape_signatures if signature is not None}
+        ) < len(shape_signatures)
+        shape_index = 0
+        shape_centers: list[tuple[float, float]] = []
+        repaired: list[SemanticOperation] = []
+        for operation in proposal.steps:
+            if operation.kind is not OperationKind.POINTER_SEQUENCE:
+                repaired.append(operation)
+                continue
+            value = operation.value if isinstance(operation.value, dict) else {}
+            points = value.get("points")
+            relative_points = value.get("relative_points")
+            pattern = visual_pattern(operation, value)
+
+            def valid_path(candidate: object) -> bool:
+                return (
+                    isinstance(candidate, list)
+                    and len(candidate) >= 2
+                    and all(
+                        isinstance(point, dict)
+                        and isinstance(point.get("x"), (int, float))
+                        and isinstance(point.get("y"), (int, float))
+                        for point in candidate
+                    )
+                )
+
+            if valid_path(points) or valid_path(relative_points):
+                path = points if valid_path(points) else relative_points
+                if normalize_shape_layout and pattern == "shape_box":
+                    # If a model repeats one gesture for every component,
+                    # deterministically spread the observed components into
+                    # a readable grid. This is a generic layout repair, not a
+                    # product-specific diagram recipe.
+                    column = shape_index % 3
+                    row = shape_index // 3
+                    center = (0.22 + column * 0.28, 0.28 + row * 0.26)
+                    path = [
+                        {"x": center[0] - 0.09, "y": center[1] - 0.08},
+                        {"x": center[0] + 0.09, "y": center[1] + 0.08},
+                    ]
+                    shape_index += 1
+                    shape_centers.append(center)
+                elif normalize_shape_layout and pattern == "text_placement" and shape_centers:
+                    center = shape_centers[-1]
+                    path = [
+                        {"x": center[0] - 0.01, "y": center[1]},
+                        {"x": center[0] + 0.01, "y": center[1]},
+                    ]
+                elif normalize_shape_layout and pattern == "connector_segment" and len(shape_centers) >= 2:
+                    source, target = shape_centers[-2:]
+                    path = [{"x": source[0], "y": source[1]}, {"x": target[0], "y": target[1]}]
+                updated_value = {**value}
+                if path is not None and path is not points:
+                    updated_value["relative_points"] = path
+                    updated_value.pop("points", None)
+                updated_value.setdefault("pattern", pattern)
+                if not operation.postconditions:
+                    repaired.append(
+                        operation.model_copy(
+                            update={
+                                "value": updated_value,
+                                "postconditions": [
+                                    Postcondition(
+                                        kind="surface_changed",
+                                        expected=True,
+                                        target=operation.target,
+                                    )
+                                ]
+                            }
+                        )
+                    )
+                else:
+                    repaired.append(operation.model_copy(update={"value": updated_value}))
+                continue
+            surface = match_surface(operation)
+            if surface is None:
+                repaired.append(operation)
+                continue
+            intent = operation.intent.casefold()
+            if re.search(r"\b(connect|arrow|link|flow|between)\b", intent):
+                pattern = "connector_segment"
+                path = [{"x": 0.22, "y": 0.50}, {"x": 0.78, "y": 0.50}]
+            elif re.search(r"\b(box|rectangle|component|shape|node|service)\b", intent):
+                pattern = "shape_box"
+                path = [
+                    {"x": 0.25, "y": 0.28},
+                    {"x": 0.68, "y": 0.62},
+                ]
+            elif re.search(r"\b(label|text|name|title|type)\b", intent):
+                pattern = "text_placement"
+                path = [{"x": 0.38, "y": 0.42}, {"x": 0.40, "y": 0.43}]
+            else:
+                pattern = "short_reversible_stroke"
+                path = [{"x": 0.30, "y": 0.50}, {"x": 0.70, "y": 0.50}]
+            if normalize_shape_layout and pattern == "shape_box":
+                column = shape_index % 3
+                row = shape_index // 3
+                center = (0.22 + column * 0.28, 0.28 + row * 0.26)
+                path = [
+                    {"x": center[0] - 0.09, "y": center[1] - 0.08},
+                    {"x": center[0] + 0.09, "y": center[1] + 0.08},
+                ]
+                shape_index += 1
+                shape_centers.append(center)
+            elif normalize_shape_layout and pattern == "text_placement" and shape_centers:
+                center = shape_centers[-1]
+                path = [
+                    {"x": center[0] - 0.01, "y": center[1]},
+                    {"x": center[0] + 0.01, "y": center[1]},
+                ]
+            elif normalize_shape_layout and pattern == "connector_segment" and len(shape_centers) >= 2:
+                source, target = shape_centers[-2:]
+                path = [{"x": source[0], "y": source[1]}, {"x": target[0], "y": target[1]}]
+            evidence = list(
+                dict.fromkeys(
+                    [
+                        *operation.evidence_refs,
+                        f"geometry:{surface.source_url or context.url}:{surface.name}",
+                        f"surface:{surface.source_url or context.url}:{surface.selector}",
+                    ]
+                )
+            )
+            repaired.append(
+                operation.model_copy(
+                    update={
+                        "value": {**value, "pattern": pattern, "relative_points": path},
+                        "evidence_refs": evidence,
+                        "postconditions": operation.postconditions
+                        or [
+                            Postcondition(
+                                kind="surface_changed",
+                                expected=True,
+                                target=operation.target,
+                            )
+                        ],
+                    }
+                )
+            )
+        return proposal.model_copy(update={"steps": repaired})
+
+    @staticmethod
     def _validate_objective_grounding(context: ProductContext, candidate) -> None:
         """Refuse a polished route tour when required objective evidence is absent.
 

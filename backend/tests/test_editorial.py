@@ -22,7 +22,6 @@ from app.contracts.models import (
 )
 from app.narration.script import bind_opening_to_first_event
 from app.planning.production import ProductionPlanningService
-from app.providers.errors import ProviderError
 from app.presentation.editorial import (
     _caption_length_bound,
     _distinct_editorial_narration,
@@ -42,6 +41,7 @@ from app.presentation.editorial import (
     editorial_script,
     narrated_storyboard_scenes,
 )
+from app.providers.errors import ProviderError
 
 
 def test_placeholder_copy_is_not_used_as_editorial_evidence():
@@ -233,6 +233,53 @@ def test_click_narration_explains_observed_state_change_when_page_inventory_is_n
     assert "control in focus" in narration.lower()
     assert "activates" not in narration.lower()
     assert "next product state" not in narration.lower()
+
+
+def test_visual_operation_narration_precedes_repeated_editor_page_fact():
+    page = PageKnowledge(
+        url="https://example.test/",
+        title="Diagram editor",
+        purpose="Diagram editor",
+        visible_facts=["Diagram editor :: Your drawings are saved in your browser's storage."],
+        fingerprint="diagram-editor",
+    )
+    context = ProductContext(
+        url=page.url,
+        title=page.title,
+        application_type="web_application",
+        page_knowledge=[page],
+        objective=ObjectiveSpec(raw="draw a system diagram", demo_type="feature_walkthrough"),
+        confidence=1,
+    )
+    operation = SemanticOperation(
+        kind=OperationKind.POINTER_SEQUENCE,
+        intent="Draw the 'Database' rectangle on the canvas.",
+        target=Target(name="canvas workspace", selector="body", source_url=page.url),
+        page_url=page.url,
+    )
+    narration = _observed_narration(context, operation, "canvas workspace")
+    assert "database" in narration.lower()
+    assert "drawn" in narration.lower()
+    assert "saved in your browser" not in narration.lower()
+
+
+def test_visual_operation_narration_handles_planner_variants_without_generic_filler():
+    rectangle = SemanticOperation(
+        kind=OperationKind.POINTER_SEQUENCE,
+        intent="Draw a rectangle for the 'User Interface'.",
+        target=Target(name="canvas workspace", selector="canvas"),
+        value={"pattern": "shape_box"},
+    )
+    label = SemanticOperation(
+        kind=OperationKind.POINTER_SEQUENCE,
+        intent="Place the text cursor for the 'User Interface' label.",
+        target=Target(name="canvas workspace", selector="canvas"),
+        value={"pattern": "text_placement"},
+    )
+    from app.presentation.editorial.narrative import _semantic_operation_narration
+
+    assert "user interface" in _semantic_operation_narration(rectangle).casefold()
+    assert "user interface" in _semantic_operation_narration(label).casefold()
 
 
 def test_scene_source_keeps_semantic_target_evidence_without_an_element_record():
@@ -3198,9 +3245,12 @@ def test_reentry_narration_is_diversified_only_for_the_same_page():
     board = build_editorial_storyboard(context, plan)
     first = board.scenes[1].narration
     second = board.scenes[2].narration
-    # Without enrich, re-entry drafts stay fact-or-skeleton (no invented "return" chrome).
-    assert "control in focus" in first.casefold()
-    assert "control in focus" in second.casefold()
+    # Even deterministic fallback copy must be grounded in the observed page;
+    # the old "control in focus" skeleton hid the product story and produced
+    # generic captions when the editorial provider was unavailable.
+    assert "leads" in first.casefold()
+    assert "leads" in second.casefold()
+    assert "return" not in second.casefold()
     assert "leads" in first.casefold() and "leads" in second.casefold()
     assert "next view" not in second.casefold()
     assert "activates" not in second.casefold()

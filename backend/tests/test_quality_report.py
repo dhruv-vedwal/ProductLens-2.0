@@ -74,6 +74,40 @@ def test_synchronization_allows_an_ordered_editorial_subset_but_rejects_unreadab
     assert "CAPTION_READING_DWELL_TOO_SHORT" in report["hard_failures"]
 
 
+def test_synchronization_accepts_caption_for_verified_semantic_event_group():
+    trace = _trace()
+    second = InteractionEvent(
+        id="grouped-event",
+        operation_id="grouped",
+        kind=OperationKind.FILL_TEXT,
+        intent="Enter the observed value",
+        before={},
+        after={},
+        success=True,
+        duration_ms=1,
+    )
+    trace.events.append(second)
+    report = inspect_synchronization(
+        trace,
+        [
+            {"event_id": trace.events[0].id, "text": "We open the dashboard."},
+            {"event_id": second.id, "text": "We enter the value in the visible form."},
+        ],
+        [
+            {
+                "scene_id": trace.events[0].id,
+                "start": 0,
+                "end": 4,
+                "text": "We open the dashboard and enter the value in the visible form.",
+            }
+        ],
+        narration_requested=False,
+        narration_created=False,
+        caption_event_groups={trace.events[0].id: [trace.events[0].id, second.id]},
+    )
+    assert "CAPTION_TRACE_MISMATCH" not in report["hard_failures"]
+
+
 def test_caption_only_delivery_rejects_a_long_unexplained_silence_gap():
     trace = _trace()
     report = inspect_synchronization(

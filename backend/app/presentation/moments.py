@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import re
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.contracts.models import DemoTrace, OperationKind, SemanticMoment
@@ -157,7 +157,9 @@ def build_semantic_moments(trace: DemoTrace) -> list[SemanticMoment]:
     return moments
 
 
-def sync_edl_from_moments(trace: DemoTrace) -> dict:
+def sync_edl_from_moments(
+    trace: DemoTrace, *, target_duration_seconds: int | None = None
+) -> dict:
     """Return the sole timeline contract for editorial, render, and QA.
 
     Keep useful browser footage (gestures, typing, reveals, short reading
@@ -301,10 +303,27 @@ def sync_edl_from_moments(trace: DemoTrace) -> dict:
             for event in events
         )
         if visual_gesture or visual_story:
-            reading_hold = min(
-                1.9,
-                max(1.55, len(str(moment.viewer_value or "").split()) / 7.0 + 0.2),
-            )
+            # A visual workflow is not a sequence of tool clicks.  It needs
+            # enough native-speed reading time for the viewer to understand
+            # the artifact as it grows.  When planning supplied a target,
+            # distribute the remaining editorial budget across observed
+            # moments; this expands into real settled browser footage, never
+            # a frozen frame or playback-rate change.  The default remains
+            # compact for legacy traces that have no duration contract.
+            compact_hold = max(1.55, len(str(moment.viewer_value or "").split()) / 7.0 + 0.2)
+            if target_duration_seconds is not None and trace.moments:
+                # Protected gesture/reveal spans already consume real native
+                # footage. Reserve that action budget before distributing
+                # reader holds; otherwise a 150-second target can become a
+                # 180+ second cut simply by adding a hold to every beat.
+                motion_reserve = min(120.0, len(trace.moments) * 4.0)
+                target_hold = (
+                    max(0.0, float(target_duration_seconds) - motion_reserve)
+                    / max(1, len(trace.moments))
+                )
+                reading_hold = min(8.0, max(compact_hold, target_hold))
+            else:
+                reading_hold = min(1.9, compact_hold)
         else:
             reading_hold = min(
                 8.0,

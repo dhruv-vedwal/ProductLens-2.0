@@ -30,7 +30,7 @@ def test_narration_is_grounded_in_trace_events():
     script = script_from_trace(trace)
     assert (
         script[0]["text"]
-        == "We enter the required details in Enter customer name so the next step has the right context."
+        == "We complete Enter customer name with the information this workflow needs so the next step has the right context."
     )
     assert captions_from_audio_duration(script, 3)[0]["end"] == 3
 

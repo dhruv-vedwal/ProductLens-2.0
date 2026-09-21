@@ -786,6 +786,87 @@ def test_visual_artifact_result_requirement_is_verified_after_planning_not_disco
     ProductionPlanningService._validate_objective_grounding(scoped, candidate)
 
 
+def test_visual_action_plan_repairs_missing_pointer_path_from_observed_surface():
+    """A model may identify a canvas but omit path geometry; repair stays generic."""
+    root = "https://example.test/editor"
+    surface = ObservedElement(
+        tag="canvas", name="canvas workspace", selector="canvas", source_url=root
+    )
+    scoped = ProductContext(
+        url=root, title="Editor", application_type="web_application", elements=[surface]
+    )
+    proposal = WorkflowProposal(
+        narrative_goal="draw a connected architecture",
+        selected_workflow="canvas workflow",
+        expected_outcomes=["connected architecture"],
+        steps=[
+            SemanticOperation(
+                kind=OperationKind.POINTER_SEQUENCE,
+                intent="Connect the observed components with an arrow",
+                target=Target(name="canvas workspace", selector="canvas", source_url=root),
+                value={},
+            )
+        ],
+    )
+    repaired = ProductionPlanningService._repair_visual_gestures(proposal, scoped)
+    value = repaired.steps[0].value
+    assert value["pattern"] == "connector_segment"
+    assert len(value["relative_points"]) == 2
+    assert any(item.startswith("geometry:") for item in repaired.steps[0].evidence_refs)
+    assert repaired.steps[0].postconditions[0].kind == "surface_changed"
+
+
+def test_visual_action_plan_spreads_repeated_component_gestures_into_a_generic_layout():
+    root = "https://example.test/editor"
+    surface = ObservedElement(
+        tag="canvas", name="canvas workspace", selector="canvas", source_url=root
+    )
+    scoped = ProductContext(
+        url=root, title="Editor", application_type="web_application", elements=[surface]
+    )
+    repeated = [
+        SemanticOperation(
+            kind=OperationKind.POINTER_SEQUENCE,
+            intent=f"Draw the {label} component",
+            target=Target(name="canvas workspace", selector="canvas", source_url=root),
+            value={
+                "relative_points": [{"x": 0.25, "y": 0.28}, {"x": 0.68, "y": 0.62}],
+                "pattern": "shape_box",
+            },
+        )
+        for label in ("client", "server", "database")
+    ]
+    repaired = ProductionPlanningService._repair_visual_gestures(
+        WorkflowProposal(
+            narrative_goal="draw components",
+            selected_workflow="canvas workflow",
+            expected_outcomes=["components"],
+            steps=repeated,
+        ),
+        scoped,
+    )
+    paths = [step.value["relative_points"] for step in repaired.steps]
+    assert len({tuple((point["x"], point["y"]) for point in path) for path in paths}) == 3
+
+
+def test_action_plan_repairs_missing_reversible_value_witness():
+    operation = SemanticOperation(
+        kind=OperationKind.FILL_TEXT,
+        intent="Enter the component label",
+        target=Target(name="Label", selector="#label"),
+        value="Message broker",
+    )
+    proposal = WorkflowProposal(
+        narrative_goal="label a component",
+        selected_workflow="editor workflow",
+        expected_outcomes=["label entered"],
+        steps=[operation],
+    )
+    repaired = ProductionPlanningService._repair_missing_postconditions(proposal)
+    assert repaired.steps[0].postconditions[0].kind == "value"
+    assert repaired.steps[0].postconditions[0].expected == "Message broker"
+
+
 def test_planner_rejects_one_configuration_page_as_proof_of_both_relationship_sides():
     scoped = context().model_copy(
         update={

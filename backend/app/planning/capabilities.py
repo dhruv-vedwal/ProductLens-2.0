@@ -22,6 +22,32 @@ class CapabilityCompilationError(ValueError):
 _TRANSIENT_REACT_ID = re.compile(r"^#:r[0-9a-z]+:$", re.IGNORECASE)
 
 
+def _observed_choice(options: list[str], observed: str | None = None) -> str | None:
+    """Choose a value from the observed option order, never from vocabulary.
+
+    Alphabetically selecting an option is a hidden product-specific guess: it
+    can pick a less useful branch, category, or time slot simply because its
+    label sorts first.  The live DOM order is the only provider-neutral default
+    available when the objective did not name a value.  An already selected
+    value remains authoritative because it is direct state evidence.
+    """
+    safe = [
+        str(item).strip()
+        for item in options
+        if str(item).strip()
+        and str(item).strip().casefold()
+        not in {"select", "select an option", "choose", "choose an option"}
+    ]
+    if not safe:
+        return None
+    current = (observed or "").strip().casefold()
+    if current:
+        for item in safe:
+            if item.casefold() == current:
+                return item
+    return safe[0]
+
+
 def _is_transient_selector(selector: str) -> bool:
     """Reject React/MUI generated ids whether CSS escaping is present or not."""
     return bool(_TRANSIENT_REACT_ID.fullmatch(selector.replace("\\", "")))
@@ -54,6 +80,7 @@ def _field_target(field: FormField, source_url: str) -> Target:
         "combobox",
         "autocomplete",
         "time_slot",
+        "dependent_async",
     }:
         role = "combobox"
     elif control == "radio":
@@ -95,35 +122,18 @@ def _operation_for(field: FormField, source_url: str) -> SemanticOperation:
         "combobox",
         "autocomplete",
         "time_slot",
+        "dependent_async",
     }:
-        options = [
-            item
-            for item in field.options
-            if item.strip()
-            and item.strip().casefold()
-            not in {
-                "select",
-                "select an option",
-                "choose",
-                "choose an option",
-            }
-        ]
+        options = [item for item in field.options if str(item).strip()]
         if not options:
             raise CapabilityCompilationError(
                 f"Selectable field has no safe observed option: {field.name}"
             )
-        observed = (field.observed_value or "").strip()
-        matching_observed = next(
-            (item for item in options if item.casefold() == observed.casefold()), None
-        )
-        if matching_observed is not None:
-            value = matching_observed
-        else:
-            # Discovery may observe a choice list without a pre-selected value
-            # (empty required comboboxes). Pick the same deterministic option
-            # used by dependency probing so rehearsal stays evidence-backed
-            # and product-neutral rather than omitting the control.
-            value = min(options, key=str.casefold)
+        value = _observed_choice(options, field.observed_value)
+        if value is None:
+            raise CapabilityCompilationError(
+                f"Selectable field has no safe observed option: {field.name}"
+            )
         kind = OperationKind.SELECT_OPTION
     elif control == "email" or behavior == "email_input":
         value, kind = None, OperationKind.FILL_EMAIL
@@ -187,7 +197,10 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
     healed_fields: list[FormField] = []
     for field in capability.form_schema.fields:
         if (
-            field.control_type.casefold() in {"select", "combobox"}
+            (
+                field.control_type.casefold() in {"select", "combobox"}
+                or field.behavior_class.casefold() in {"time_slot", "dependent_async"}
+            )
             and not field.options
             and (field.observed_value or "").strip()
         ):
@@ -208,7 +221,10 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
     unresolved_choices = [
         field.name
         for field in capability.form_schema.fields
-        if field.control_type.casefold() in {"select", "combobox"}
+        if (
+            field.control_type.casefold() in {"select", "combobox"}
+            or field.behavior_class.casefold() in {"time_slot", "dependent_async"}
+        )
         and not field.options
         and not _explicitly_optional(field)
         # A custom combobox may be optional at the initial state and only
@@ -277,7 +293,12 @@ def _compile(capability: ActionCapability, *, require_outcome: bool) -> list[Sem
             if group_selector in seen_choice_groups:
                 continue
             seen_choice_groups.add(group_selector)
-        key = (field.name.casefold(), field.selector)
+        # Different DOM probes can escape the same attribute differently and
+        # append a required-marker to the accessible name.  Normalize both so
+        # the production plan cannot select the same semantic control twice.
+        normalized_name = re.sub(r"\s*\*+\s*$", "", field.name).casefold().strip()
+        normalized_selector = re.sub(r"\\([\s\"'])", r"\1", field.selector).casefold()
+        key = (normalized_name, normalized_selector)
         if key in seen_fields:
             continue
         seen_fields.add(key)

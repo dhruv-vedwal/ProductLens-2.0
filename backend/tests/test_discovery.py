@@ -127,6 +127,16 @@ def test_action_led_objective_uses_the_product_entity_not_the_verb():
     assert objective.primary_entity == "booking"
 
 
+def test_imperative_workflow_objective_extracts_subject_and_authorized_isolated_mutation():
+    objective = _objective_spec(
+        "Demonstrate the complete booking workflow: select valid values and create one isolated synthetic booking."
+    )
+    assert objective.primary_entity == "booking"
+    assert objective.permitted_mutations == ["create_isolated_record"]
+    assert objective.safe_action_policy == "authorized_side_effects"
+    assert objective.safe_actions_only is False
+
+
 def test_relationship_graph_grounds_requested_context_to_distinct_pages():
     objective = _objective_spec(
         "Demonstrate invoice approval in the context of invoice configuration"

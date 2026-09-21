@@ -232,11 +232,10 @@ class ExecutionEngine:
             return
 
     def _active_page(self):
-        # Keep lightweight adapter fakes and third-party compatibility callers
-        # working while real Playwright adapters can refresh a replaced CDP
-        # target after remote navigation.
-        ensure = getattr(self.adapter, "ensure_page", None)
-        return ensure() if callable(ensure) else self.adapter.page
+        # Async browser boundaries own CDP target recovery. Calling the
+        # adapter's synchronous ``ensure_page`` here raced Browserbase target
+        # hand-offs and turned a recoverable replacement into a false close.
+        return self.adapter.page
 
     async def _stabilize_light_theme(self) -> None:
         """Wait for hydration, then use the site's real theme control once."""
@@ -258,7 +257,8 @@ class ExecutionEngine:
     async def _record_interaction_observation(self) -> InteractionSnapshot | None:
         """Capture a redacted multimodal boundary for the interaction kernel."""
         try:
-            page = self._active_page()
+            ensure_async = getattr(self.adapter, "ensure_page_async", None)
+            page = await ensure_async() if callable(ensure_async) else self._active_page()
             viewport, scroll = await self.adapter.view_state()
             evidence_reader = getattr(self.adapter, "page_evidence", None)
             evidence = await evidence_reader() if callable(evidence_reader) else {}
@@ -693,7 +693,38 @@ class ExecutionEngine:
             if (selector and selector in descriptor.selector_hints)
             or descriptor.label.strip().casefold() == label
         ]
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            return None
+        # Planning may shorten a live placeholder (for example, “Enter Phone
+        # Number”) while the current control exposes a fuller accessible name
+        # (“Enter phone number (min 6 digits)…”).  Re-ground by token evidence,
+        # never by ordinal position or a product-specific selector.
+        target_tokens = {
+            token
+            for token in re.findall(r"[a-z0-9]+", label)
+            if len(token) > 1
+        }
+        if not target_tokens:
+            return None
+        ranked: list[tuple[float, ControlDescriptor]] = []
+        for descriptor in observation.page_state.controls:
+            candidate_tokens = {
+                token
+                for token in re.findall(r"[a-z0-9]+", descriptor.label.casefold())
+                if len(token) > 1
+            }
+            if not candidate_tokens or not target_tokens.issubset(candidate_tokens):
+                continue
+            overlap = len(target_tokens) / len(candidate_tokens)
+            ranked.append((overlap, descriptor))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        if not ranked:
+            return None
+        if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+            return None
+        return ranked[0][1] if ranked[0][0] >= 0.45 else None
 
     def _record_diagram_state(
         self,
@@ -701,8 +732,15 @@ class ExecutionEngine:
         event: InteractionEvent,
         action_result: object | None,
     ) -> None:
-        if not isinstance(operation.value, dict) or not isinstance(action_result, dict):
+        if (
+            not isinstance(action_result, dict)
+            or (
+                not isinstance(operation.value, dict)
+                and operation.kind is not OperationKind.KEY_PRESS
+            )
+        ):
             return
+        operation_value = operation.value if isinstance(operation.value, dict) else {}
         changed = action_result.get("surface_changed")
         surface_change = action_result.get("surface_change")
         if changed is None and isinstance(surface_change, dict):
@@ -713,7 +751,48 @@ class ExecutionEngine:
         nodes = list(previous.nodes)
         connectors = list(previous.connectors)
         evidence_ref = event.screenshot_path or f"trace:event:{event.id}"
-        node_payload = operation.value.get("diagram_node")
+        node_payload = operation_value.get("diagram_node")
+        # Older planners (and provider fallbacks) may ground a visual editor
+        # operation semantically without emitting an optional diagram payload.
+        # Recover the same evidence-backed topology from the current intent and
+        # observed geometry rather than treating a successful drawing as a
+        # pixel-only action. These patterns are product-neutral and work for
+        # any canvas/diagram surface whose operation names a component or
+        # connector.
+        if not isinstance(node_payload, dict) and operation.kind is OperationKind.POINTER_SEQUENCE:
+            component_match = re.search(
+                r"(?:draw|place)\s+(?:the\s+)?['\"]?(.+?)['\"]?\s+(?:rectangle|component|shape)\b",
+                operation.intent,
+                flags=re.IGNORECASE,
+            )
+            if component_match:
+                label = " ".join(component_match.group(1).split()).strip(" '\"")
+                points = operation.value.get("relative_points") if isinstance(operation.value, dict) else None
+                center = points[0] if isinstance(points, list) and points else {}
+                end = points[-1] if isinstance(points, list) and points else {}
+                x = (float(center.get("x", 0.5)) + float(end.get("x", center.get("x", 0.5)))) / 2
+                y = (float(center.get("y", 0.5)) + float(end.get("y", center.get("y", 0.5)))) / 2
+                node_payload = {
+                    "id": f"diagram-node:{re.sub(r'[^a-z0-9]+', '-', label.casefold()).strip('-')}",
+                    "label": label,
+                    "kind": "component",
+                    "x": max(0.0, min(1.0, x)),
+                    "y": max(0.0, min(1.0, y)),
+                }
+        if not isinstance(node_payload, dict) and operation.kind is OperationKind.KEY_PRESS:
+            typed = str(operation.value or "").strip()
+            if typed:
+                node = next(
+                    (item for item in nodes if item.label.casefold() == typed.casefold()),
+                    None,
+                )
+                if node is not None:
+                    nodes = [
+                        item.model_copy(update={"label_evidence_ref": evidence_ref})
+                        if item.id == node.id
+                        else item
+                        for item in nodes
+                    ]
         if isinstance(node_payload, dict):
             node = DiagramNode(
                 **node_payload,
@@ -721,7 +800,7 @@ class ExecutionEngine:
             )
             nodes = [item for item in nodes if item.id != node.id]
             nodes.append(node)
-        label_for = operation.value.get("diagram_label_for")
+        label_for = operation_value.get("diagram_label_for")
         if isinstance(label_for, str):
             nodes = [
                 item.model_copy(update={"label_evidence_ref": evidence_ref})
@@ -729,7 +808,31 @@ class ExecutionEngine:
                 else item
                 for item in nodes
             ]
-        connector_payload = operation.value.get("diagram_connector")
+        connector_payload = operation_value.get("diagram_connector")
+        if not isinstance(connector_payload, dict) and operation.kind is OperationKind.POINTER_SEQUENCE:
+            connector_match = re.search(
+                r"(?:arrow|connector)\s+from\s+['\"]?(.+?)['\"]?\s+to\s+['\"]?(.+?)['\"]?\.?$",
+                operation.intent,
+                flags=re.IGNORECASE,
+            )
+            if connector_match:
+                source_label = " ".join(connector_match.group(1).split()).strip(" '\"")
+                target_label = " ".join(connector_match.group(2).split()).strip(" '\"")
+                source_node = next(
+                    (item for item in nodes if item.label.casefold() == source_label.casefold()),
+                    None,
+                )
+                target_node = next(
+                    (item for item in nodes if item.label.casefold() == target_label.casefold()),
+                    None,
+                )
+                if source_node is not None and target_node is not None:
+                    connector_payload = {
+                        "id": f"diagram-connector:{source_node.id}->{target_node.id}",
+                        "source_node_id": source_node.id,
+                        "target_node_id": target_node.id,
+                        "kind": "directed",
+                    }
         if isinstance(connector_payload, dict):
             node_ids = {item.id for item in nodes}
             source = str(connector_payload.get("source_node_id") or "")
@@ -772,6 +875,46 @@ class ExecutionEngine:
                 ),
             )
         )
+
+    async def _already_satisfies_idempotent_control(
+        self, operation: SemanticOperation
+    ) -> bool:
+        """Avoid toggling a semantic control that is already in its target state.
+
+        Discovery and planning can observe a control as selected/expanded and
+        still emit the corresponding click while compiling a continuation. A
+        second click is not a harmless retry for toggle controls: it can close
+        a menu, deselect a drawing tool, or undo a check. Only state-bearing
+        postconditions are eligible; ordinary ``visible``/``changed`` clicks
+        still dispatch normally.
+        """
+        if operation.kind not in {
+            OperationKind.CLICK,
+            OperationKind.OPEN_NAVIGATION_ITEM,
+            OperationKind.OPEN_MODAL,
+            OperationKind.CLOSE_MODAL,
+            OperationKind.CHECK,
+            OperationKind.UNCHECK,
+            OperationKind.CHOOSE_RADIO,
+        }:
+            return False
+        state_conditions = {
+            "test_state",
+            "checked",
+            "selected",
+            "expanded",
+            "open",
+            "active",
+        }
+        for condition in operation.postconditions:
+            if condition.kind not in state_conditions:
+                continue
+            try:
+                await self.verify(condition)
+            except (VerificationError, GroundingError, PlaywrightError, TypeError):
+                continue
+            return True
+        return False
 
     async def run(
         self, operation: SemanticOperation, *, next_state: WorkflowState | None = None
@@ -816,7 +959,42 @@ class ExecutionEngine:
                     # their target belongs to the active dialog.
                     blocking_overlay = getattr(self.adapter, "blocking_overlay", None)
                     if callable(blocking_overlay):
-                        blocker = await blocking_overlay(operation.target)
+                        preserve_visual_editor = False
+                        if (
+                            operation.kind
+                            in {
+                                OperationKind.FILL_TEXT,
+                                OperationKind.FILL_EMAIL,
+                                OperationKind.FILL_PHONE,
+                            }
+                            and operation.target is not None
+                            and str(operation.target.selector or "").casefold()
+                            in {"canvas", "svg"}
+                        ):
+                            # Text tools in canvas/SVG editors expose a
+                            # transient textarea/contenteditable that may be
+                            # represented as a dialog. It is the intended
+                            # continuation of the preceding placement scene,
+                            # not an obstructing overlay to dismiss.
+                            try:
+                                preserve_visual_editor = bool(
+                                    await self.adapter.page.evaluate(
+                                        """() => {
+                                          const element = document.activeElement;
+                                          if (!element || element === document.body) return false;
+                                          const tag = String(element.tagName || '').toLowerCase();
+                                          return Boolean(element.isContentEditable || tag === 'textarea' ||
+                                            tag === 'input' || element.getAttribute('role') === 'textbox');
+                                        }"""
+                                    )
+                                )
+                            except (AttributeError, PlaywrightError, TypeError):
+                                preserve_visual_editor = False
+                        blocker = (
+                            None
+                            if preserve_visual_editor
+                            else await blocking_overlay(operation.target)
+                        )
                         if blocker:
                             dismiss = getattr(self.adapter, "dismiss_safe_overlay", None)
                             if callable(dismiss) and await dismiss():
@@ -857,10 +1035,26 @@ class ExecutionEngine:
                     if operation.kind is OperationKind.SCROLL_TO:
                         _, scroll_before = await self.adapter.view_state()
                     action_at = datetime.now(UTC)
+                    skip_dispatch = await self._already_satisfies_idempotent_control(
+                        operation
+                    )
+                    if skip_dispatch:
+                        action_result = {
+                            "dispatched": False,
+                            "observed_state_already_satisfied": True,
+                        }
+                        recovery.append(
+                            {
+                                "strategy": "state_already_satisfied_before_dispatch",
+                                "reason": "semantic postcondition already held; avoided toggle",
+                            }
+                        )
                     descriptor = self._descriptor_for_operation(
                         before_observation, operation
                     )
-                    if descriptor is not None and operation.kind in {
+                    if skip_dispatch:
+                        pass
+                    elif descriptor is not None and operation.kind in {
                         OperationKind.CLICK,
                         OperationKind.OPEN_NAVIGATION_ITEM,
                         OperationKind.OPEN_MODAL,
@@ -886,6 +1080,9 @@ class ExecutionEngine:
                         )
                     else:
                         action_result = await self.adapter.execute(operation)
+                    action_result = self.behavior_adapters.annotate_observed_result(
+                        operation, action_result
+                    )
                     if operation.kind in {
                         OperationKind.FILL_TEXT,
                         OperationKind.FILL_EMAIL,
@@ -963,7 +1160,7 @@ class ExecutionEngine:
                         }
                     if self.force_light_theme and operation.kind is OperationKind.NAVIGATE:
                         await self._stabilize_light_theme()
-                    action_dispatched = True
+                    action_dispatched = not skip_dispatch
                     if operation.kind is OperationKind.SCROLL_TO:
                         # Store the geometry after the gradual reveal, not the
                         # stale off-screen rectangle from before it began.
@@ -1005,8 +1202,44 @@ class ExecutionEngine:
                                     "Expected observable editor surface change="
                                     f"{bool(condition.expected)}, got {bool(action_result['surface_changed'])}"
                                 )
+                        elif (
+                            condition.kind == "test_state"
+                            and operation.kind
+                            in {OperationKind.POINTER_SEQUENCE, OperationKind.KEY_PRESS}
+                            and isinstance(action_result, dict)
+                            and action_result.get("surface_changed") is not None
+                            and (
+                                (
+                                    operation.target is not None
+                                    and str(operation.target.selector or "").casefold()
+                                    in {"canvas", "svg"}
+                                    and not re.search(
+                                        r"\b(?:window|document)\.|===|!==|&&|\|\||[(){};]",
+                                        str(condition.expected),
+                                    )
+                                )
+                                or re.search(
+                                    r"\b(?:drawn|drew|placed|created|connected|added|typed|canvas|surface|editor|diagram|shape|arrow|connector)\b",
+                                    str(condition.expected),
+                                    flags=re.IGNORECASE,
+                                )
+                            )
+                        ):
+                            # Visual editors do not expose a portable JS state
+                            # variable for a committed stroke.  When a model
+                            # describes that state in natural language, bind
+                            # it to the adapter's grounded surface witness
+                            # instead of evaluating the prose as JavaScript.
+                            if not bool(action_result["surface_changed"]):
+                                raise VerificationError(
+                                    "Expected the grounded editor surface to contain the committed gesture"
+                                )
                         else:
-                            await self.verify(verification_condition, before=before)
+                            await self.verify(
+                                verification_condition,
+                                before=before,
+                                action_result=action_result if isinstance(action_result, dict) else None,
+                            )
                         if (
                             operation.kind is OperationKind.SUBMIT
                             and condition.target is not None
@@ -1537,7 +1770,13 @@ class ExecutionEngine:
                 replans += 1
         return self.complete()
 
-    async def verify(self, condition: Postcondition, *, before: dict | None = None) -> None:
+    async def verify(
+        self,
+        condition: Postcondition,
+        *,
+        before: dict | None = None,
+        action_result: dict[str, object] | None = None,
+    ) -> None:
         page = self.adapter.page
         if condition.kind == "url":
             expected = str(condition.expected)
@@ -1566,6 +1805,20 @@ class ExecutionEngine:
         elif condition.kind == "value":
             locator, _ = await self.adapter.grounded_locator(condition.target)
             await locator.wait_for(timeout=condition.timeout_ms)
+            # A canvas text editor keeps the semantic target on the canvas,
+            # while the actual value is entered into a transient focused
+            # textarea. The adapter's checkpoint is the direct keystroke
+            # witness; accept it only for that focused-editor interaction.
+            if (
+                action_result
+                and action_result.get("scope") == "focused-editable"
+                and _value_matches(
+                    condition.target.name,
+                    condition.expected,
+                    str(action_result.get("completed_value_checkpoint") or ""),
+                )
+            ):
+                return
             try:
                 # Native form controls expose input_value(). Rich text editors,
                 # custom textboxes, and contenteditable surfaces do not; they
@@ -1579,6 +1832,81 @@ class ExecutionEngine:
                     actual = await locator.inner_text()
                 else:
                     raise
+            # Custom comboboxes and multi-selects often keep the underlying
+            # input value empty after committing a choice, while rendering the
+            # selected label as a chip or text node in the control's semantic
+            # container. Treat that observed label as the value witness only
+            # when it is visibly present in a nearby combobox/listbox surface;
+            # never accept a broad page-text match.
+            if not _value_matches(condition.target.name, condition.expected, actual):
+                # A custom multi-select may clear its input after committing a
+                # choice and render the selection as a chip. The adapter has
+                # already proved that it clicked a unique visible option and
+                # captured a nearby semantic selection witness; use that
+                # witness as the postcondition instead of trusting a hidden
+                # implementation input's empty value.
+                if (
+                    action_result
+                    and action_result.get("interaction") == "custom-listbox-visible-choice"
+                    and action_result.get("selection_witness") is True
+                ):
+                    selected = " ".join(str(action_result.get("selected", "")).split()).casefold()
+                    expected = " ".join(str(condition.expected).split()).casefold()
+                    requested = " ".join(
+                        str(action_result.get("requested", condition.expected)).split()
+                    ).casefold()
+                    # Discovery may retain a clipped accessible label while
+                    # the live option exposes the complete visible label.
+                    # Accept only the exact/prefix relationship that was
+                    # resolved against one unique visible option, and ensure
+                    # the requested evidence itself still matches that label.
+                    if (
+                        selected
+                        and expected
+                        and requested
+                        and (
+                            selected == expected
+                            or selected.startswith(expected + " ")
+                            or expected.startswith(selected + " ")
+                        )
+                        and (
+                            requested == expected
+                            or requested.startswith(expected + " ")
+                            or expected.startswith(requested + " ")
+                        )
+                    ):
+                        return
+                try:
+                    semantic_value = await locator.evaluate(
+                        """(element, expected) => {
+                          const normalize = value => String(value || '')
+                            .replace(/\\s+/g, ' ').trim().toLocaleLowerCase();
+                          const wanted = normalize(expected);
+                          let node = element;
+                          for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
+                            const role = String(node.getAttribute?.('role') || '').toLowerCase();
+                            const className = String(node.className || '').toLowerCase();
+                            const text = normalize(node.innerText || node.textContent || '');
+                            const hasChoiceSurface = role === 'combobox'
+                              || role === 'listbox'
+                              || Boolean(node.querySelector?.('[role="option"], [data-tag], [data-value]'))
+                              || /autocomplete|combobox|multiselect|select|chip|tag/.test(className);
+                            const ownsInput = node === element
+                              || Boolean(node.querySelector?.('input, textarea, [role="textbox"], [role="combobox"]'));
+                            // Restrict the fallback to the compact semantic
+                            // control rather than accepting a value merely
+                            // because it appears somewhere in the form.
+                            if (hasChoiceSurface && ownsInput && wanted && text.includes(wanted)
+                              && text.length <= 600) return true;
+                          }
+                          return false;
+                        }""",
+                        str(condition.expected),
+                    )
+                    if semantic_value:
+                        actual = str(condition.expected)
+                except (AttributeError, PlaywrightError, TypeError):
+                    pass
             if not _value_matches(condition.target.name, condition.expected, actual):
                 raise VerificationError(
                     f"Expected {condition.target.name}={condition.expected!r}, got {actual!r}"
@@ -1590,9 +1918,94 @@ class ExecutionEngine:
             )
         elif condition.kind == "test_state":
             expression = str(condition.expected)
-            await page.wait_for_function(
-                f"() => Boolean({expression})", timeout=condition.timeout_ms
-            )
+            # Models sometimes describe a control state semantically (for
+            # example ``active`` after selecting a drawing tool) rather than
+            # emitting a JavaScript expression.  Evaluating that bare word as
+            # ``Boolean(active)`` raises a ReferenceError and aborts an
+            # otherwise valid run.  Resolve the small, portable state
+            # vocabulary against the currently grounded element first; this
+            # is not a site adapter and works for buttons, tabs, menu items,
+            # and custom controls that expose standard state attributes.
+            semantic_state = expression.strip().casefold()
+            # Structured planners occasionally preserve a human-readable
+            # phrase such as "Rectangle tool is active" instead of emitting
+            # the constrained state enum by itself.  Recover only the known
+            # portable state vocabulary; arbitrary expressions still go
+            # through the explicit JavaScript/test-state path below.
+            if semantic_state not in {
+                "active",
+                "selected",
+                "checked",
+                "pressed",
+                "expanded",
+                "open",
+                "visible",
+            }:
+                state_match = re.search(
+                    r"\b(active|selected|checked|pressed|expanded|open|visible)\b",
+                    semantic_state,
+                )
+                if state_match:
+                    semantic_state = state_match.group(1)
+            if condition.target is not None and semantic_state in {
+                "active",
+                "selected",
+                "checked",
+                "pressed",
+                "expanded",
+                "open",
+                "visible",
+            }:
+                locator, _ = await self.adapter.grounded_locator(condition.target)
+                try:
+                    state_matches = await locator.evaluate(
+                        """(element, state) => {
+                          const truthy = value => ['true', '1', 'yes', 'on', 'active', 'open', 'selected', 'checked', 'pressed']
+                            .includes(String(value || '').trim().toLowerCase());
+                          const attrs = [
+                            element.getAttribute?.('aria-pressed'),
+                            element.getAttribute?.('aria-selected'),
+                            element.getAttribute?.('aria-expanded'),
+                            element.getAttribute?.('aria-current'),
+                            element.getAttribute?.('data-state'),
+                            element.getAttribute?.('data-active'),
+                            element.getAttribute?.('data-selected'),
+                            element.getAttribute?.('data-checked'),
+                          ];
+                          const classes = String(element.className || '').toLowerCase();
+                          const token = String(state || '').toLowerCase();
+                          if (token === 'expanded' || token === 'open') {
+                            return attrs.some(value => ['true', 'open'].includes(String(value || '').toLowerCase()));
+                          }
+                          if (token === 'visible') {
+                            const rect = element.getBoundingClientRect();
+                            return Boolean(rect.width && rect.height && getComputedStyle(element).visibility !== 'hidden');
+                          }
+                          return attrs.some(value => truthy(value)) ||
+                            new RegExp(`(^|[-_\\s])(?:${token}|checked|selected|pressed)(?:$|[-_\\s])`).test(classes);
+                        }""",
+                        semantic_state,
+                    )
+                except (AttributeError, PlaywrightError, TypeError) as exc:
+                    raise VerificationError(
+                        f"Could not observe semantic state {expression!r} on {condition.target.name!r}"
+                    ) from exc
+                if not state_matches:
+                    raise VerificationError(
+                        f"Expected {condition.target.name!r} to be {expression!r}"
+                    )
+            else:
+                try:
+                    await page.wait_for_function(
+                        f"() => Boolean({expression})", timeout=condition.timeout_ms
+                    )
+                except PlaywrightError as exc:
+                    # Preserve a layer-owned verification failure rather than
+                    # leaking a browser-evaluation ReferenceError into the
+                    # production capture/reporting layers.
+                    raise VerificationError(
+                        f"Could not verify test-state expression {expression!r}"
+                    ) from exc
         elif condition.kind == "changed":
             if before is None:
                 raise VerificationError(

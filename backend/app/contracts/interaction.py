@@ -204,6 +204,7 @@ class ControlDescriptor(BaseModel):
         "email_input",
         "phone_input",
         "multiline_input",
+        "time_input",
         "native_select",
         "combobox",
         "autocomplete",

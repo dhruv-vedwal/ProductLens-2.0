@@ -28,6 +28,33 @@ def _canonical_navigation_url(base: str, value: str) -> str:
     return canonical_product_url(urljoin(base, value))
 
 
+def _operation_value_leak(text: str, operation: object | None) -> bool:
+    """Return whether prose repeats an input/selection literal.
+
+    Editorial narration should explain the role of a field or choice.  Raw
+    values are execution evidence (and can contain synthetic PII), not a
+    useful presenter line.  Keep this generic by checking the immutable
+    semantic operation value, never a product or route name.
+    """
+    if operation is None or getattr(operation, "kind", None) not in {
+        OperationKind.FILL_TEXT,
+        OperationKind.FILL_EMAIL,
+        OperationKind.FILL_PHONE,
+        OperationKind.SELECT_OPTION,
+        OperationKind.SELECT_DATE,
+        OperationKind.SELECT_DATE_RANGE,
+        OperationKind.SEARCH,
+    }:
+        return False
+    value = str(getattr(operation, "value", "") or "").strip()
+    if len(value) < 4 or value.startswith("secret://"):
+        return False
+    normalized = " ".join(value.casefold().split())
+    prose = " ".join(text.casefold().split())
+    # Avoid flagging a common field label that happens to equal a short value.
+    return normalized in prose and not re.fullmatch(r"(?:true|false|none|null)", normalized)
+
+
 def inspect_editorial_preflight(
     *,
     context: ProductContext,
@@ -196,6 +223,7 @@ def inspect_editorial(
     failures: list[str] = []
     warnings: list[str] = []
     narrated_texts: list[str] = []
+    narrated_operations: list[object | None] = []
     events = {event.operation_id: event for event in trace.events if event.success}
     plan_operations = {step.operation.id: step.operation for step in plan.workflow_steps}
     scenes = []
@@ -532,8 +560,19 @@ def inspect_editorial(
         text = script_by_event.get(event.id) or moment_text_by_event.get(event.id, "")
         if not text:
             failures.append("EDITORIAL_SCENE_MISSING_NARRATION")
+            scene_failures: list[str] = ["EDITORIAL_SCENE_MISSING_NARRATION"]
         else:
+            scene_failures = []
+            operation = next(
+                (
+                    step.operation
+                    for step in plan.workflow_steps
+                    if step.operation.id == scene.operation_id
+                ),
+                None,
+            )
             narrated_texts.append(text)
+            narrated_operations.append(operation)
             target_words = set(re.findall(r"[a-z0-9]{4,}", scene.title.lower()))
             caption_words = set(re.findall(r"[a-z0-9]{4,}", text.lower()))
             generic_words = {
@@ -586,32 +625,34 @@ def inspect_editorial(
                 and len(caption_words & opening_words) / max(len(caption_words), 1) >= 0.72
                 and not presenter_opening
             )
+            generic_reasons = []
+            if len(text.split()) < 6:
+                generic_reasons.append("too_short")
             if (
-                len(text.split()) < 6
-                or (
-                    not presenter_opening
-                    and not str(scene.operation_id or "").startswith("auth:")
-                    and not _viewer_ready(text, scene.title)
-                )
-                or "distinct part of the product experience" in text
-                or any(phrase in text.lower() for phrase in boilerplate)
-                or any(re.search(pattern, text.lower()) for pattern in route_mechanics)
-                or repeated_opening
-                or title_only
+                not presenter_opening
+                and not str(scene.operation_id or "").startswith("auth:")
+                and not _viewer_ready(text, scene.title)
             ):
+                generic_reasons.append("not_viewer_ready")
+            if "distinct part of the product experience" in text:
+                generic_reasons.append("boilerplate")
+            if any(phrase in text.lower() for phrase in boilerplate):
+                generic_reasons.append("boilerplate")
+            if any(re.search(pattern, text.lower()) for pattern in route_mechanics):
+                generic_reasons.append("route_mechanics")
+            if repeated_opening:
+                generic_reasons.append("repeated_opening")
+            if title_only:
+                generic_reasons.append("title_only")
+            if _operation_value_leak(text, operation):
+                generic_reasons.append("operation_value_leak")
+            if generic_reasons:
                 failures.append("GENERIC_ROUTE_LABEL_CAPTION")
+                scene_failures.append("GENERIC_ROUTE_LABEL_CAPTION:" + ",".join(generic_reasons))
             evidence_text = _scene_source(context, scene)
             if _looks_like_screen_transcript(scene.narration, evidence_text):
                 failures.append("SCREEN_TRANSCRIPT_CAPTION")
             evidence_words = set(re.findall(r"[a-z0-9]{3,}", evidence_text.lower()))
-            operation = next(
-                (
-                    step.operation
-                    for step in plan.workflow_steps
-                    if step.operation.id == scene.operation_id
-                ),
-                None,
-            )
             target_words = (
                 set(re.findall(r"[a-z0-9]{4,}", operation.target.name.lower()))
                 if operation and operation.target
@@ -737,6 +778,7 @@ def inspect_editorial(
                 "evidence": scene.evidence,
                 "interaction": scene.interaction,
                 "narrated": True,
+                "failures": scene_failures,
             }
         )
     if len(trace.events) < len([scene for scene in storyboard.scenes if scene.operation_id]):
@@ -836,7 +878,6 @@ def inspect_editorial(
             "completed",
             "provides",
             "clear",
-            "before",
             "needed",
             "distinguish",
             "recognizable",
@@ -851,17 +892,50 @@ def inspect_editorial(
             "originated",
             "creation",
             "create",
-            "details",
             "entered",
             "reveals",
             "opening",
             "captures",
-            "observed",
             "selection",
         }
         words = {w for w in re.findall(r"[a-z0-9]{4,}", text.lower()) if w not in stop}
-        for other in narrated_texts[:index]:
+        for other_index, other in enumerate(narrated_texts[:index]):
             if other.casefold().startswith(("welcome to", "today i'll walk")):
+                continue
+            prior_operation = narrated_operations[other_index]
+            # Low-level visual-editor beats share connective grammar by
+            # design. When both operations carry different quoted semantic
+            # labels/endpoints, that difference is the evidence-backed
+            # payload and the captions are not repetitive merely because they
+            # both describe drawing or selecting a tool. Identical labels are
+            # still compared and can fail this gate.
+            current_operation = narrated_operations[index] if index < len(narrated_operations) else None
+            current_quotes = tuple(
+                re.findall(r"['\"]([^'\"]+)['\"]", str(getattr(current_operation, "intent", "")))
+            )
+            prior_quotes = tuple(
+                re.findall(r"['\"]([^'\"]+)['\"]", str(getattr(prior_operation, "intent", "")))
+            )
+            if current_quotes and prior_quotes and current_quotes != prior_quotes:
+                continue
+            current_intent = str(getattr(current_operation, "intent", "") or "").casefold()
+            prior_intent = str(getattr(prior_operation, "intent", "") or "").casefold()
+            visual_intent_terms = (
+                "canvas",
+                "draw",
+                "rectangle",
+                "component",
+                "text tool",
+                "text cursor",
+                "label",
+                "arrow",
+                "connector",
+            )
+            if (
+                current_intent != prior_intent
+                and any(term in current_intent for term in visual_intent_terms)
+                and any(term in prior_intent for term in visual_intent_terms)
+            ):
                 continue
             other_words = {w for w in re.findall(r"[a-z0-9]{4,}", other.lower()) if w not in stop}
             if not words or not other_words:

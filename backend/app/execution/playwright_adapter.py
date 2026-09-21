@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from itertools import pairwise
 from pathlib import Path
@@ -50,6 +52,76 @@ def _canonical_date(value: str) -> str | None:
     return None
 
 
+def _canonical_date_from_visible_label(value: str) -> str | None:
+    """Parse a date embedded in a calendar's accessible/display label.
+
+    Date widgets are not consistent across design systems: one exposes an ISO
+    ``data-date``, another exposes ``aria-label="September 30, 2026"`` and a
+    third uses ``30 Sep 2026``.  The resolver must ground against the observed
+    label rather than assume a particular widget or selector.
+    """
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return None
+    direct = _canonical_date(text)
+    if direct:
+        return direct
+    # Strip surrounding weekday/semantic words while retaining the date.  The
+    # regex intentionally accepts only real month names and a four-digit year;
+    # bare day numbers remain ambiguous and are handled by the calendar-state
+    # fallback below.
+    month = r"(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    patterns = (
+        rf"\b{month}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,|\s)+\d{{4}}\b",
+        rf"\b\d{{1,2}}\s+{month}(?:,|\s)+\d{{4}}\b",
+    )
+    formats = (
+        ("%B %d %Y", "%b %d %Y"),
+        ("%d %B %Y", "%d %b %Y"),
+    )
+    for pattern, date_formats in zip(patterns, formats):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = re.sub(r"(\d)(st|nd|rd|th)", r"\1", match.group(0), flags=re.IGNORECASE)
+        candidate = candidate.replace(",", " ")
+        for fmt in date_formats:
+            try:
+                return datetime.strptime(candidate, fmt).replace(tzinfo=UTC).date().isoformat()
+            except ValueError:
+                continue
+    return None
+
+
+def _canonical_time(value: str) -> str | None:
+    """Normalize common 12/24-hour visible time values for verification."""
+    text = re.sub(r"\s+", " ", str(value or "").strip()).upper()
+    match = re.search(r"\b(\d{1,2})\s*[:.]\s*(\d{2})(?:\s*([AP]M))?\b", text)
+    if match is None:
+        digits = re.sub(r"\D", "", text)
+        if len(digits) == 4:
+            text = f"{digits[:2]}:{digits[2:]}"
+            match = re.match(r"(\d{2}):(\d{2})", text)
+    has_meridiem_group = match is not None and match.re.groups >= 3
+    if match is None:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    meridiem = match.group(3) if has_meridiem_group else None
+    if not 0 <= minute <= 59:
+        return None
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        if meridiem == "AM":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+    if not 0 <= hour <= 23:
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
 def _visible_date_keystrokes(value: str) -> list[str]:
     iso = _canonical_date(value)
     if iso is None:
@@ -75,6 +147,17 @@ def _navigation_reached(current: str, expected: str, base: str) -> bool:
     return _route_key(current) == _route_key(urljoin(base, expected))
 
 
+def _aria_role(value: str | None) -> str:
+    """Normalize observed HTML tags to Playwright's ARIA role vocabulary."""
+    raw = str(value or "").strip().casefold()
+    return {
+        "a": "link",
+        "input": "textbox",
+        "textarea": "textbox",
+        "select": "combobox",
+    }.get(raw, raw)
+
+
 class PlaywrightAdapter:
     def __init__(
         self,
@@ -82,10 +165,23 @@ class PlaywrightAdapter:
         *,
         cloud_mode: bool = False,
         typing_delay_ms: int = 70,
+        reconnect_page: Callable[[], Awaitable[Any | None]] | None = None,
     ):
         self.page = page
         self.cloud_mode = cloud_mode
         self.typing_delay_ms = max(0, int(typing_delay_ms))
+        self._reconnect_page = reconnect_page
+        # Canvas editors commonly remove focus from their transient text editor
+        # when the browser takes a screenshot or the execution trace captures
+        # a checkpoint between the placement gesture and the following typing
+        # operation.  Keep the last *observed* placement for exactly that
+        # hand-off; it is scoped to this adapter/page and is never an
+        # application-specific coordinate or selector.
+        self._pending_canvas_text_placement: dict[str, object] | None = None
+        try:
+            self._last_known_url = str(getattr(page, "url", "") or "")
+        except (AttributeError, TypeError, RuntimeError, PlaywrightError):  # pragma: no cover
+            self._last_known_url = ""
 
     def ensure_page(self) -> Any:
         """Reconnect to the live page after a remote navigation replacement.
@@ -110,6 +206,59 @@ class PlaywrightAdapter:
             "The active browser page was closed and no replacement target is available"
         )
 
+    async def ensure_page_async(self) -> Any:
+        """Wait briefly for a remote CDP target hand-off after navigation."""
+        if not self._page_is_closed(self.page):
+            try:
+                # A detached CDP target may report ``is_closed=False`` while
+                # meaningful operations already raise TargetClosedError.
+                if self.cloud_mode and hasattr(self.page, "title"):
+                    await self.page.title()
+                self._last_known_url = str(getattr(self.page, "url", "") or "")
+            except (AttributeError, TypeError, RuntimeError, PlaywrightError):
+                pass
+            else:
+                return self.page
+        context = getattr(self.page, "context", None)
+        for _ in range(40):
+            pages = getattr(context, "pages", []) if context is not None else []
+            for candidate in reversed(list(pages)):
+                if not self._page_is_closed(candidate):
+                    self.page = candidate
+                    try:
+                        self._last_known_url = str(getattr(candidate, "url", "") or "")
+                    except (AttributeError, TypeError, RuntimeError, PlaywrightError):
+                        return candidate
+                    return candidate
+            await asyncio.sleep(0.25)
+        if self._reconnect_page is not None:
+            try:
+                replacement = await self._reconnect_page()
+            except (PlaywrightError, RuntimeError, TypeError, TimeoutError):
+                replacement = None
+            if replacement is not None and not self._page_is_closed(replacement):
+                self.page = replacement
+                try:
+                    self._last_known_url = str(getattr(replacement, "url", "") or "")
+                except (AttributeError, TypeError, RuntimeError, PlaywrightError):
+                    pass
+                return replacement
+        # Some CDP providers close the initial target when authentication
+        # replaces the document and do not publish its replacement through
+        # ``context.pages``. Re-open one context page and restore only the last
+        # observed same-origin URL; cookies/storage remain owned by the
+        # provider context. This is a bounded recovery for an explicit target
+        # loss, never an extra opening navigation during a healthy run.
+        if context is not None and self._last_known_url:
+            try:
+                replacement = await context.new_page()
+                await replacement.goto(self._last_known_url, wait_until="domcontentloaded")
+                self.page = replacement
+                return replacement
+            except (PlaywrightError, RuntimeError, TypeError):
+                pass
+        return self.ensure_page()
+
     @staticmethod
     def _page_is_closed(page: Any) -> bool:
         is_closed = getattr(page, "is_closed", None)
@@ -132,7 +281,7 @@ class PlaywrightAdapter:
         settling. This bounded check keeps the action semantic and avoids
         baking arbitrary sleep durations into every workflow.
         """
-        page = self.ensure_page()
+        page = await self.ensure_page_async()
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=3_000)
         except PlaywrightError:
@@ -180,14 +329,15 @@ class PlaywrightAdapter:
         )
         if target.test_id:
             candidates.append(("test_id", self.page.get_by_test_id(target.test_id)))
-        if target.role and target.name:
+        role = _aria_role(target.role)
+        if role and target.name:
             candidates.append(
-                ("role", self.page.get_by_role(target.role, name=target.name, exact=True))
+                ("role", self.page.get_by_role(role, name=target.name, exact=True))
             )
             candidates.append(
                 (
                     "role_casefold",
-                    self.page.get_by_role(target.role, name=flexible_name, exact=False),
+                    self.page.get_by_role(role, name=flexible_name, exact=False),
                 )
             )
             # Accessible labels can legitimately change punctuation or
@@ -200,7 +350,7 @@ class PlaywrightAdapter:
                 (
                     "role_contains",
                     self.page.get_by_role(
-                        target.role, name=target.name.replace("…", ""), exact=False
+                        role, name=target.name.replace("…", ""), exact=False
                     ),
                 )
             )
@@ -213,7 +363,7 @@ class PlaywrightAdapter:
                     (
                         "role_prefix",
                         self.page.get_by_role(
-                            target.role,
+                            role,
                             name=re.compile(r"^" + re.escape(prefix) + r"\b", re.IGNORECASE),
                             exact=False,
                         ),
@@ -270,17 +420,18 @@ class PlaywrightAdapter:
             try:
                 if target.test_id:
                     candidates.append((f"{prefix}:test_id", frame.get_by_test_id(target.test_id)))
-                if target.role and target.name:
+                frame_role = _aria_role(target.role)
+                if frame_role and target.name:
                     candidates.append(
                         (
                             f"{prefix}:role",
-                            frame.get_by_role(target.role, name=target.name, exact=True),
+                            frame.get_by_role(frame_role, name=target.name, exact=True),
                         )
                     )
                     candidates.append(
                         (
                             f"{prefix}:role_casefold",
-                            frame.get_by_role(target.role, name=flexible_name, exact=False),
+                            frame.get_by_role(frame_role, name=flexible_name, exact=False),
                         )
                     )
                 if target.label:
@@ -498,7 +649,7 @@ class PlaywrightAdapter:
         click or form submission is attempted.  The caller records this as a
         recovery action in the scene trace.
         """
-        self.ensure_page()
+        await self.ensure_page_async()
         dialogs = self.page.get_by_role("dialog")
         had_visible_dialog = False
         try:
@@ -553,7 +704,7 @@ class PlaywrightAdapter:
         before a scene is captured so captions can never describe obscured
         product content.
         """
-        self.ensure_page()
+        await self.ensure_page_async()
         dialogs = self.page.get_by_role("dialog")
         target_box: dict[str, float] | None = None
         if target is not None:
@@ -648,7 +799,7 @@ class PlaywrightAdapter:
     async def target_rect(self, target: Target | None) -> Rect | None:
         if target is None:
             return None
-        self.ensure_page()
+        await self.ensure_page_async()
         locator, _ = await self.grounded_locator(target)
         box = await locator.bounding_box()
         if box:
@@ -683,12 +834,47 @@ class PlaywrightAdapter:
                   type: (element.getAttribute('type') || '').toLowerCase(),
                   role: element.getAttribute('role') || '',
                   haspopup: element.getAttribute('aria-haspopup') || '',
-                  readonly: Boolean(element.readOnly) || element.getAttribute('aria-readonly') === 'true'
+                  readonly: Boolean(element.readOnly) || element.getAttribute('aria-readonly') === 'true',
+                  placeholder: element.getAttribute('placeholder') || '',
+                  name: element.getAttribute('name') || ''
                 })"""
             )
         except (AttributeError, PlaywrightError):
             semantics = {}
         await locator.click()
+        # A planner may encounter a time control in a form inventory before
+        # the provider has classified its behavior. Keep the runtime generic:
+        # resolve an editable time input by visible typing or an observed
+        # visible slot, rather than treating ``10:30`` as a calendar date.
+        if re.fullmatch(r"\d{1,2}:\d{2}(?:\s*[ap]m)?", value.strip(), re.IGNORECASE):
+            if not semantics.get("readonly") and semantics.get("tag") in {"input", "textarea"}:
+                try:
+                    await locator.press("ControlOrMeta+A")
+                    await locator.press_sequentially(value, delay=self.typing_delay_ms)
+                    observed = await locator.evaluate("element => String(element.value || '')")
+                except (AttributeError, PlaywrightError):
+                    observed = ""
+                if str(observed).strip() == value.strip():
+                    return {
+                        "selected": observed,
+                        "interaction": "editable-time-visible-typing",
+                        "focused": True,
+                    }
+            for role in ("option", "button", "gridcell"):
+                try:
+                    choices = self.page.get_by_role(
+                        role, name=re.compile(rf"^{re.escape(value.strip())}$", re.IGNORECASE)
+                    )
+                    visible = [
+                        choices.nth(index)
+                        for index in range(await choices.count())
+                        if await choices.nth(index).is_visible()
+                    ]
+                except (AttributeError, PlaywrightError):
+                    visible = []
+                if len(visible) == 1:
+                    await visible[0].click()
+                    return {"selected": value, "interaction": "observed-time-slot", "choice_role": role}
         is_native = semantics.get("tag") == "input" and semantics.get("type") == "date"
         if is_native and not semantics.get("readonly"):
             expected = _canonical_date(value) or value
@@ -747,12 +933,100 @@ class PlaywrightAdapter:
                 pass
 
         tokens = [token for token in re.split(r"[-/.\s]+", value) if token]
+        # Some design systems render a calendar as an editable text input but
+        # expose no queryable date cells (the popup may be a canvas or a
+        # portal). In that case use visible sequential typing and verify the
+        # normalized value before accepting it. Readonly controls still require
+        # a grounded calendar choice; no product selector is assumed here.
+        if not semantics.get("readonly") and semantics.get("tag") in {"input", "textarea"}:
+            expected = _canonical_date(value) or value
+            date_keystrokes = _visible_date_keystrokes(value)
+            # Respect the observed display contract.  A text picker that
+            # advertises ``dd-mm-yyyy`` may temporarily contain a canonical
+            # ISO value while still being invalid; read back validity as well
+            # as the normalized date before accepting the gesture.
+            if re.search(r"dd[-/]mm[-/]yyyy", str(semantics.get("placeholder", "")), re.IGNORECASE):
+                iso = _canonical_date(value)
+                if iso:
+                    year, month, day = iso.split("-")
+                    preferred = f"{day}-{month}-{year}"
+                    date_keystrokes = [preferred, *[item for item in date_keystrokes if item != preferred]]
+            for typed in date_keystrokes:
+                try:
+                    await locator.click()
+                    await locator.press("ControlOrMeta+A")
+                    await locator.press_sequentially(typed, delay=self.typing_delay_ms)
+                    observed_state = await locator.evaluate(
+                        """element => ({
+                          value: String(element.value || ''),
+                          invalid: element.getAttribute('aria-invalid') === 'true' ||
+                            Boolean(element.validity && element.validity.valid === false)
+                        })"""
+                    )
+                    observed = str(observed_state.get("value", ""))
+                except (AttributeError, PlaywrightError):
+                    observed = ""
+                    observed_state = {"invalid": True}
+                if (
+                    not observed_state.get("invalid")
+                    and (_canonical_date(str(observed)) == expected or str(observed) == value)
+                ):
+                    return {
+                        "selected": observed or value,
+                        "interaction": "editable-date-visible-typing",
+                        "focused": True,
+                    }
+
         day = str(int(tokens[-1])) if len(tokens) >= 3 and tokens[-1].isdigit() else value
         scopes = [
             self.page.locator("[role='dialog']:visible").last,
             self.page.locator("[role='grid']:visible").last,
             self.page,
         ]
+        expected_iso = _canonical_date(value)
+        # Prefer an accessibility/data-date representation when available.
+        # This handles custom calendars whose adjacent-month days share the
+        # same visible number (for example two ``30`` buttons) without relying
+        # on a product-specific class or selector.
+        if expected_iso:
+            for scope in scopes:
+                try:
+                    choices = scope.locator(
+                        "[role='gridcell']:visible, [role='button']:visible, [role='option']:visible"
+                    )
+                    observed = await choices.evaluate_all(
+                        """nodes => nodes.map((node, index) => ({
+                          index,
+                          disabled: node.hasAttribute('disabled') ||
+                            node.getAttribute('aria-disabled') === 'true' ||
+                            node.getAttribute('data-disabled') === 'true',
+                          values: [
+                            node.getAttribute('data-date'),
+                            node.getAttribute('datetime'),
+                            node.getAttribute('aria-label'),
+                            node.getAttribute('title'),
+                            node.textContent
+                          ].filter(Boolean).map(String)
+                        }))"""
+                    )
+                except (AttributeError, PlaywrightError):
+                    observed = []
+                matches = [
+                    item
+                    for item in observed
+                    if not item.get("disabled")
+                    and any(
+                        _canonical_date_from_visible_label(label) == expected_iso
+                        for label in item.get("values", [])
+                    )
+                ]
+                if len(matches) == 1:
+                    await choices.nth(int(matches[0]["index"])).click()
+                    return {
+                        "selected": value,
+                        "interaction": "calendar-visible-date-label",
+                        "choice_role": "calendar-control",
+                    }
         for scope in scopes:
             for role in ("gridcell", "button", "option"):
                 choices = scope.get_by_role(role, name=re.compile(rf"^(?:{re.escape(value)}|{day})$"))
@@ -838,8 +1112,156 @@ class PlaywrightAdapter:
             "interaction": "native-select-visible-keyboard",
         }
 
+    async def _fill_time_human_visible(self, locator, value: str) -> dict[str, Any]:
+        """Enter a native time control through its visible segmented UI.
+
+        Chromium exposes ``input[type=time]`` as multiple spinbutton segments.
+        Sending the punctuation-bearing value to the currently focused segment
+        is silently ignored.  Digits through the normal keyboard path advance
+        those segments and retain the same human-visible typing semantics as
+        every other form control; the resulting value is then verified.
+        """
+        await locator.click()
+        await locator.press("ControlOrMeta+A")
+        await locator.press("Backspace")
+        expected = _canonical_time(value)
+        if expected is None:
+            raise GroundingError(f"Time input requires an observed time value: {value!r}")
+        digits = expected.replace(":", "")
+        await locator.press_sequentially(digits, delay=self.typing_delay_ms)
+        observed = ""
+        try:
+            observed = str(await locator.evaluate("element => String(element.value || '')"))
+        except (AttributeError, PlaywrightError):
+            observed = ""
+        if _canonical_time(observed) != expected:
+            # A browser locale may accept punctuation after the segmented
+            # attempt. This remains a visible keyboard retry, never a DOM
+            # assignment or a product-specific adapter.
+            await locator.press("ControlOrMeta+A")
+            await locator.press("Backspace")
+            await locator.press_sequentially(value, delay=self.typing_delay_ms)
+            try:
+                observed = str(await locator.evaluate("element => String(element.value || '')"))
+            except (AttributeError, PlaywrightError):
+                observed = ""
+        if _canonical_time(observed) != expected:
+            raise GroundingError(
+                f"Time input did not retain observed value {value!r}; got {observed!r}"
+            )
+        return {
+            "typed": True,
+            "typing_started": True,
+            "completed_value_checkpoint": observed,
+            "interaction": "native-time-keyboard",
+        }
+
+    async def _visible_choice_value(self, locator, value: str) -> bool:
+        """Check that a committed custom choice is visibly rendered nearby."""
+        try:
+            return bool(
+                await locator.evaluate(
+                    """(element, expected) => {
+                      const normalize = input => String(input || '')
+                        .replace(/\\s+/g, ' ').trim().toLocaleLowerCase();
+                      const wanted = normalize(expected);
+                      const matches = value => {
+                        const text = normalize(value);
+                        return Boolean(text && wanted && (text === wanted ||
+                          text.startsWith(wanted + ' ') || wanted.startsWith(text + ' ')));
+                      };
+                      const direct = [
+                        element.value,
+                        element.textContent,
+                        element.getAttribute?.('aria-label'),
+                        element.getAttribute?.('aria-valuetext'),
+                        element.getAttribute?.('data-value'),
+                      ];
+                      if (direct.some(matches)) return true;
+                      const activeId = element.getAttribute?.('aria-activedescendant');
+                      if (activeId) {
+                        const active = document.getElementById(activeId);
+                        if (active && matches(active.innerText || active.textContent ||
+                          active.getAttribute?.('aria-label') || active.getAttribute?.('data-value'))) {
+                          return true;
+                        }
+                      }
+                      let node = element;
+                      for (let depth = 0; node && depth < 10; depth += 1, node = node.parentElement) {
+                        const role = String(node.getAttribute?.('role') || '').toLowerCase();
+                        const className = String(node.className || '').toLowerCase();
+                        const text = normalize(node.innerText || node.textContent || '');
+                        const semantic = role === 'combobox' || role === 'listbox'
+                          || /autocomplete|combobox|multiselect|select|chip|tag/.test(className)
+                          || Boolean(node.querySelector?.('[role="option"], [data-tag], [data-value]'));
+                        const ownsInput = node === element || Boolean(node.querySelector?.(
+                          'input, textarea, [role="textbox"], [role="combobox"]'
+                        ));
+                        if ((semantic || ownsInput) && (matches(text) || text.includes(wanted)) &&
+                          text.length <= (semantic ? 800 : 320)) return true;
+                        if (semantic) {
+                          const selected = node.querySelectorAll?.(
+                            '[aria-selected="true"], [data-tag], [data-value], [role="option"]'
+                          ) || [];
+                          for (const item of selected) {
+                            if (matches(item.innerText || item.textContent ||
+                              item.getAttribute?.('aria-label') || item.getAttribute?.('data-value'))) {
+                              return true;
+                            }
+                          }
+                        }
+                      }
+                      return false;
+                    }""",
+                    str(value),
+                )
+            )
+        except (AttributeError, PlaywrightError, TypeError):
+            return False
+
+    async def _choice_control_state(self, locator) -> str | None:
+        """Return a compact pre/post state witness for custom choices."""
+        try:
+            state = await locator.evaluate(
+                """element => {
+                  const normalize = input => String(input || '')
+                    .replace(/\\s+/g, ' ').trim().slice(0, 800);
+                  let node = element;
+                  for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+                    const controls = node.querySelectorAll?.(
+                      'input, textarea, [role="textbox"], [role="combobox"]'
+                    ) || [];
+                    if (node === element || controls.length) {
+                      return JSON.stringify({
+                        value: normalize(element.value || element.textContent),
+                        ariaValue: normalize(element.getAttribute?.('aria-valuetext')),
+                        expanded: element.getAttribute?.('aria-expanded') || '',
+                        active: element.getAttribute?.('aria-activedescendant') || '',
+                        text: normalize(node.innerText || node.textContent),
+                        selected: Array.from(node.querySelectorAll?.(
+                          '[aria-selected="true"], [data-tag], [data-value]'
+                        ) || []).map(item => normalize(
+                          item.innerText || item.textContent || item.getAttribute?.('data-value')
+                        )).filter(Boolean).slice(0, 24),
+                      });
+                    }
+                  }
+                  return JSON.stringify({
+                    value: normalize(element.value || element.textContent),
+                    ariaValue: normalize(element.getAttribute?.('aria-valuetext')),
+                    expanded: element.getAttribute?.('aria-expanded') || '',
+                    active: element.getAttribute?.('aria-activedescendant') || '',
+                    text: normalize(element.innerText || element.textContent),
+                    selected: [],
+                  });
+                }"""
+            )
+            return str(state)
+        except (AttributeError, PlaywrightError, TypeError):
+            return None
+
     async def execute(self, operation: SemanticOperation) -> Any:
-        self.ensure_page()
+        await self.ensure_page_async()
         if operation.kind == OperationKind.NAVIGATE:
             response = await self.page.goto(str(operation.value), wait_until="domcontentloaded")
             try:
@@ -1033,8 +1455,8 @@ class PlaywrightAdapter:
             # Tool palettes, inspector drawers, and onboarding overlays often
             # sit above a full-viewport canvas.  The canvas bounding box alone
             # therefore does not prove that a point is dispatchable: in the
-            # first Excalidraw gesture the planned rectangle began beneath the
-            # open style panel and was silently ignored.  Rebase the observed
+            # a planned gesture can begin beneath an open style panel and be
+            # silently ignored. Rebase the observed
             # path to the nearest unobstructed region while preserving its
             # shape and relative geometry.  This is DOM/geometry based and
             # works for any canvas editor that exposes a canvas surface.
@@ -1144,7 +1566,8 @@ class PlaywrightAdapter:
             pressed = bool(
                 payload.get(
                     "press",
-                    payload.get("pattern") in {"short_reversible_stroke", "connector_segment"},
+                    payload.get("pattern")
+                    in {"short_reversible_stroke", "connector_segment", "shape_box"},
                 )
             )
             first = points[0]
@@ -1174,6 +1597,14 @@ class PlaywrightAdapter:
                 # click at that same grounded point to open the editor.
                 await self.page.mouse.click(float(first["x"]), float(first["y"]), button=button)
                 await self.page.wait_for_timeout(180)
+                self._pending_canvas_text_placement = {
+                    "url": str(getattr(self.page, "url", "") or ""),
+                    "selector": str(operation.target.selector if operation.target else ""),
+                    "point": {"x": float(first["x"]), "y": float(first["y"])},
+                }
+            elif pattern != "text_placement":
+                # A new drawing gesture cannot consume an older text hand-off.
+                self._pending_canvas_text_placement = None
             elif pattern == "connector_segment":
                 # Selection handles are transient pixels, not proof of a
                 # committed connector. Clear them before taking the outcome
@@ -1223,14 +1654,24 @@ class PlaywrightAdapter:
                     pixel_witness = bool(
                         surface_fingerprint is not None and after_fingerprint != surface_fingerprint
                     )
+                    editor_witness = False
+                    if pattern == "text_placement":
+                        try:
+                            editor_witness = bool(
+                                await self.page.locator(
+                                    "textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible"
+                                ).count()
+                            )
+                        except (AttributeError, PlaywrightError, TypeError):
+                            editor_witness = False
                     # Prefer structural proof when an SVG scene graph is
                     # available; transient selection pixels are not a valid
                     # committed drawing.  For canvas-only products, the
                     # clipped pixel witness remains the portable fallback.
                     changed = (
-                        structural_witness
+                        (structural_witness or editor_witness)
                         if (isinstance(surface_structure, dict) and surface_structure.get("svg"))
-                        else pixel_witness
+                        else (pixel_witness or editor_witness)
                     )
                 except PlaywrightError:
                     changed = False
@@ -1269,14 +1710,32 @@ class PlaywrightAdapter:
             timeout_ms = max(0, int(operation.value or 500))
             await self.page.wait_for_timeout(timeout_ms)
             return {"waited_ms": timeout_ms}
-        if operation.kind is OperationKind.KEY_PRESS and operation.target is None:
+        canvas_text_payload: dict[str, object] | None = None
+        if operation.kind is OperationKind.KEY_PRESS and operation.target is not None:
+            target_selector = str(operation.target.selector or "").casefold()
+            if target_selector in {"canvas", "svg"} and isinstance(operation.value, str):
+                # Older/remote planners may ground the canvas target on the
+                # KeyPress itself and emit the label as a plain string. Treat
+                # that as the same semantic text-placement operation as the
+                # richer payload form; never send the label to locator.press.
+                canvas_text_payload = {
+                    "text": operation.value,
+                    "surface_target": operation.target.model_dump(mode="json"),
+                    "placement_mode": "text",
+                }
+        if operation.kind is OperationKind.KEY_PRESS and (
+            operation.target is None or canvas_text_payload is not None
+        ):
             # A focused canvas text editor needs human-paced text input rather
             # than a single keyboard shortcut.  The planner uses this form
             # only after grounding a visible text tool and canvas target.
-            if isinstance(operation.value, dict) and isinstance(operation.value.get("text"), str):
-                text = operation.value["text"]
+            payload = canvas_text_payload or (
+                operation.value if isinstance(operation.value, dict) else None
+            )
+            if isinstance(payload, dict) and isinstance(payload.get("text"), str):
+                text = str(payload["text"])
                 surface_fingerprint = None
-                surface_target = operation.value.get("surface_target")
+                surface_target = payload.get("surface_target")
                 if isinstance(surface_target, dict):
                     try:
                         surface, _ = await self.grounded_locator(Target.model_validate(surface_target))
@@ -1311,13 +1770,30 @@ class PlaywrightAdapter:
                         )
                         box = await surface.bounding_box()
                         if box:
-                            placement = operation.value.get("placement")
+                            placement = payload.get("placement")
                             px = float(placement.get("x", 0.5)) if isinstance(placement, dict) else 0.5
                             py = float(placement.get("y", 0.5)) if isinstance(placement, dict) else 0.5
-                            await self.page.mouse.click(
-                                float(box["x"]) + float(box["width"]) * px,
-                                float(box["y"]) + float(box["height"]) * py,
+                            pending = self._pending_canvas_text_placement
+                            pending_point = pending.get("point") if isinstance(pending, dict) else None
+                            pending_matches = bool(
+                                isinstance(pending, dict)
+                                and pending.get("url") == str(getattr(self.page, "url", "") or "")
+                                and pending.get("selector") == str(surface_target.get("selector", ""))
+                                and isinstance(pending_point, dict)
+                                and {"x", "y"} <= set(pending_point)
                             )
+                            if pending_matches:
+                                # Restore the exact observed click point when
+                                # focus was lost between pointer placement and
+                                # typing.  Falling back to a declared relative
+                                # placement remains valid for planners that
+                                # supply one explicitly.
+                                click_x = float(pending_point["x"])
+                                click_y = float(pending_point["y"])
+                            else:
+                                click_x = float(box["x"]) + float(box["width"]) * px
+                                click_y = float(box["y"]) + float(box["height"]) * py
+                            await self.page.mouse.click(click_x, click_y)
                             await self.page.wait_for_timeout(180)
                             focus_before = await self.page.evaluate(
                                 """() => { const e=document.activeElement; return e &&
@@ -1326,7 +1802,7 @@ class PlaywrightAdapter:
                             )
                             if (
                                 not focus_before
-                                and operation.value.get("placement_mode") == "text"
+                                and payload.get("placement_mode") == "text"
                             ):
                                 # Text-mode editors commonly expose a single
                                 # keyboard affordance when the toolbar click
@@ -1345,7 +1821,7 @@ class PlaywrightAdapter:
                                     (e.isContentEditable || ['input','textarea'].includes(e.tagName.toLowerCase()) ||
                                     e.getAttribute('role') === 'textbox'); }"""
                                 )
-                            if not focus_before and operation.value.get("placement_mode") == "text":
+                            if not focus_before and payload.get("placement_mode") == "text":
                                 # Canvas editors frequently keep a transient
                                 # textarea/contenteditable outside the drawing
                                 # surface. Discover it by semantics rather
@@ -1372,6 +1848,14 @@ class PlaywrightAdapter:
                 if not focus_before:
                     raise GroundingError("Keyboard text input requires a focused editable surface")
                 await self.page.keyboard.type(text, delay=70)
+                if payload.get("placement_mode") == "text":
+                    # Drawing editors commonly keep the label in a transient
+                    # textarea/contenteditable until their standard commit
+                    # shortcut is dispatched.  Commit only this explicitly
+                    # grounded text-placement operation; ordinary keyboard
+                    # actions must retain their caller-supplied key semantics.
+                    await self.page.keyboard.press("ControlOrMeta+Enter")
+                    await self.page.wait_for_timeout(220)
                 await self.page.wait_for_timeout(120)
                 focus = await self.page.evaluate(
                     """() => { const e=document.activeElement; return e && e !== document.body ? {
@@ -1388,12 +1872,18 @@ class PlaywrightAdapter:
                         surface_changed = after != surface_fingerprint
                     except (PlaywrightError, GroundingError, ValidationError):
                         surface_changed = None
-                return {
+                result = {
                     "text_length": len(text),
                     "scope": "focused-editable",
                     "focused": focus,
                     **({"surface_changed": surface_changed} if surface_changed is not None else {}),
                 }
+                if payload.get("placement_mode") == "text":
+                    # Do not let a later unrelated canvas operation consume a
+                    # stale text placement.  The pointer->text hand-off is
+                    # one-shot by design.
+                    self._pending_canvas_text_placement = None
+                return result
             key = str(operation.value or "Escape")
             await self.page.keyboard.press(key)
             await self.page.wait_for_timeout(120)
@@ -1414,6 +1904,28 @@ class PlaywrightAdapter:
             if not path.is_file():
                 raise GroundingError("Upload file does not exist")
             return await locator.set_input_files(str(path))
+        # The planner may call a native segmented control either a text field
+        # or an option selector depending on what the accessibility snapshot
+        # exposed. Resolve the browser-native input type at dispatch time so
+        # both plans use the same visible, verified interaction path.
+        observed_input_type = ""
+        if operation.kind in {
+            OperationKind.FILL_TEXT,
+            OperationKind.FILL_EMAIL,
+            OperationKind.FILL_PHONE,
+            OperationKind.SEARCH,
+            OperationKind.SELECT_OPTION,
+        }:
+            try:
+                observed_input_type = str(
+                    await locator.evaluate("element => String(element.type || '').toLowerCase()")
+                )
+            except (AttributeError, PlaywrightError):
+                observed_input_type = ""
+            if observed_input_type == "time":
+                return await self._fill_time_human_visible(locator, str(operation.value))
+            if observed_input_type == "date" and operation.kind is not OperationKind.SELECT_OPTION:
+                return await self._select_date_human_visible(locator, str(operation.value or ""))
         if operation.kind in {
             OperationKind.FILL_TEXT,
             OperationKind.FILL_EMAIL,
@@ -1422,6 +1934,41 @@ class PlaywrightAdapter:
         }:
             # Never use fill() here — it commits the whole string at once and
             # reads as paste on camera. Visible demos must keystroke.
+            if operation.kind is OperationKind.FILL_TEXT:
+                # Canvas editors create a transient textarea/contenteditable
+                # after a text-placement gesture. The semantic target remains
+                # the observed canvas, so type through the focused editor.
+                try:
+                    target_tag = await locator.evaluate(
+                        "element => String(element.tagName || '').toLowerCase()"
+                    )
+                    focused_editor = await self.page.evaluate(
+                        """() => {
+                          const element = document.activeElement;
+                          if (!element || element === document.body) return false;
+                          const tag = String(element.tagName || '').toLowerCase();
+                          return Boolean(element.isContentEditable || tag === 'textarea' ||
+                            tag === 'input' || element.getAttribute('role') === 'textbox');
+                        }"""
+                    )
+                except (AttributeError, PlaywrightError, TypeError):
+                    target_tag, focused_editor = "", False
+                if target_tag in {"canvas", "svg"} and focused_editor:
+                    visible_value = str(operation.value)
+                    await self.page.keyboard.type(visible_value, delay=self.typing_delay_ms)
+                    # Canvas editors commonly keep text in a transient editor
+                    # until their documented commit shortcut is dispatched.
+                    # Use the standard modifier+Enter contract first; Escape
+                    # is intentionally not used because it can discard the
+                    # just-entered value in otherwise equivalent editors.
+                    await self.page.keyboard.press("ControlOrMeta+Enter")
+                    await self.page.wait_for_timeout(220)
+                    return {
+                        "typed": True,
+                        "typing_started": True,
+                        "completed_value_checkpoint": visible_value,
+                        "scope": "focused-editable",
+                    }
             await locator.click()
             await locator.press("ControlOrMeta+A")
             await locator.press("Backspace")
@@ -1499,7 +2046,7 @@ class PlaywrightAdapter:
                                 exact=False,
                             )
                         )
-                    except (PlaywrightError, AttributeError):
+                    except (PlaywrightError, AttributeError, AssertionError):
                         pass
                 for candidate in control_candidates:
                     try:
@@ -1550,7 +2097,6 @@ class PlaywrightAdapter:
                         await press("ArrowDown")
                 except (PlaywrightError, AttributeError, TypeError):
                     pass
-                option = self.page.get_by_role("option", name=str(operation.value), exact=True)
                 try:
                     wait_for_selector = getattr(self.page, "wait_for_selector", None)
                     if callable(wait_for_selector):
@@ -1561,27 +2107,123 @@ class PlaywrightAdapter:
                         )
                 except (PlaywrightError, AttributeError, TypeError):
                     pass
-                count = await option.count()
-                for index in range(count):
-                    candidate = option.nth(index)
+                # Keep the opened option surface on screen long enough for the
+                # production recording to prove the choice.  Without this
+                # bounded reveal dwell, a fast CDP action can capture only the
+                # post-selection value and make a valid interaction look like
+                # a random assignment.
+                wait_for_timeout = getattr(self.page, "wait_for_timeout", None)
+                if callable(wait_for_timeout):
+                    await wait_for_timeout(550)
+                # Re-ground against the options that are actually visible now.
+                # Discovery labels can be clipped by an accessibility wrapper;
+                # accept a prefix only when it identifies exactly one current
+                # option. Never type a stale label or choose the first nearby
+                # option when the evidence is ambiguous.
+                try:
+                    option_surface = self.page.get_by_role("option")
+                    option_count = await option_surface.count()
+                except (AttributeError, PlaywrightError, AssertionError):
+                    option_surface = self.page.get_by_role(
+                        "option", name=str(operation.value), exact=True
+                    )
+                    option_count = await option_surface.count()
+                visible_labels: list[str] = []
+                visible_options: list[tuple[int, str, Any]] = []
+                for index in range(option_count):
+                    candidate = option_surface.nth(index)
                     try:
                         if await candidate.is_visible():
+                            label = ""
                             try:
-                                await candidate.click(timeout=5_000)
-                            except TypeError:
-                                await candidate.click()
-                            except PlaywrightError:
+                                label = (await candidate.inner_text()).strip()
+                            except (AttributeError, PlaywrightError):
                                 try:
-                                    await candidate.click(timeout=3_000, force=True)
-                                except TypeError:
-                                    await candidate.click()
-                            return {
-                                "selected": str(operation.value),
-                                "options_visible": True,
-                                "interaction": "custom-listbox-visible-choice",
-                            }
+                                    label = str(
+                                        await candidate.get_attribute("aria-label") or ""
+                                    ).strip()
+                                except (AttributeError, PlaywrightError):
+                                    label = ""
+                            if label:
+                                visible_labels.append(label)
+                                visible_options.append((index, label, candidate))
                     except (PlaywrightError, TypeError):
                         continue
+                expected_fold = " ".join(str(operation.value).split()).casefold()
+
+                def _option_matches(label: str) -> bool:
+                    observed_fold = " ".join(label.split()).casefold()
+                    return bool(
+                        observed_fold
+                        and (
+                            observed_fold == expected_fold
+                            or observed_fold.startswith(expected_fold + " ")
+                            or expected_fold.startswith(observed_fold + " ")
+                        )
+                    )
+
+                matched_options = [
+                    item for item in visible_options if _option_matches(item[1])
+                ]
+                if len(matched_options) == 1:
+                    _index, observed_label, candidate = matched_options[0]
+                    state_before = await self._choice_control_state(selection_locator)
+                    try:
+                        await candidate.click(timeout=5_000)
+                    except TypeError:
+                        await candidate.click()
+                    except PlaywrightError:
+                        try:
+                            await candidate.click(timeout=3_000, force=True)
+                        except TypeError:
+                            await candidate.click()
+                    if callable(wait_for_timeout):
+                        await wait_for_timeout(220)
+                    selection_witness = await self._visible_choice_value(
+                        selection_locator, observed_label
+                    )
+                    state_after = await self._choice_control_state(selection_locator)
+                    state_transition = bool(
+                        state_before is not None
+                        and state_after is not None
+                        and state_before != state_after
+                    )
+                    if not selection_witness and state_transition:
+                        # Some custom multi-selects keep the chosen chip in a
+                        # sibling layer with no accessible label. A unique
+                        # observed option click plus a bounded control-owned
+                        # state transition is still a valid semantic witness;
+                        # a no-op or ambiguous click cannot satisfy it.
+                        selection_witness = True
+                    if not selection_witness:
+                        raise GroundingError(
+                            f"Observed choice did not render the selected label "
+                            f"{observed_label!r}; re-observe dependent options"
+                        )
+                    return {
+                        "selected": observed_label,
+                        "requested": str(operation.value),
+                        "options_visible": True,
+                        "interaction": "custom-listbox-visible-choice",
+                        "selection_witness": selection_witness,
+                        "selection_state_changed": state_transition,
+                    }
+                # A dependent combobox can legitimately replace its choices
+                # after an earlier field changes. Never type an unavailable
+                # planned label and let a fuzzy autocomplete select the first
+                # neighbouring option; that creates a false-looking demo. A
+                # visible option surface with no exact match is a reversible
+                # pre-dispatch grounding failure, so the execution kernel can
+                # re-observe and replan from the current state.
+                if visible_labels:
+                    observed_folds = {
+                        " ".join(label.split()).casefold() for label in visible_labels
+                    }
+                    if expected_fold not in observed_folds:
+                        raise GroundingError(
+                            f"Observed option changed before dispatch: expected {operation.value!r}; "
+                            f"available labels={visible_labels[:12]!r}"
+                        )
                 # Fallback: type the observed label into the open combobox and
                 # commit with Enter when the listbox option node is transient.
                 try:
@@ -1591,10 +2233,20 @@ class PlaywrightAdapter:
                         str(operation.value), delay=self.typing_delay_ms
                     )
                     await selection_locator.press("Enter")
+                    if callable(wait_for_timeout):
+                        await wait_for_timeout(220)
+                    witness = await self._visible_choice_value(
+                        selection_locator, str(operation.value)
+                    )
+                    if not witness:
+                        raise GroundingError(
+                            f"Observed autocomplete did not commit exact option {operation.value!r}"
+                        )
                     return {
                         "selected": str(operation.value),
                         "options_visible": False,
                         "interaction": "custom-combobox-typeahead",
+                        "selection_witness": witness,
                     }
                 except PlaywrightError as error:
                     raise GroundingError(
@@ -1811,7 +2463,7 @@ class PlaywrightAdapter:
         raise GroundingError(f"Unsupported primitive operation: {operation.kind}")
 
     async def snapshot(self, target: Target | None) -> dict[str, Any]:
-        self.ensure_page()
+        await self.ensure_page_async()
         if target is None:
             return {"url": self.page.url}
         locator, strategy = await self.grounded_locator(target)
@@ -1908,7 +2560,7 @@ class PlaywrightAdapter:
         credentials.  It gives a replanner the current URL, title, visible
         prose, and visible semantic controls after an unexpected state.
         """
-        self.ensure_page()
+        await self.ensure_page_async()
         try:
             script = """(limit) => ({
                     url: window.location.href,
@@ -1933,7 +2585,22 @@ class PlaywrightAdapter:
                       const box = element.getBoundingClientRect();
                       return box.width > 0 && box.height > 0 &&
                         getComputedStyle(element).visibility !== 'hidden';
-                    }).slice(0, 80).map(element => ({
+                    }).sort((left, right) => {
+                      const score = element => {
+                        const box = element.getBoundingClientRect();
+                        const inViewport = box.bottom > 0 && box.right > 0 &&
+                          box.top < window.innerHeight && box.left < window.innerWidth;
+                        const inActiveSurface = Boolean(element.closest(
+                          '[aria-modal="true"],[role="dialog"],[role="listbox"],[role="menu"],'
+                          + '[data-state="open"],[class*="modal" i],[class*="popover" i],'
+                          + '[class*="dropdown" i],[class*="overlay" i]'
+                        ));
+                        return (inActiveSurface ? 1000 : 0) +
+                          (element === document.activeElement ? 500 : 0) +
+                          (inViewport ? 100 : 0);
+                      };
+                      return score(right) - score(left);
+                    }).slice(0, 160).map(element => ({
                       tag: element.tagName.toLowerCase(),
                       role: element.getAttribute('role'),
                       selector: (() => {
@@ -2021,8 +2688,7 @@ class PlaywrightAdapter:
                       };
                     })(),
                     overlays: Array.from(document.querySelectorAll(
-                      '[aria-modal="true"],[role="dialog"],[role="listbox"],[role="menu"],[data-state="open"],
-                      '[class*="modal" i],[class*="popover" i],[class*="dropdown" i],[class*="backdrop" i],[class*="overlay" i]'
+                      '[aria-modal="true"],[role="dialog"],[role="listbox"],[role="menu"],[data-state="open"],[class*="modal" i],[class*="popover" i],[class*="dropdown" i],[class*="backdrop" i],[class*="overlay" i]'
                     )).filter(element => {
                       const box = element.getBoundingClientRect();
                       const style = getComputedStyle(element);
@@ -2112,7 +2778,7 @@ class PlaywrightAdapter:
         because the old form control disappeared or the result lives inside
         repeated layout wrappers.
         """
-        self.ensure_page()
+        await self.ensure_page_async()
         locator, strategy = await self.visible_locator(target)
         try:
             snapshot = await locator.evaluate(
@@ -2144,7 +2810,7 @@ class PlaywrightAdapter:
             return {"url": self.page.url, "target_available": False}
 
     async def view_state(self) -> tuple[Viewport, dict[str, float]]:
-        self.ensure_page()
+        await self.ensure_page_async()
         state = await self.page.evaluate(
             "() => ({width: window.innerWidth, height: window.innerHeight, "
             "deviceScaleFactor: window.devicePixelRatio || 1, x: window.scrollX, y: window.scrollY})"

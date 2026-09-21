@@ -42,11 +42,6 @@ def _target_name(event: InteractionEvent) -> str:
 
 def _narrative_action(event: InteractionEvent) -> str:
     target = _target_name(event)
-    value = str(
-        event.after.get("value") or event.before.get("value") or event.target.text
-        if event.target and event.target.text
-        else ""
-    ).strip()
     if event.kind in {OperationKind.NAVIGATE, OperationKind.OPEN_NAVIGATION_ITEM}:
         return f"move into {target}, establishing its visible context before examining the meaningful details"
     if event.kind in {OperationKind.WAIT_FOR_STATE, OperationKind.VERIFY_STATE}:
@@ -59,15 +54,14 @@ def _narrative_action(event: InteractionEvent) -> str:
         OperationKind.FILL_PHONE,
         OperationKind.SEARCH,
     }:
-        return f"enter the required details in {target} so the next step has the right context"
+        return f"complete {target} with the information this workflow needs so the next step has the right context"
     if event.kind in {
         OperationKind.SELECT_OPTION,
         OperationKind.SELECT_DATE,
         OperationKind.SELECT_DATE_RANGE,
         OperationKind.CHOOSE_RADIO,
     }:
-        choice = f" {value}" if value else ""
-        return f"choose{choice} in {target} to set the intended option"
+        return f"choose an available option in {target} to set the intended path"
     if event.kind in {OperationKind.SUBMIT, OperationKind.CREATE_RECORD}:
         return f"submit {target} to complete the workflow"
     if event.kind is OperationKind.SCROLL_TO:

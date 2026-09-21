@@ -100,7 +100,26 @@ async def resume(args: argparse.Namespace) -> None:
             if stage in completed:
                 continue
             await service.run_url_stage(args.run_id, stage, payload=payload)
-        repository.update_run(args.run_id, stage="COMPLETE", status="COMPLETE")
+        # ``run_url_stage`` records delivery failures and may schedule a
+        # targeted child retry instead of raising.  Never promote the parent
+        # to COMPLETE merely because the supervisor loop returned: completion
+        # is a durable ledger decision, not a control-flow side effect.
+        stage_rows = repository.stage_jobs(args.run_id)
+        failed = [row for row in stage_rows if row["status"] == "FAILED"]
+        pending = [
+            row
+            for row in stage_rows
+            if row["status"] not in {"COMPLETE", "SKIPPED", "FAILED", "CANCELLED"}
+        ]
+        if failed or pending:
+            write_status_snapshot(settings, repository, args.run_id)
+            details = ", ".join(
+                f"{row['stage']}={row['status']}" for row in [*failed, *pending]
+            ) or "stage ledger is incomplete"
+            raise RuntimeError(f"run did not complete: {details}")
+        current = repository.get_run(args.run_id)
+        if current["status"] != "COMPLETE":
+            repository.update_run(args.run_id, stage="COMPLETE", status="COMPLETE")
         print(f"COMPLETE={args.run_id}", flush=True)
     except Exception:
         # The durable stage service records the owning failure. Refresh the

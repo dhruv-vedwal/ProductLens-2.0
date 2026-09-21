@@ -37,6 +37,19 @@ class Adapter:
         return None
 
 
+class SemanticStateLocator:
+    async def evaluate(self, _script, _state):
+        return True
+
+
+class SemanticStateAdapter(Adapter):
+    def __init__(self):
+        self.page = ReactivePage()
+
+    async def grounded_locator(self, _target):
+        return SemanticStateLocator(), "role"
+
+
 def test_url_postcondition_accepts_spa_query_state_for_observed_route():
     assert _browser_url_matches(
         "https://example.test/leads?view=list&page=2",
@@ -131,6 +144,20 @@ async def test_engine_compiles_action_intents_into_the_same_execution_kernel():
     )
     assert event.success is True
     assert event.kind is OperationKind.READ_VALUE
+
+
+@pytest.mark.asyncio
+async def test_semantic_test_state_is_verified_from_grounded_control_attributes():
+    engine = ExecutionEngine(SemanticStateAdapter(), DemoTrace(
+        run_id="semantic-state", objective="activate a tool", started_at=datetime.now(UTC)
+    ))
+    await engine.verify(
+        Postcondition(
+            kind="test_state",
+            expected="active",
+            target=Target(name="Observed tool", role="button"),
+        )
+    )
 
 
 @pytest.mark.asyncio

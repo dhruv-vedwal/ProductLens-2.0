@@ -1,0 +1,7 @@
+{
+  "url": "https://excalidraw.com/",
+  "objective": "Create a detailed chat application architecture diagram on the canvas. Use the observed drawing tools to place meaningful components, label them, connect the data flow, and verify the completed diagram.",
+  "audience": "software engineers",
+  "target_duration_seconds": 150,
+  "max_pages": 4
+}

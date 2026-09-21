@@ -42,6 +42,24 @@ from app.providers.errors import ProviderError
 from app.providers.interfaces import LLMProvider
 
 
+def _viewer_facing_intent(operation: SemanticOperation) -> str:
+    """Describe an action in viewer terms instead of leaking its UI verb."""
+    label = operation.target.name if operation.target is not None else "the observed control"
+    if operation.kind is OperationKind.SELECT_OPTION:
+        return f"Explain the available choices for {label} and why the observed selection matters"
+    if operation.kind in {OperationKind.SELECT_DATE, OperationKind.SELECT_DATE_RANGE}:
+        return f"Explain the available date choices for {label} and show the selected date"
+    if operation.kind in {
+        OperationKind.FILL_TEXT,
+        OperationKind.FILL_EMAIL,
+        OperationKind.FILL_PHONE,
+    }:
+        return f"Explain the role of {label} and show the value being entered"
+    if operation.kind is OperationKind.SUBMIT or operation.kind is OperationKind.CREATE_RECORD:
+        return f"Explain what completing {label} changes and how the resulting state proves it"
+    return f"Explain why {operation.intent.rstrip('.')} matters to the viewer"
+
+
 def _certify_operations(
     operations: list[SemanticOperation],
     *,
@@ -199,6 +217,33 @@ class PlanningCoreMixin:
                 )
             )
         )
+        # A readable page is not evidence that a requested action can be
+        # replaced by a route/scroll tour.  The old branch selected the
+        # deterministic evidence fallback whenever PageKnowledge existed,
+        # which silently discarded provider-proposed form, canvas, drag, and
+        # dependent-control operations.  That is precisely how a recording
+        # could open a product yet never visibly create, fill, draw, or verify
+        # the requested result.  Action objectives must go through the
+        # structured workflow planner so semantic operations can be proposed
+        # from the current evidence and then guarded by _validate/_ground.
+        action_objective = bool(
+            mutation_request
+            or resolution.selected_capability_id is not None
+            or re.search(
+                r"\b(?:fill|type|enter|select|choose|submit|save|book|draw|connect|drag|drop|"
+                r"create|add|update|edit|configure|upload|apply)\b",
+                objective_lower,
+            )
+        )
+        # Authorized isolated-record creation is compiled from the separately
+        # rehearsed capability below.  Its base story may remain the grounded
+        # evidence flow; the capability compiler is the interaction planner
+        # for that boundary.  Other action requests (canvas gestures, form
+        # inspection, filters, uploads, etc.) must use the structured planner.
+        action_planner_required = action_objective and not (
+            objective_spec
+            and "create_isolated_record" in objective_spec.permitted_mutations
+        )
         if (
             mutation_request
             and not walkthrough_request
@@ -259,19 +304,30 @@ class PlanningCoreMixin:
             # local reading beat survives.  The model remains available for
             # extraction/editorial enrichment, but it cannot replace the
             # workflow proof owned by ProductLens.
-            if candidate is not None and context.page_knowledge:
+            if candidate is not None and context.page_knowledge and not action_planner_required:
                 proposal = self._evidence_fallback(candidate, context)
             else:
                 # Compatibility for callers that provide only a live element
-                # snapshot (before discovery materialises PageKnowledge).
-                # Those requests still use the validated structured planner.
+                # snapshot (before discovery materialises PageKnowledge), and
+                # all explicit action objectives.  The structured planner is
+                # validated below; it is never trusted merely because the
+                # provider returned schema-valid JSON.
                 try:
                     proposal = await self.provider.structured(
                         self._prompt(objective, context, allow_external_side_effects),
                         WorkflowProposal,
                     )
                 except (ValidationError, ProviderError):
+                    if action_planner_required:
+                        raise PlanningValidationError(
+                            "action objective could not produce a validated evidence-grounded workflow"
+                        )
                     proposal = self._evidence_fallback(candidate, context)
+        # Repair underspecified visual gestures before the first workflow
+        # validation pass; otherwise a model's correct surface/intent but
+        # missing path is rejected before the generic geometry repair can run.
+        proposal = self._repair_missing_postconditions(proposal)
+        proposal = self._repair_visual_gestures(proposal, context)
         if not complete_objective:
             proposal = self._compile_navigation(proposal, context)
             try:
@@ -281,6 +337,12 @@ class PlanningCoreMixin:
                     raise PlanningValidationError(scope_failures[0])
             except PlanningValidationError as error:
                 if "not authorized" in str(error):
+                    raise
+                if action_planner_required:
+                    # Do not downgrade an explicit interaction request to a
+                    # polished route tour.  A failed action plan is an honest
+                    # planning failure and must trigger targeted exploration
+                    # or repair, not a misleading video.
                     raise
                 proposal = self._evidence_fallback(candidate, context)
             # The deterministic fallback is not exempt from the same evidence
@@ -433,6 +495,12 @@ class PlanningCoreMixin:
                     # control. The base evidence flow remains valid when no
                     # capability can be compiled safely.
                     pass
+        # Provider plans for visual editors may identify the correct surface
+        # and semantic intent while omitting a concrete pointer path. Repair
+        # only from observed surface geometry before validation/grounding; if
+        # no surface witness exists, the normal validation gate still fails
+        # closed instead of inventing coordinates.
+        proposal = self._repair_visual_gestures(proposal, context)
         steps = self._ground(proposal, context)
         # Isolated demo records must never reuse an observed customer/contact
         # value. Keep this broad and evidence-driven: it is derived from the
@@ -520,7 +588,7 @@ class PlanningCoreMixin:
                     operation=operation,
                     page_requirement=operation.target.source_url if operation.target else None,
                     importance="critical" if operation.critical else "supporting",
-                    narration_intent=f"Explain why {operation.intent.lower()} matters to the viewer.",
+                    narration_intent=_viewer_facing_intent(operation),
                     visual_intent="Show the target and enough surrounding product context to understand the result.",
                     fallback_strategy="semantic re-ground before dispatch; never replay a dispatched side effect",
                     allowed_retries=1,

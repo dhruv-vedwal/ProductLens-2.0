@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 from playwright.async_api import Error as PlaywrightError
@@ -513,6 +514,42 @@ class ExecuteMixin:
                     capability_resolutions=list(context.capability_resolutions),
                 )
 
+                async def reconnect_cloud_page_if_needed() -> Any | None:
+                    """Reattach Playwright when a remote redirect rotates its target."""
+                    nonlocal page, production, remote
+                    if not cloud_production:
+                        return page
+                    target_closed = getattr(page, "is_closed", lambda: False)()
+                    if not target_closed:
+                        try:
+                            await page.title()
+                            return page
+                        except PlaywrightError:
+                            target_closed = True
+                    if not target_closed:
+                        return page
+                    if session is None:
+                        return None
+                    try:
+                        fresh_remote = await asyncio.wait_for(
+                            pw.chromium.connect_over_cdp(session.connect_url, timeout=30_000),
+                            timeout=35,
+                        )
+                        fresh_context = fresh_remote.contexts[0]
+                        fresh_pages = [
+                            candidate
+                            for candidate in reversed(list(fresh_context.pages))
+                            if not candidate.is_closed()
+                        ]
+                        if fresh_pages:
+                            remote = fresh_remote
+                            production = fresh_context
+                            page = fresh_pages[0]
+                            return page
+                        await fresh_remote.close()
+                    except (PlaywrightError, TimeoutError, IndexError):
+                        return None
+
                 async def observe_auth_action(
                     operation_id: str,
                     kind: str,
@@ -656,6 +693,26 @@ class ExecuteMixin:
                         action_observer=observe_auth_action,
                         captcha_event_observer=observe_captcha_event,
                     )
+                    await reconnect_cloud_page_if_needed()
+                    # Some remote identity flows close the login target after
+                    # the redirect instead of reusing it. Reacquire the
+                    # provider's replacement page before the editorial hold;
+                    # Playwright storage remains attached to the same context.
+                    # This is a generic lifecycle recovery, not a route or
+                    # application-specific login rule.
+                    if getattr(page, "is_closed", lambda: False)():
+                        replacement = next(
+                            (
+                                candidate
+                                for candidate in reversed(list(production.pages))
+                                if not candidate.is_closed()
+                            ),
+                            None,
+                        )
+                        if replacement is None:
+                            replacement = await production.new_page()
+                            await replacement.goto(url, wait_until="domcontentloaded")
+                        page = replacement
                     # A walkthrough always establishes its opening state before
                     # the first gesture. This footage is real product time, not
                     # a renderer-held screenshot.
@@ -663,6 +720,24 @@ class ExecuteMixin:
                         (storyboard.scenes[0].required_dwell_seconds if storyboard else 5.0) * 1000
                     )
                     await page.wait_for_timeout(opening_hold_ms)
+                    await reconnect_cloud_page_if_needed()
+                    # A redirect can close the authenticated target a few
+                    # seconds after the submit callback. Check again after the
+                    # opening hold so the execution kernel never begins with a
+                    # stale CDP page reference.
+                    if getattr(page, "is_closed", lambda: False)():
+                        replacement = next(
+                            (
+                                candidate
+                                for candidate in reversed(list(production.pages))
+                                if not candidate.is_closed()
+                            ),
+                            None,
+                        )
+                        if replacement is None:
+                            replacement = await production.new_page()
+                            await replacement.goto(url, wait_until="domcontentloaded")
+                        page = replacement
                     # The recorder already loaded the requested URL to capture
                     # its entrance state. Replaying an identical first Navigate
                     # immediately refreshes the page and makes a human demo look
@@ -683,7 +758,11 @@ class ExecuteMixin:
                         if scene.operation_id
                     }
                     try:
-                        execution_adapter = PlaywrightAdapter(page, cloud_mode=remote is not None)
+                        execution_adapter = PlaywrightAdapter(
+                            page,
+                            cloud_mode=remote is not None,
+                            reconnect_page=reconnect_cloud_page_if_needed,
+                        )
 
                         async def semantic_boundary_observer(
                             operation: SemanticOperation,
@@ -781,7 +860,20 @@ class ExecuteMixin:
                             force_light_theme="light theme" in objective.lower()
                             or "light themed" in objective.lower(),
                             capture_event_screenshots=remote is None,
-                            semantic_boundary_observer=semantic_boundary_observer,
+                            # Stagehand remains part of cloud discovery and
+                            # planning.  During production capture, the
+                            # Browserbase session is owned by this Playwright
+                            # execution context; opening a second CDP client
+                            # at every boundary can rotate/close the target
+                            # that is carrying the recording.  Keep the
+                            # deterministic executor as the sole production
+                            # session owner and use its captured evidence for
+                            # the same editorial boundary contract.
+                            semantic_boundary_observer=(
+                                semantic_boundary_observer
+                                if not cloud_production
+                                else None
+                            ),
                         )
                         # Cloud sessions have finite provider leases. Bound
                         # semantic execution below that lease so native-video
@@ -1034,7 +1126,10 @@ class ExecuteMixin:
             "presentation/semantic-moments.json",
             [item.model_dump(mode="json") for item in result.moments],
         )
-        artifacts.write_json("presentation/sync-edl.json", sync_edl_from_moments(result))
+        artifacts.write_json(
+            "presentation/sync-edl.json",
+            sync_edl_from_moments(result, target_duration_seconds=plan.target_duration_seconds),
+        )
         # Keep lifecycle records independently queryable for recovery and QA;
         # the complete trace remains the source of truth for replay.
         artifacts.write_json(
@@ -1049,7 +1144,7 @@ class ExecuteMixin:
             "execution/verification-results.json",
             [item.model_dump(mode="json") for item in result.verification_results],
         )
-        coverage = inspect_coverage(plan, result)
+        coverage = inspect_coverage(plan, result, strict_interaction_evidence=True)
         artifacts.write_json("qa/coverage-report.json", coverage)
         if coverage["hard_failures"]:
             raise RuntimeError(f"Coverage QA rejected execution: {coverage['missing_outcomes']}")

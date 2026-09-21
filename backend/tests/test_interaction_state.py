@@ -25,6 +25,45 @@ def test_behavior_classification_uses_observed_semantics_not_field_name():
     assert classify_control(slot)[0] == "time_slot"
 
 
+def test_date_typed_slot_picker_prefers_semantic_slot_behavior():
+    observed = {
+        "name": "Select Booking Time",
+        "tag": "input",
+        "type": "date",
+        "role": "",
+        "haspopup": "listbox",
+    }
+
+    assert classify_control(observed)[0] == "combobox"
+
+
+def test_time_input_is_distinguished_from_a_date_picker():
+    observed = {"name": "appointment time", "tag": "input", "type": "date"}
+
+    assert classify_control(observed)[0] == "time_slot"
+
+
+@pytest.mark.asyncio
+async def test_native_time_input_uses_the_generic_typing_adapter():
+    observed = {"name": "Appointment time", "tag": "input", "type": "time"}
+
+    assert classify_control(observed)[0] == "time_input"
+    descriptor = descriptor_from_observation(observed, surface_id="page:booking")
+    operation = SemanticOperation(
+        kind=OperationKind.FILL_TEXT,
+        intent="Enter the appointment time",
+        target=Target(name="Appointment time"),
+        value="10:30",
+    )
+
+    async def dispatch(_operation):
+        return {"typing_started": True}
+
+    # The registry must not drop time inputs on the unadapted fallback path.
+    result = await BehaviorAdapterRegistry().execute(operation, descriptor, dispatch)
+    assert result["behavior_adapter"] == "TextInputAdapter"
+
+
 def test_stable_control_identity_survives_value_and_option_changes():
     base = {
         "name": "Doctor",

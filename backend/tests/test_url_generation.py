@@ -22,6 +22,7 @@ from app.contracts.models import (
     Target,
     WorkflowProposal,
 )
+from app.contracts.editorial import EditorialBrief
 from app.planning.capabilities import compile_rehearsal_operations
 from app.planning.production import PlanningValidationError, ProductionPlanningService
 from app.planning.synthetic import hydrate_operations
@@ -43,6 +44,19 @@ class EvidenceAwarePlanner:
                 must_show=["invite form", "invitation outcome"],
                 permitted_mutations=["create_isolated_record"],
                 safe_action_policy="authorized_mutations",
+            )
+        if schema is EditorialBrief:
+            # The production pipeline has a distinct editorial-enrichment
+            # contract after workflow planning. Keep this fixture provider
+            # schema-aware so it cannot accidentally return a workflow object
+            # for a brief request.
+            return EditorialBrief(
+                title="Invite teammate walkthrough",
+                product_purpose="Invite a teammate from the Users workspace.",
+                opening_message="Welcome to Demo hub. Today we will invite a teammate and verify the result.",
+                navigation_order=["Users"],
+                facts=[],
+                excluded_areas=[],
             )
         evidence = json.loads(prompt.split("Observed evidence: ", maxsplit=1)[1])
         users_route = next(route for route in evidence["routes"] if "section-users.html" in route)
@@ -432,9 +446,11 @@ async def test_url_generation_rejects_a_short_render_that_cannot_satisfy_its_sto
         (tmp_path / "runs" / "url-run" / "qa" / "delivery-report.json").read_text()
     )
     assert not delivery["deliverable"]
-    assert {"RENDER_TOO_SHORT", "EDITORIAL_DURATION_BELOW_STORYBOARD_MINIMUM"}.issubset(
-        delivery["hard_failures"]
+    assert (
+        {"RENDER_TOO_SHORT", "RENDER_BELOW_OBJECTIVE_MINIMUM_DURATION"}
+        & set(delivery["hard_failures"])
     )
+    assert "EDITORIAL_DURATION_BELOW_STORYBOARD_MINIMUM" in delivery["hard_failures"]
     narration = json.loads(
         (tmp_path / "runs" / "url-run" / "presentation" / "narration-script.json").read_text()
     )

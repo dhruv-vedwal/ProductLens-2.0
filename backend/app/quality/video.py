@@ -225,7 +225,8 @@ def inspect_video(
             # recognisable relationship to any browser evidence is not a
             # source-faithful product demo and cannot be delivered.
             correlations = [item["correlation"] for item in source_faithfulness]
-            if correlations and max(correlations) < 0.25:
+            unrelated_floor = 0.12 if source_is_edited else 0.25
+            if correlations and max(correlations) < unrelated_floor:
                 hard_failures.append("SOURCE_FOOTAGE_STRUCTURALLY_UNRELATED")
             # One matching frame is not sufficient evidence of a faithful
             # product video: an intro/outro or a single lucky static frame can

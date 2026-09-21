@@ -386,12 +386,10 @@ def render_remotion(
                         # copy when a matching event caption exists. The EDL
                         # track remains the authoritative native timing.
                         "text": str(
-                            (
-                                approved_caption_by_event.get(
-                                    str((moment.get("event_ids") or [""])[0]), {}
-                                ).get("text")
-                                or caption_track["text"]
-                            )
+                            approved_caption_by_event.get(
+                                str((moment.get("event_ids") or [""])[0]), {}
+                            ).get("text")
+                            or caption_track["text"]
                         ),
                         "start": round(start, 3),
                         "end": round(end, 3),
@@ -401,7 +399,7 @@ def render_remotion(
     scaled_captions = edl_caption_rows or captions or []
     if options.get("subtitles_enabled") is False:
         scaled_captions = []
-    if scaled_captions and narration_asset is None and not edl_caption_rows:
+    if scaled_captions and narration_asset is None:
         screen_seconds = screen_frames / frame_rate
         evidence_captions = _evidence_timed_captions(
             trace, scaled_captions, screen_seconds=screen_seconds

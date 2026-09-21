@@ -78,6 +78,21 @@ async def run(args: argparse.Namespace) -> None:
     if args.run_id:
         record = repository.get_run(args.run_id)
         created = False
+        # A supervised process can be terminated after claiming a stage but
+        # before it writes the terminal checkpoint. Requeue that abandoned
+        # stage when an operator explicitly resumes the run; otherwise the
+        # supervisor sees a permanently RUNNING row and silently skips the
+        # actual execution.
+        repository.ensure_stage_jobs(args.run_id)
+        if record["status"] in {"RUNNING", "QUEUED", "RETRYING"}:
+            for stage_job in repository.stage_jobs(args.run_id):
+                if stage_job["status"] == "RUNNING":
+                    repository.update_stage_job(
+                        args.run_id,
+                        stage_job["stage"],
+                        status="QUEUED",
+                        error_code="SUPERVISOR_REQUEUED",
+                    )
         if record["status"] == "RUNNING":
             trace_path = (
                 Path(record["artifact_root"]) / "runs" / record["id"] / "execution" / "trace.json"

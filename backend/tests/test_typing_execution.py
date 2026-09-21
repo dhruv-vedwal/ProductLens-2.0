@@ -4,6 +4,8 @@ from app.contracts.models import OperationKind, SemanticOperation, Target
 from app.execution.playwright_adapter import (
     PlaywrightAdapter,
     _canonical_date,
+    _canonical_date_from_visible_label,
+    _canonical_time,
     _visible_date_keystrokes,
 )
 
@@ -58,3 +60,16 @@ def test_date_keystrokes_keep_iso_and_locale_visible_forms():
     assert _canonical_date("2026-09-15") == "2026-09-15"
     assert _canonical_date("09/15/2026") == "2026-09-15"
     assert "09152026" in _visible_date_keystrokes("2026-09-15")
+
+
+def test_calendar_labels_are_normalized_without_widget_specific_selectors():
+    assert _canonical_date_from_visible_label("September 30, 2026") == "2026-09-30"
+    assert _canonical_date_from_visible_label("Wed 30 Sep 2026") == "2026-09-30"
+    assert _canonical_date_from_visible_label("2026-09-30") == "2026-09-30"
+
+
+def test_native_time_values_are_normalized_for_segmented_control_verification():
+    assert _canonical_time("10:30") == "10:30"
+    assert _canonical_time("10:30 AM") == "10:30"
+    assert _canonical_time("10:30 PM") == "22:30"
+    assert _canonical_time("1030") == "10:30"

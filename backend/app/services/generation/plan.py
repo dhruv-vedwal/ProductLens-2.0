@@ -67,6 +67,35 @@ class PlanMixin:
         # resuming them must not reintroduce the broad route crawl that the
         # current objective explicitly excludes.
         deterministic_objective = _objective_spec(objective)
+        # Safety permissions are part of the user's objective contract, not a
+        # model preference.  An objective that explicitly authorizes one
+        # isolated synthetic record must retain that permission even when an
+        # older discovery artifact (or a conservative model response) stored
+        # ``read_only``.  Reconcile only the deterministic, request-derived
+        # mutation fields; never broaden permissions beyond the request.
+        if (
+            context.objective is not None
+            and deterministic_objective.permitted_mutations
+            and (
+                context.objective.permitted_mutations
+                != deterministic_objective.permitted_mutations
+                or context.objective.safe_action_policy
+                != deterministic_objective.safe_action_policy
+                or context.objective.safe_actions_only
+                != deterministic_objective.safe_actions_only
+            )
+        ):
+            context = context.model_copy(
+                update={
+                    "objective": context.objective.model_copy(
+                        update={
+                            "safe_action_policy": deterministic_objective.safe_action_policy,
+                            "permitted_mutations": deterministic_objective.permitted_mutations,
+                            "safe_actions_only": deterministic_objective.safe_actions_only,
+                        }
+                    )
+                }
+            )
         if (
             context.objective is not None
             and deterministic_objective.demo_type != "full_walkthrough"
@@ -238,7 +267,12 @@ class PlanMixin:
             return plan
         storyboard = build_editorial_storyboard(context, plan)
         storyboard = await enrich_editorial_brief(context, storyboard, self.planner.provider)
-        storyboard = await enrich_editorial_storyboard(context, storyboard, self.planner.provider)
+        storyboard = await enrich_editorial_storyboard(
+            context,
+            storyboard,
+            self.planner.provider,
+            {step.operation.id: step.operation for step in plan.workflow_steps},
+        )
         artifacts.write_json(
             "presentation/editorial-brief.json", storyboard.brief.model_dump(mode="json")
         )

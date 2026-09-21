@@ -226,6 +226,9 @@ class PageCaptureMixin:
                     name: semanticName, selector, controlType,
                     tag: node.tagName.toLowerCase(), role,
                     inputType: type,
+                    haspopup: node.getAttribute('aria-haspopup') || '',
+                    ariaAutocomplete: node.getAttribute('aria-autocomplete') || '',
+                    contenteditable: node.isContentEditable === true,
                     dependsOn: dependencyHint.split(',').map(value => value.trim()).filter(Boolean).slice(0, 8),
                     validationMessages,
                     // Browser-native validation is ideal, but form libraries
@@ -258,9 +261,15 @@ class PageCaptureMixin:
             behavior_class, _confidence = classify_control(
                 {
                     "name": item["name"],
+                    "label": item["name"],
                     "tag": item.get("tag"),
                     "role": item.get("role"),
                     "type": item.get("inputType"),
+                    "haspopup": item.get("haspopup"),
+                    "ariaAutocomplete": item.get("ariaAutocomplete"),
+                    "contenteditable": item.get("contenteditable"),
+                    "depends_on": item.get("dependsOn", []),
+                    "disabled": item.get("disabled"),
                     "options": item.get("options", []),
                 }
             )
@@ -334,17 +343,25 @@ class PageCaptureMixin:
         # that later block safe rehearsal compilation—then fill remaining
         # choice controls within a small bounded budget.
         pending_choice_enrichment = 0
+        choice_behaviors = {"time_slot", "dependent_async", "autocomplete", "combobox", "native_select"}
         ordered_fields = sorted(
             schema.fields,
             key=lambda field: (
                 0
-                if field.control_type.casefold() in {"select", "combobox"} and not field.options
+                if (
+                    field.control_type.casefold() in {"select", "combobox"}
+                    or field.behavior_class.casefold() in choice_behaviors
+                )
+                and not field.options
                 else 1,
                 0 if field.required else 1,
             ),
         )
         for field in ordered_fields:
-            if field.control_type.casefold() not in {"select", "combobox"} or field.options:
+            if (
+                field.control_type.casefold() not in {"select", "combobox"}
+                and field.behavior_class.casefold() not in choice_behaviors
+            ) or field.options:
                 enriched.append(field)
                 continue
             if pending_choice_enrichment >= 6:
@@ -382,7 +399,14 @@ class PageCaptureMixin:
                 ]
             )
         locators.append(page.get_by_label(field.name, exact=True))
-        if field.control_type.casefold() == "combobox":
+        is_choice = field.control_type.casefold() in {"select", "combobox"} or field.behavior_class.casefold() in {
+            "time_slot",
+            "dependent_async",
+            "autocomplete",
+            "combobox",
+            "native_select",
+        }
+        if is_choice:
             locators.append(page.get_by_role("combobox", name=field.name, exact=True))
         if field.selector.startswith(("#", "[")):
             locators.append(page.locator(field.selector))
@@ -423,7 +447,7 @@ class PageCaptureMixin:
                     continue
             if control is not None:
                 break
-        if control is None and field.control_type.casefold() == "combobox":
+        if control is None and is_choice:
             # Last-resort: attribute/name hints often survive when the
             # accessible name is only rendered as a floating label.
             hint = re.sub(r"[^a-z0-9]", "", field.name.casefold())
@@ -441,7 +465,7 @@ class PageCaptureMixin:
                             control = candidate
                 except PlaywrightError:
                     pass
-        if control is None and field.control_type.casefold() == "combobox":
+        if control is None and is_choice:
             semantic_candidates = await page.locator("[role='combobox']").evaluate_all(
                 """(nodes, fieldName) => {
                     const normal = value => (value || '').replace(/\\s+/g, ' ').trim().toLocaleLowerCase();
@@ -481,7 +505,7 @@ class PageCaptureMixin:
             return field
         try:
             await control.click(timeout=5_000)
-            if field.control_type.casefold() == "combobox":
+            if is_choice:
                 # Design-system autocompletes often need an explicit popup
                 # affordance or keyboard open after focus; try both before
                 # treating the control as optionless.
@@ -515,20 +539,28 @@ class PageCaptureMixin:
                 harvested = await page.evaluate(
                     """() => {
                       const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
-                      const selected = document.querySelector(
-                        '[role="option"][aria-selected="true"], [role="option"].Mui-focused, [role="option"].Mui-focusVisible'
-                      );
-                      if (selected) {
-                        const label = clean(selected.innerText || selected.textContent);
-                        if (label) return [label];
-                      }
+                      // Keep all visible choices in their observed DOM order.
+                      // Recording only the focused option made dependent
+                      // pickers look like they had an arbitrary single value.
                       const nodes = Array.from(document.querySelectorAll(
                         "[role='option'], [role='listbox'] li, [role='menu'] [role='menuitem'], ul[role='listbox'] li"
                       ));
-                      return nodes
+                      const values = nodes
+                        .filter(node => {
+                          const rect = node.getBoundingClientRect();
+                          const style = window.getComputedStyle(node);
+                          return style.visibility !== 'hidden' && style.display !== 'none' &&
+                            (rect.width || rect.height || node.getAttribute('aria-selected') === 'true');
+                        })
                         .map(node => clean(node.innerText || node.textContent || node.getAttribute('data-value')))
                         .filter(Boolean)
                         .slice(0, 40);
+                      if (values.length) return values;
+                      const selected = document.querySelector(
+                        '[role="option"][aria-selected="true"], [role="option"].Mui-focused, [role="option"].Mui-focusVisible'
+                      );
+                      const fallback = selected ? clean(selected.innerText || selected.textContent) : '';
+                      return fallback ? [fallback] : [];
                     }"""
                 )
                 for label in harvested or []:
@@ -577,7 +609,7 @@ class PageCaptureMixin:
             ]
             chosen = next(
                 (item for item in safe if item.casefold() == observed.casefold()),
-                min(safe, key=str.casefold) if safe else None,
+                safe[0] if safe else None,
             )
             update = {"options": unique}
             if chosen and not observed:
@@ -606,7 +638,10 @@ class PageCaptureMixin:
             ]
             if not safe_options:
                 continue
-            value = min(safe_options, key=str.casefold)
+            # Preserve the product's observed order. Alphabetical selection is
+            # not evidence of a meaningful default and made dependent forms
+            # appear to choose arbitrary branches/categories.
+            value = safe_options[0]
             locators = [page.get_by_label(parent.name, exact=True)]
             if parent.selector.startswith(("#", "[")):
                 locators.append(page.locator(parent.selector))

@@ -78,7 +78,9 @@ class BehaviorAdapterRegistry:
         self._adapters = (
             BehaviorAdapter(
                 "TextInputAdapter",
-                frozenset({"text_input", "email_input", "phone_input", "multiline_input"}),
+                frozenset(
+                    {"text_input", "email_input", "phone_input", "multiline_input", "time_input"}
+                ),
                 text,
             ),
             BehaviorAdapter(
@@ -125,6 +127,48 @@ class BehaviorAdapterRegistry:
                 f"{descriptor.behavior_class}:{operation.kind.value}"
             )
         return matches[0]
+
+    @staticmethod
+    def annotate_observed_result(
+        operation: SemanticOperation, result: Any
+    ) -> Any:
+        """Attach a provider-neutral adapter witness when live evidence is enough.
+
+        Large design systems can expose the active form in a portal or transient
+        surface that is absent from one bounded page snapshot.  The browser
+        adapter still returns independent typing/choice checkpoints.  Preserve
+        those concrete witnesses instead of rejecting a valid action solely
+        because a descriptor wrapper was unavailable at that instant.
+        """
+        if not isinstance(result, dict) or result.get("behavior_adapter"):
+            return result
+        if operation.kind in {
+            OperationKind.FILL_TEXT,
+            OperationKind.FILL_EMAIL,
+            OperationKind.FILL_PHONE,
+            OperationKind.SEARCH,
+        } and result.get("typing_started") and result.get("completed_value_checkpoint") is not None:
+            return {
+                **result,
+                "behavior_adapter": "ObservedTextInputAdapter",
+                "behavior_class": "text_input",
+                "classification_confidence": 0.82,
+            }
+        if operation.kind in {
+            OperationKind.SELECT_OPTION,
+            OperationKind.SELECT_DATE,
+            OperationKind.SELECT_DATE_RANGE,
+        } and (
+            result.get("options_visible")
+            or str(result.get("interaction") or "").startswith(("native-", "custom-"))
+        ):
+            return {
+                **result,
+                "behavior_adapter": "ObservedChoiceAdapter",
+                "behavior_class": "choice",
+                "classification_confidence": 0.82,
+            }
+        return result
 
     async def execute(
         self,

@@ -130,7 +130,7 @@ def review_multimodal(
         }
     try:
         result = reviewer(review_packet)
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
+    except (TypeError, ValueError, RuntimeError, json.JSONDecodeError) as error:
         return {
             "status": "unavailable",
             "provider": "reviewer",

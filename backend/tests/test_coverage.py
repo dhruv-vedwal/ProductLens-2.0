@@ -256,6 +256,47 @@ def test_coverage_proves_read_only_setup_fields_from_modal_and_reversible_action
     assert report["hard_failures"] == []
 
 
+def test_production_coverage_rejects_action_without_browser_interaction_witness():
+    operation = SemanticOperation(
+        id="fill",
+        kind=OperationKind.FILL_TEXT,
+        intent="Enter the name",
+        target=Target(name="Name", selector='[name="name"]'),
+        value="Demo Contact",
+    )
+    plan = DemoPlan.model_construct(
+        objective="Fill a form",
+        narrative_goal="Show the completed form",
+        audience="tester",
+        target_duration_seconds=30,
+        selected_workflow="form",
+        workflow_steps=[WorkflowStep(id="fill", intent=operation.intent, operation=operation)],
+        expected_outcomes=[],
+        viewport_strategy="native",
+        stop_conditions=["done"],
+    )
+    trace = DemoTrace(
+        run_id="strict-interaction",
+        objective="Fill a form",
+        started_at=datetime.now(UTC),
+        events=[
+            InteractionEvent(
+                operation_id="fill",
+                kind=operation.kind,
+                intent=operation.intent,
+                target=operation.target,
+                before={},
+                after={},
+                success=True,
+                duration_ms=1,
+            )
+        ],
+    )
+
+    report = inspect_coverage(plan, trace, strict_interaction_evidence=True)
+    assert "BEHAVIOR_ADAPTER_EVIDENCE_MISSING" in report["hard_failures"]
+
+
 def test_coverage_requires_a_visual_witness_for_a_visible_mutation_outcome():
     operation = SemanticOperation(
         id="submit",

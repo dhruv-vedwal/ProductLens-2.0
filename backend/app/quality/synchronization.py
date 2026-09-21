@@ -45,6 +45,7 @@ def inspect_synchronization(
     narration_requested: bool,
     narration_created: bool,
     explained_intervals: Iterable[tuple[float, float]] = (),
+    caption_event_groups: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Check synchronization while allowing explicit secure transitions.
 
@@ -62,7 +63,18 @@ def inspect_synchronization(
     if not _ordered_subset(script_ids, event_ids):
         failures.append("SCRIPT_TRACE_MISMATCH")
     if caption_ids != script_ids:
-        failures.append("CAPTION_TRACE_MISMATCH")
+        # Rendering may deliberately combine adjacent low-level events into
+        # one semantic moment (for example a multi-field form entry or secure
+        # credential entry).  The caption remains anchored to the first event
+        # while the EDL proves the complete event group.  Treat that as
+        # synchronized; only reject events that have no caption coverage at
+        # all or that are presented out of order.
+        groups = caption_event_groups or {}
+        covered: list[str] = []
+        for caption_id in caption_ids:
+            covered.extend(groups.get(caption_id, [caption_id]))
+        if covered != script_ids:
+            failures.append("CAPTION_TRACE_MISMATCH")
     previous_end = 0.0
     for caption in captions:
         start, end = float(caption.get("start", -1)), float(caption.get("end", -1))

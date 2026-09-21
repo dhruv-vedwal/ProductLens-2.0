@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 from app.artifacts.store import RunArtifacts
@@ -30,6 +31,7 @@ from app.presentation.editorial import (
     enrich_editorial_storyboard,
 )
 from app.presentation.journey import build_journey
+from app.presentation.moments import sync_edl_from_moments
 from app.presentation.scenes import build_scene_plan
 from app.providers.errors import ProviderError
 from app.quality.consistency import validate_selected_candidate_consistency
@@ -37,6 +39,35 @@ from app.quality.editorial import inspect_editorial
 from app.quality.repair import classify_repair
 
 from .render import GenerationPreconditionError
+
+
+def _storyboard_needs_editorial_repair(storyboard: EditorialStoryboard) -> bool:
+    """Detect stale/unsafe prose before trusting a persisted storyboard.
+
+    A storyboard is evidence-derived but still provider output.  Resumable
+    runs may contain a storyboard written by an older writer, so narration
+    must not blindly reuse it after the validator has become stricter.  The
+    checks are deliberately product-neutral: literals, machine enum tokens,
+    route-transition filler, and malformed article joins are all symptoms of
+    a weak editorial line on any application.
+    """
+    normalized_lines: list[str] = []
+    for scene in storyboard.scenes:
+        text = " ".join(str(scene.narration or "").split())
+        normalized_lines.append(text.casefold())
+        if re.search(r"['\"][^'\"]{1,80}['\"]", text):
+            return True
+        if re.search(r"\b[A-Z][A-Z0-9_]{2,}\b", text):
+            return True
+        if re.search(r"\b(?:is|are)\s+now\s+visible\b", text, flags=re.IGNORECASE):
+            return True
+        if "the new the " in text.casefold() or "the new a " in text.casefold():
+            return True
+    # A persisted storyboard with repeated page-fact filler is not a valid
+    # immutable editorial artifact. Rebuild it from the plan so capability
+    # semantics (canvas gestures, form actions, navigation) can be recovered
+    # before asking a provider for any optional prose polish.
+    return any(count >= 2 for count in Counter(normalized_lines).values())
 
 
 def _narration_script_contract(
@@ -119,6 +150,16 @@ class NarrateMixin:
             )
         )
         plan = self._load_plan(artifacts)
+        # A narration retry is also a presentation retry. Rebuild the single
+        # native-speed cut list from the immutable trace so a newly approved
+        # target duration cannot be paired with an older compact EDL.
+        if refresh_editorial:
+            artifacts.write_json(
+                "presentation/sync-edl.json",
+                sync_edl_from_moments(
+                    trace, target_duration_seconds=plan.target_duration_seconds
+                ),
+            )
         plan_consistency_failures = validate_selected_candidate_consistency(
             plan.model_dump(mode="json")
         )
@@ -148,12 +189,39 @@ class NarrateMixin:
                 )
             storyboard = await enrich_editorial_brief(context, storyboard, self.planner.provider)
             storyboard = await enrich_editorial_storyboard(
-                context, storyboard, self.planner.provider
+                context,
+                storyboard,
+                self.planner.provider,
+                {step.operation.id: step.operation for step in plan.workflow_steps},
             )
         elif persisted_storyboard.is_file():
             storyboard = EditorialStoryboard.model_validate(
                 json.loads(persisted_storyboard.read_text(encoding="utf-8"))
             )
+            # Resumed runs can carry a storyboard produced by an older or
+            # overly-permissive writer.  Do not let a stale artifact bypass
+            # the current evidence/quality contract; repair only the prose
+            # from the immutable storyboard facts and trace.
+            if _storyboard_needs_editorial_repair(storyboard):
+                if self.planner is None or self.planner.provider is None:
+                    raise ProviderError(
+                        "openrouter",
+                        None,
+                        "ENRICH_PROVIDER_ERROR: structured provider required for stale storyboard repair",
+                    )
+                # Rebuild the deterministic draft from the immutable plan;
+                # enriching the stale object would retain its already-bad
+                # fallback lines when the provider rejects them.
+                storyboard = build_editorial_storyboard(context, plan)
+                storyboard = await enrich_editorial_brief(
+                    context, storyboard, self.planner.provider
+                )
+                storyboard = await enrich_editorial_storyboard(
+                    context,
+                    storyboard,
+                    self.planner.provider,
+                    {step.operation.id: step.operation for step in plan.workflow_steps},
+                )
         else:
             # No planning artifact — require live enrich; never ship draft skeletons.
             storyboard = build_editorial_storyboard(context, plan)
@@ -165,7 +233,10 @@ class NarrateMixin:
                 )
             storyboard = await enrich_editorial_brief(context, storyboard, self.planner.provider)
             storyboard = await enrich_editorial_storyboard(
-                context, storyboard, self.planner.provider
+                context,
+                storyboard,
+                self.planner.provider,
+                {step.operation.id: step.operation for step in plan.workflow_steps},
             )
         storyboard = bind_storyboard_events(
             storyboard, {event.operation_id for event in trace.events if event.success}
@@ -616,8 +687,17 @@ class NarrateMixin:
                 if opening_text and product_lines:
                     first = dict(product_lines[0])
                     first_text = str(first.get("text") or "").strip()
-                    if opening_text not in first_text:
-                        first["text"] = f"{opening_text} {first_text}".strip()
+                    # The opening storyboard scene may already have been
+                    # folded into the first product scene by an earlier
+                    # attempt. Remove that copy before binding it again, then
+                    # retain only the greeting sentence plus the page-local
+                    # explanation. This keeps the shared event under the
+                    # viewer-ready sentence bound on every retry.
+                    remainder = first_text
+                    if opening_text in remainder:
+                        remainder = remainder.replace(opening_text, "", 1).strip()
+                    intro_sentence = re.split(r"(?<=[.!?])\s+", opening_text, maxsplit=1)[0]
+                    first["text"] = f"{intro_sentence} {remainder}".strip()
                     first["opening"] = True
                     product_lines = [first, *product_lines[1:]]
                 script = [*auth_lines, *product_lines]
@@ -685,6 +765,10 @@ class NarrateMixin:
                 }
             )
             artifacts.write_json("presentation/storyboard.json", storyboard.model_dump(mode="json"))
+        # Persist the exact pre-QA script so a rejected resumable run can be
+        # diagnosed without replaying the browser trace or guessing which
+        # storyboard line was bound to an event.
+        artifacts.write_json("narration/debug-script.json", script)
         editorial = inspect_editorial(
             context=context, plan=plan, trace=trace, storyboard=storyboard, script=script
         )

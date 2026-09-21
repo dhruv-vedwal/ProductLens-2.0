@@ -347,6 +347,21 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
         "presentable",
         "human",
         "like",
+        "needed",
+        "valid",
+        "resolve",
+        "resolves",
+        "overlay",
+        "overlays",
+        "select",
+        "selects",
+        "choose",
+        "chooses",
+        "available",
+        "dependency",
+        "dependencies",
+        "matters",
+        "changed",
     }
     words = [word for word in re.findall(r"[a-z0-9]{3,}", lower) if word not in objective_noise]
     requested = list(dict.fromkeys(words))[:12]
@@ -365,6 +380,28 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
     walkthrough_entity = (
         " ".join(walkthrough_match.group("entity").split()) if walkthrough_match else None
     )
+    if walkthrough_entity is None:
+        # Imperative workflow requests commonly omit the words "walkthrough
+        # of" (for example, "demonstrate the complete booking workflow").
+        # Capture the observed subject before the generic workflow noun.
+        workflow_match = re.search(
+            r"\b(?:the\s+)?(?P<entity>[a-z][a-z0-9 /&_\-]{1,100}?)\s+workflow\b",
+            lower,
+        )
+        if workflow_match:
+            candidate = " ".join(workflow_match.group("entity").split())
+            candidate = re.split(
+                r"\b(?:through|using|via|with|after|before|then|and)\b",
+                candidate,
+                maxsplit=1,
+            )[0].strip()
+            candidate = re.sub(
+                r"^(?:(?:demonstrate|explain|show|create|creating|complete|full|actual|visible|requested|relevant|the|a|an|one|isolated|new)\s+)+",
+                "",
+                candidate,
+            )
+            candidate = re.sub(r"\s+(?:complete|full|actual|visible)$", "", candidate)
+            walkthrough_entity = candidate.strip() or None
     if walkthrough_entity:
         # Keep the requested noun phrase, but remove narrator framing that
         # providers and users commonly place around it.  Without this
@@ -602,6 +639,16 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
         primary_entity = (
             re.sub(r"\s+(?:workflow|flow)$", "", relationships[0].target).strip() or None
         )
+    isolated_creation = bool(
+        re.search(
+            r"\b(?:create|add|submit|save|book|register)\b[^.;]{0,120}\b(?:isolated|synthetic|demo|test)\b",
+            lower,
+        )
+        and not re.search(
+            r"\b(?:do\s+not|don't|without)\b[^.;]{0,40}\b(?:create|add|submit|save|book|register)\b",
+            lower,
+        )
+    )
     return ObjectiveSpec(
         video_type=video_type,
         raw=objective,
@@ -626,6 +673,9 @@ def _objective_spec(objective: str) -> ObjectiveSpec:
         # merely accumulated remote idle time; an overlong capture is returned
         # to planning for selective, evidence-backed coverage.
         maximum_duration_seconds=240 if full else 180,
+        safe_action_policy="authorized_side_effects" if isolated_creation else "read_only",
+        permitted_mutations=["create_isolated_record"] if isolated_creation else [],
+        safe_actions_only=not isolated_creation,
     )
 
 

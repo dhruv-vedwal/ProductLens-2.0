@@ -15,6 +15,8 @@ from app.contracts.models import (
 )
 from app.evaluation.completion_audit import audit_run
 from app.evaluation.sample_video_benchmark import compare_to_sample_benchmark
+from app.planning.brief import build_demo_brief
+from app.planning.state_machine import WorkflowStateMachine
 from app.presentation.journey import build_journey, inspect_journey
 from app.presentation.scenes import build_scene_plan
 from app.quality.consistency import validate_selected_candidate_consistency
@@ -22,7 +24,11 @@ from app.quality.coverage import inspect_coverage
 from app.quality.delivery import delivery_report
 from app.quality.editorial import inspect_editorial
 from app.quality.multimodal import build_review_packet, review_multimodal
-from app.quality.outcomes import inspect_diagram_semantics
+from app.quality.outcomes import (
+    infer_diagram_state_from_trace,
+    inspect_certified_outcomes,
+    inspect_diagram_semantics,
+)
 from app.quality.presentation import (
     attach_presentation_qa,
     inspect_presentation,
@@ -156,6 +162,7 @@ class QaMixin:
         source_time_map: list[tuple[float, float]] | None = None
         source_is_edited = False
         source_edit_path = artifacts.presentation / "source-edit-plan.json"
+        raw_windows: object = None
         if source_edit_path.exists():
             try:
                 source_edit = json.loads(source_edit_path.read_text(encoding="utf-8"))
@@ -170,7 +177,7 @@ class QaMixin:
                     source_video = candidate_source
                     source_is_edited = True
             raw_windows = source_edit.get("windows") if isinstance(source_edit, dict) else None
-            if not source_is_edited and isinstance(raw_windows, list):
+        if not source_is_edited and isinstance(raw_windows, list):
                 parsed_windows: list[tuple[float, float]] = []
                 for window in raw_windows:
                     if not isinstance(window, dict):
@@ -182,6 +189,27 @@ class QaMixin:
                     if end > start:
                         parsed_windows.append((start, end))
                 source_time_map = parsed_windows or None
+        # New renders persist the content-addressed editorial source in the
+        # Sync EDL rather than the legacy source-edit-plan file.  QA must use
+        # that exact source timeline when comparing frames; comparing a cut
+        # render back to the 7-minute raw recording shifts every sample into a
+        # different browser state and falsely reports unrelated footage.
+        if not source_is_edited:
+            sync_path = artifacts.presentation / "sync-edl.json"
+            try:
+                sync_payload = json.loads(sync_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                sync_payload = {}
+            render_meta = sync_payload.get("render") if isinstance(sync_payload, dict) else None
+            rendered_source = (
+                render_meta.get("rendered_source") if isinstance(render_meta, dict) else None
+            )
+            if isinstance(rendered_source, str):
+                candidate_source = artifacts.root / rendered_source
+                if candidate_source.is_file():
+                    source_video = candidate_source
+                    source_time_map = None
+                    source_is_edited = True
         # Compatibility for artifacts created before content-addressed source
         # edits. New runs always use the exact rendered_source above.
         if (
@@ -260,6 +288,12 @@ class QaMixin:
         )
         if semantic_diagram_required:
             diagram = trace.diagram_states[-1] if trace.diagram_states else None
+            if diagram is None or inspect_diagram_semantics(diagram):
+                inferred = infer_diagram_state_from_trace(trace, plan)
+                if inferred is not None:
+                    trace.diagram_states.append(inferred)
+                    artifacts.save_trace(trace)
+                    diagram = inferred
             diagram_failures = inspect_diagram_semantics(diagram)
             if diagram_failures:
                 video["hard_failures"] = [
@@ -366,6 +400,16 @@ class QaMixin:
             narration_requested=False,
             narration_created=(artifacts.root / "audio" / "narration.mp3").exists(),
             explained_intervals=secure_transition_intervals(presentation_props),
+            caption_event_groups={
+                str((moment.get("event_ids") or [moment.get("id")])[0]): [
+                    str(event_id)
+                    for event_id in (moment.get("event_ids") or [])
+                ]
+                for moment in (sync_edl.get("moments", []) if isinstance(sync_edl, dict) else [])
+                if isinstance(moment, dict)
+                and isinstance(moment.get("event_ids"), list)
+                and moment.get("event_ids")
+            },
         )
         story_path = artifacts.qa / "story-report.json"
         if story_path.exists():
@@ -383,6 +427,7 @@ class QaMixin:
                 (artifacts.root / "discovery" / "product-context.json").read_text(encoding="utf-8")
             )
         )
+        self._ensure_planning_evidence(artifacts, context=context, plan=plan)
         storyboard_path = artifacts.presentation / "storyboard.json"
         storyboard = (
             EditorialStoryboard.model_validate(
@@ -479,8 +524,22 @@ class QaMixin:
         # Recompute it on every QA/presentation retry: inheriting a prior
         # report would let a stale pre-submit witness survive after the trace
         # or repair boundary changed.
-        coverage = inspect_coverage(plan, trace)
+        coverage = inspect_coverage(plan, trace, strict_interaction_evidence=True)
         artifacts.write_json("qa/coverage-report.json", coverage)
+        # Outcome verification is execution-owned evidence, but QA can be
+        # resumed independently after a render or provider repair. Recompute
+        # and persist it here as well so a targeted retry never loses the
+        # certified-workflow proof required by URL delivery.
+        outcome_report = inspect_certified_outcomes(plan, trace)
+        artifacts.write_json("qa/outcome-report.json", outcome_report)
+        if outcome_report.get("hard_failures"):
+            coverage = {
+                **coverage,
+                "hard_failures": [
+                    *coverage.get("hard_failures", []),
+                    *outcome_report.get("hard_failures", []),
+                ],
+            }
         # Rebuild this pure report from the owned trace on every QA attempt.
         # A target-repair may inherit a stale report from a prior scene plan;
         # delivery must be gated by the current page-completion evidence.
@@ -638,6 +697,56 @@ class QaMixin:
             stale_repair.unlink()
             artifacts.write_manifest()
         return report
+
+    @staticmethod
+    def _ensure_planning_evidence(
+        artifacts: RunArtifacts, *, context: ProductContext, plan: DemoPlan
+    ) -> None:
+        """Materialize immutable planning evidence on resumed/legacy runs.
+
+        Older captures can contain a valid ``plan.json`` and production trace
+        but predate the split planning artifacts.  A render/QA retry must not
+        be rejected because those pure projections were omitted by an older
+        worker or by a targeted-retry clone.  Every projection below is
+        derived from the persisted plan/context; no selectors, routes, or
+        product-specific facts are invented here.
+        """
+        planning = artifacts.root / "planning"
+        planning.mkdir(parents=True, exist_ok=True)
+        if not (planning / "demo-brief.json").is_file():
+            brief = build_demo_brief(
+                context,
+                objective=plan.objective,
+                audience=plan.audience,
+                duration_seconds=plan.target_duration_seconds,
+            )
+            artifacts.write_json("planning/demo-brief.json", brief.model_dump(mode="json"))
+        if not (planning / "capability-resolutions.json").is_file():
+            artifacts.write_json(
+                "planning/capability-resolutions.json",
+                [item.model_dump(mode="json") for item in context.capability_resolutions],
+            )
+        if plan.certified_script is not None and not (
+            planning / "certified-demo-script.json"
+        ).is_file():
+            artifacts.write_json(
+                "planning/certified-demo-script.json",
+                plan.certified_script.model_dump(mode="json"),
+            )
+        if not (planning / "validated-state-graph.json").is_file():
+            artifacts.write_json(
+                "planning/validated-state-graph.json",
+                WorkflowStateMachine.from_operations(
+                    [step.operation for step in plan.workflow_steps]
+                ).artifact(),
+            )
+        if plan.certified_workflow is not None and not (
+            planning / "certified-workflow-graph.json"
+        ).is_file():
+            artifacts.write_json(
+                "planning/certified-workflow-graph.json",
+                plan.certified_workflow.model_dump(mode="json"),
+            )
 
     @staticmethod
     def _duration_floor(plan: DemoPlan) -> int | None:

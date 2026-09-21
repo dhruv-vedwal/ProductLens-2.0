@@ -690,7 +690,7 @@ def _viewer_ready(text: str, title: str = "") -> bool:
     # ``Here, Product Sections Controls Workspace.``; it can overlap evidence
     # yet still says nothing about what the viewer should understand.
     if not normalized.casefold().startswith("welcome to ") and not re.search(
-        r"\b(?:is|are|was|were|has|have|lets|helps|shows|keeps|brings|groups|gathers|contains|connects|supports|organizes|tracks|lists|offers|provides|explains|uses|creates|draws|draw|moves|open|opens|opening|captures|gives|makes|enables|demonstrates|appears|remains|becomes|causes|caused|prevents|reduces|handles|processes|integrates|improves|requires|highlights|presents|introduces|focuses|describes|details|documents|covers|summarizes|summarises|includes|preserves|records|selects|select|selecting|choosing|choose|adds|completes|can|will|names|prepares|places|types|type|enters|enter|fills|fill|sketches|connects|stays|surfaces|reveals|confirms|distinguishes|carries|checks|switch|switches|label|labeled|labelled|engineer|builds|designs|develops|see|sees|contributing|contributes)\b",
+        r"\b(?:is|are|was|were|has|have|lets|helps|shows|keeps|brings|groups|gathers|contains|connects|supports|organizes|tracks|lists|offers|provides|explains|uses|creates|draws|draw|moves|open|opens|opening|captures|gives|makes|enables|demonstrates|appears|remains|becomes|causes|caused|prevents|reduces|handles|processes|integrates|improves|requires|highlights|presents|introduces|focuses|describes|details|documents|covers|summarizes|summarises|includes|preserves|records|selects|select|selecting|choosing|choose|adds|complete|completes|can|will|names|prepares|places|types|type|enters|enter|fills|fill|sketches|connects|stays|surfaces|reveals|confirms|distinguishes|carries|checks|sets|switch|switches|label|labeled|labelled|engineer|builds|designs|develops|see|sees|contributing|contributes)\b",
         normalized,
         flags=re.IGNORECASE,
     ):
@@ -875,6 +875,91 @@ def _concise_scene_subject(value: str) -> str:
     return max(candidates, key=len, default=normalized[:96])
 
 
+def _semantic_operation_narration(operation: object | None) -> str:
+    """Describe a meaningful observed operation before falling back to page facts.
+
+    Rich editors (canvas, diagram, workflow and similar surfaces) often expose
+    the same generic page fact for every gesture.  That fact is valid evidence,
+    but it is not the thing the viewer is watching.  Derive a short sentence
+    from the operation's grounded intent instead.  The patterns describe
+    operation semantics only; labels are supplied by the current run and are
+    never tied to a product or route.
+    """
+    if operation is None:
+        return ""
+    intent = " ".join(str(getattr(operation, "intent", "") or "").split())
+    if not intent:
+        return ""
+
+    def label(pattern: str) -> str:
+        match = re.search(pattern, intent, flags=re.IGNORECASE)
+        return _clean(match.group(1), 120) if match else ""
+
+    kind = getattr(operation, "kind", None)
+    if kind is OperationKind.POINTER_SEQUENCE:
+        quoted_component = re.search(
+            r"\b(?:for|label\s+for)\s+(?:the\s+)?['\"]([^'\"]+)['\"]",
+            intent,
+            flags=re.IGNORECASE,
+        )
+        component = label(
+            r"(?:draw|create|place)\s+(?:a|the)\s+(?:rectangle|box|shape|component)\s+for\s+['\"]?(.+?)['\"]?\.?$"
+        )
+        if quoted_component and re.search(
+            r"\b(?:rectangle|box|shape|component)\b", intent, flags=re.IGNORECASE
+        ):
+            component = _clean(quoted_component.group(1), 120)
+        if not component:
+            component = label(
+                r"(?:draw|create|place)\s+(?:the\s+)?['\"]?(.+?)['\"]?\s+(?:rectangle|component|shape)\b"
+            )
+        component = component.strip(" '\"") if component else component
+        if component:
+            return f"The {component} component is drawn on the observed canvas, adding a concrete part of the requested flow."
+        relationship = label(r"(?:arrow|connector)\s+from\s+['\"]?(.+?)['\"]?\s+to\s+['\"]?(.+?)['\"]?\.?$")
+        if relationship:
+            # The second capture is intentionally read separately below; this
+            # branch keeps the regex tolerant of labels containing spaces.
+            match = re.search(
+                r"(?:arrow|connector)\s+from\s+['\"]?(.+?)['\"]?\s+to\s+['\"]?(.+?)['\"]?\.?$",
+                intent,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                left, right = _clean(match.group(1), 72), _clean(match.group(2), 72)
+                return f"The connection from {left} to {right} is drawn, making the observed data flow explicit."
+        label_match = re.search(
+            r"(?:text\s+)?(?:label|cursor)\s+for\s+(?:the\s+)?['\"]([^'\"]+)['\"]",
+            intent,
+            flags=re.IGNORECASE,
+        )
+        label_text = _clean(label_match.group(1), 120) if label_match else label(
+            r"(?:text\s+)?(?:label|cursor)\s+for\s+['\"]?(.+?)['\"]?\.?$"
+        )
+        label_text = re.sub(r"\s+label$", "", label_text or "", flags=re.IGNORECASE).strip(" '\"")
+        if label_text:
+            return f"The {label_text} label is placed on the observed canvas so the component can be identified."
+    elif kind is OperationKind.KEY_PRESS:
+        value = getattr(operation, "value", None)
+        typed = _clean(str(value), 96) if isinstance(value, str) else ""
+        typed = typed or label(r"type\s+['\"]?(.+?)['\"]?\s+as\s+the\s+label")
+        if typed:
+            return f"The {typed} label is typed into the observed editor, making the component readable."
+    elif kind is OperationKind.CLICK:
+        tool = label(r"select\s+the\s+(.+?)\s+tool\b")
+        if tool:
+            subject = re.search(
+                r"\b(?:draw|label|name|connect)\s+(?:the\s+)?['\"]([^'\"]+)['\"]",
+                intent,
+                flags=re.IGNORECASE,
+            )
+            if subject:
+                action = "label" if re.search(r"\blabel|name\b", intent, re.IGNORECASE) else "draw"
+                return f"The {tool} tool is selected to {action} {subject.group(1)} as the next meaningful canvas step."
+            return f"The {tool} tool is selected to prepare the next observed canvas action."
+    return ""
+
+
 def _observed_narration(context: ProductContext, operation, target: str) -> str:
     """Deterministic safe narration for when editorial generation is unavailable.
 
@@ -892,6 +977,9 @@ def _observed_narration(context: ProductContext, operation, target: str) -> str:
     )
     facts = list(getattr(page, "visible_facts", []) or [])
     all_page_facts = " ".join(str(item) for item in facts)
+    semantic = _semantic_operation_narration(operation)
+    if semantic and _viewer_ready(semantic, target):
+        return semantic
     # Dense accessibility inventories stay as evidence only. Prefer a
     # viewer-ready readable fact; otherwise fall through to skeleton paths.
     # OperationKind only chooses which fact to prefer — never invents copy.
@@ -1240,6 +1328,7 @@ def _distinct_evidence_narration(
 def _repair_repeated_narration(
     context: ProductContext,
     scenes: list[EditorialScene],
+    operations: dict[str, object] | None = None,
 ) -> list[EditorialScene]:
     """Repair model repeats while preserving immutable scene contracts."""
     repaired: list[EditorialScene] = []
@@ -1257,11 +1346,23 @@ def _repair_repeated_narration(
             previous is not None
             and scene.operation_id is not None
             and not re.search(
-                r"architecture card|directional connection|chat flow|architecture map|text tool|visible controls and information|starting context|field is visible|open .*fields|type the observed|choose the observed|submit .*observed",
+                r"architecture card|directional connection|chat flow|architecture map|text tool|visible controls and information|starting context|field is visible|open .*fields|type the observed|choose the observed|submit .*observed|choice sets the observed preference|choose an available|complete .*information this workflow needs|control narrows the visible records",
                 scene.narration,
                 flags=re.IGNORECASE,
             )
         ):
+            operation = (
+                operations.get(scene.operation_id)
+                if operations is not None and scene.operation_id is not None
+                else None
+            )
+            semantic = _semantic_operation_narration(operation)
+            if semantic and _viewer_ready(semantic, scene.title) and not _narration_repeats(
+                semantic, previous.narration
+            ):
+                scene = scene.model_copy(update={"narration": semantic})
+                repaired.append(scene)
+                continue
             page = next(
                 (
                     item
@@ -1273,7 +1374,7 @@ def _repair_repeated_narration(
             )
             local, fact_id = _distinct_evidence_narration(
                 context,
-                None,
+                operation,
                 _clean(scene.title, 72) or "this area",
                 previous.narration,
                 page=page,
@@ -1285,6 +1386,14 @@ def _repair_repeated_narration(
                 if fact_id and fact_id not in evidence:
                     evidence.append(fact_id)
                 scene = scene.model_copy(update={"narration": local, "evidence": evidence})
+            elif operation is not None:
+                # Page-level facts are often identical for every low-level
+                # gesture on a rich editor. Fall back to the operation's
+                # observed semantic intent, which preserves what changed and
+                # why it matters without inventing product claims.
+                local = _observed_narration(context, operation, scene.title)
+                if local and not _narration_repeats(local, previous):
+                    scene = scene.model_copy(update={"narration": local})
         repaired.append(scene)
     return repaired
 
@@ -1427,6 +1536,19 @@ def _facts(context: ProductContext) -> list[EditorialFact]:
 
 def _editorial_evidence(context: ProductContext) -> str:
     """Serialize page-scoped facts for the writer without flattening their provenance."""
+    routes = list(
+        dict.fromkeys(
+            [
+                context.url,
+                *(
+                    str(route)
+                    for route in (getattr(context, "relevant_routes", None) or [])
+                    if str(route).strip()
+                ),
+                *(page.url for page in context.page_knowledge if page.url),
+            ]
+        )
+    )
     pages = [
         {
             "url": page.url,
@@ -1447,6 +1569,10 @@ def _editorial_evidence(context: ProductContext) -> str:
                 "title": context.title,
                 "text": _safe_editorial_text(context.visible_text[:3000]),
             },
+            # Route metadata is navigation evidence, not a route-tour. It lets
+            # the editorial writer and replay providers reason about observed
+            # same-product destinations without inventing URLs.
+            "routes": routes,
             "pages": pages,
             "elements": [
                 {

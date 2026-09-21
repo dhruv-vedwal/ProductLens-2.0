@@ -29,8 +29,8 @@ from app.contracts.models import (
 from app.execution.playwright_adapter import GroundingError, PlaywrightAdapter
 from app.planning.capabilities import (
     CapabilityCompilationError,
-    compile_rehearsal_operations,
     _is_transient_selector,
+    compile_rehearsal_operations,
 )
 from app.planning.certification import certify_rehearsed_capability
 from app.planning.rehearsal import (
@@ -477,9 +477,9 @@ async def _rehearsal_validation_recovery_operations(
                             [
                                 page.get_by_role(
                                     "combobox",
-                                    name=re.compile(rf"^{re.escape(name)}$", re.I),
+                                    name=re.compile(rf"^{re.escape(name)}$", re.IGNORECASE),
                                 ),
-                                page.get_by_label(re.compile(rf"^{re.escape(name)}$", re.I)),
+                                page.get_by_label(re.compile(rf"^{re.escape(name)}$", re.IGNORECASE)),
                                 page.get_by_role("combobox", name=name, exact=False),
                             ]
                         )
@@ -1265,11 +1265,12 @@ class RehearseMixin:
                                                 raw = page.locator(recovery.target.selector)
                                                 raw_count = await raw.count()
                                                 if raw_count:
-                                                    enabled_visible = any(
-                                                        await raw.nth(index).is_visible()
-                                                        and await raw.nth(index).is_enabled()
-                                                        for index in range(raw_count)
-                                                    )
+                                                    enabled_visible = False
+                                                    for index in range(raw_count):
+                                                        item = raw.nth(index)
+                                                        if await item.is_visible() and await item.is_enabled():
+                                                            enabled_visible = True
+                                                            break
                                                     if not enabled_visible:
                                                         continue
                                             grounded, _ = await adapter.grounded_locator(

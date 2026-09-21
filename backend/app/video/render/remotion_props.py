@@ -353,9 +353,11 @@ def _safe_camera_zoom(rect, requested: float, *, source_width: int, source_heigh
         zoom = 1.0
     if rect is None or source_width <= 0 or source_height <= 0:
         return zoom
-    # Keep at least a small margin around the focused evidence.  This is a
-    # target-specific bound, not a global browser-scale change.
-    margin = 0.04
+    # Keep a real context margin around the focused evidence.  A four-percent
+    # margin allowed the browser chrome/page edge to touch the crop, which read
+    # as a cut-off frame in finished demos.  This remains target-specific and
+    # never changes the browser's native scale.
+    margin = 0.09
     cx = (float(rect.x) + float(rect.width) / 2) / source_width
     cy = (float(rect.y) + float(rect.height) / 2) / source_height
     half_w = (float(rect.width) / source_width) * 0.5 + margin
@@ -366,7 +368,7 @@ def _safe_camera_zoom(rect, requested: float, *, source_width: int, source_heigh
     max_zoom_x = 0.5 / max(half_w, abs(cx - 0.5), 0.001)
     max_zoom_y = 0.5 / max(half_h, abs(cy - 0.5), 0.001)
     safe = min(zoom, max(1.0, max_zoom_x), max(1.0, max_zoom_y))
-    return round(min(1.36, max(1.0, safe)), 4)
+    return round(min(1.30, max(1.0, safe)), 4)
 
 
 def _editorial_cut_windows(
@@ -1007,7 +1009,14 @@ def _evidence_timed_captions(
             # next caption's allocated start is the authoritative handoff,
             # so a pre-dispatch cap would create a silent gap and truncate a
             # valid welcome whenever the first gesture begins early.
-            end = min(handoff, max(start + minimum_dwells[index], bridge_hold))
+            # The handoff is a preferred transition boundary, not permission
+            # to truncate a presenter line below its reader-sized minimum.
+            # Keeping the minimum here prevents a 0.1s rounding gap from
+            # turning a valid opening caption into a synchronization failure.
+            end = min(
+                screen_seconds,
+                max(start + minimum_dwells[index], min(handoff, max(bridge_hold, start))),
+            )
         else:
             end = max(start + minimum_dwells[index], min(next_start - 0.1, next_action - 0.2))
             # Remote authentication and SPA transitions can leave a several-

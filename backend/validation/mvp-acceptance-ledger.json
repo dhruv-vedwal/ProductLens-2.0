@@ -984,6 +984,37 @@
           "product_specific_runtime": false,
           "repair_count": 0,
           "deliverable": false
+        },
+        {
+          "run_id": "ec3765d2-3792-4a25-b77d-8f495dd8ba96",
+          "scenario": "SmartSevak Lead",
+          "status": "FAILED",
+          "error": "TimeoutError: ",
+          "finished_at": "2026-09-20T16:07:15.410506+00:00",
+          "artifact_root": "F:\\Productlens_2.0\\ProductLensAI 2.0\\backend\\artifacts\\runs\\ec3765d2-3792-4a25-b77d-8f495dd8ba96",
+          "certified_outcome_graph": true,
+          "matched_form_fields": {},
+          "diagram": {},
+          "behavioral_qa_failures": [],
+          "multimodal": {
+            "status": null,
+            "hard_failures": [],
+            "provider": null
+          },
+          "valid_video": false,
+          "video": {
+            "hard_failures": [
+              "MISSING_OR_EMPTY_RENDER"
+            ],
+            "duration_seconds": null,
+            "bytes": 0
+          },
+          "manual_review_passed": false,
+          "manual_review_path": "qa/manual-sample-review.json",
+          "generality_audit": true,
+          "product_specific_runtime": false,
+          "repair_count": 0,
+          "deliverable": false
         }
       ],
       "progress": {
@@ -1409,6 +1440,19 @@
             "first_pass": false,
             "failed_gates": [
               "certified_outcome_graph",
+              "entity_or_diagram_witness",
+              "usable_multimodal_report",
+              "valid_video_technical_report",
+              "sample_quality_manual_review"
+            ]
+          },
+          {
+            "run_id": "ec3765d2-3792-4a25-b77d-8f495dd8ba96",
+            "scenario": "SmartSevak Lead",
+            "accepted": false,
+            "repair_count": 0,
+            "first_pass": false,
+            "failed_gates": [
               "entity_or_diagram_witness",
               "usable_multimodal_report",
               "valid_video_technical_report",

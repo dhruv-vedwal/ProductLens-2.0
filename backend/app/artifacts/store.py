@@ -433,6 +433,7 @@ class RunArtifacts:
             "EXECUTION": ("discovery", "planning", "plan.json"),
             "NARRATION": (
                 "discovery",
+                "planning",
                 "plan.json",
                 "execution",
                 "presentation",
@@ -445,6 +446,7 @@ class RunArtifacts:
             # the inherited coverage or journey evidence.
             "RENDER": (
                 "discovery",
+                "planning",
                 "plan.json",
                 "execution",
                 "presentation",
@@ -457,6 +459,7 @@ class RunArtifacts:
             ),
             "VIDEO_QA": (
                 "discovery",
+                "planning",
                 "plan.json",
                 "execution",
                 "presentation",

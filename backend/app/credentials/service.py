@@ -247,6 +247,41 @@ class EnvironmentCredentialService:
         # immediately races that asynchronous state and used to surface as a
         # generic Playwright timeout.  Wait for the observed control to become
         # enabled, then classify an unresolved challenge explicitly.
+        async def _activate_visible_challenge() -> bool:
+            """Activate a visible CAPTCHA checkbox without solving it locally."""
+            frame_selectors = (
+                "iframe[src*='recaptcha' i]",
+                "iframe[src*='hcaptcha' i]",
+                "iframe[title*='captcha' i]",
+            )
+            challenge_selectors = (
+                "#recaptcha-anchor",
+                "[role='checkbox']",
+                ".recaptcha-checkbox-border",
+                "input[type='checkbox']",
+            )
+            for frame_selector in frame_selectors:
+                try:
+                    frames = page.locator(frame_selector)
+                    for index in range(await frames.count()):
+                        frame = frames.nth(index)
+                        if not await frame.is_visible():
+                            continue
+                        # Playwright's frame locator keeps this provider/site
+                        # neutral and does not read or submit challenge data.
+                        for challenge_selector in challenge_selectors:
+                            challenge = page.frame_locator(frame_selector).locator(
+                                challenge_selector
+                            )
+                            if await challenge.count() and await challenge.first.is_visible():
+                                await challenge.first.click(timeout=5_000)
+                                return True
+                except (AttributeError, TypeError, PlaywrightError):
+                    continue
+            return False
+
+        if await _captcha_is_present():
+            await _activate_visible_challenge()
         try:
             await page.wait_for_function(
                 """() => [...document.querySelectorAll('button[type="submit"], input[type="submit"]')].some(el => {
@@ -254,11 +289,10 @@ class EnvironmentCredentialService:
                     return !el.disabled && r.width > 0 && r.height > 0;
                 })""",
                 # Browserbase emits a completion marker asynchronously. In
-                # the first instrumented SmartSevak run the solver took 81s,
-                # so a 45s UI timeout could fail while a supported challenge
-                # was still being solved. Keep this bounded, but allow the
-                # provider's solver event to complete before classifying the
-                # form as blocked.
+                # A supported challenge can take longer than a normal form
+                # transition. Keep this bounded, but allow the provider's
+                # solver event to complete before classifying the form as
+                # blocked.
                 timeout=120_000,
             )
         except PlaywrightError as error:

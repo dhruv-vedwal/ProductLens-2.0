@@ -22,7 +22,12 @@ def _words(value: str) -> set[str]:
     }
 
 
-def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict[str, Any]:
+def inspect_coverage(
+    plan: DemoPlan,
+    trace: DemoTrace,
+    *,
+    strict_interaction_evidence: bool = False,
+) -> dict[str, Any]:
     """Prove that each promised viewer-facing outcome was actually reached."""
     evidence = "\n".join(
         " ".join(
@@ -227,7 +232,10 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict[str, Any]:
         *(["OBJECTIVE_COVERAGE_INCOMPLETE"] if missing else []),
         *outcome_visual_failures,
     ]
-    if trace.behavioral_states:
+    # Compatibility fixtures may contain only semantic events. Production
+    # delivery explicitly opts into the strict path so a guessed click/fill
+    # can never pass merely because the browser reached a later URL.
+    if trace.behavioral_states or strict_interaction_evidence:
         visible_action_kinds = {
             "FillText",
             "FillEmail",
@@ -240,6 +248,11 @@ def inspect_coverage(plan: DemoPlan, trace: DemoTrace) -> dict[str, Any]:
             "ChooseRadio",
         }
         for event in successful:
+            # Authentication evidence is deliberately redacted and recorded
+            # by the credential boundary, not by the product-form adapter.
+            # Never require a visible value/choice witness for secret fields.
+            if event.operation_id.startswith("auth:"):
+                continue
             if event.kind.value not in visible_action_kinds:
                 continue
             interaction = event.after.get("interaction_evidence")

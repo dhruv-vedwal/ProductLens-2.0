@@ -3,7 +3,7 @@ import pytest
 
 from app.contracts.models import ObjectiveSpec
 from app.providers.errors import ProviderError
-from app.providers.openrouter import OpenRouterProvider
+from app.providers.openrouter import OpenRouterProvider, _normalize_workflow_evidence_refs
 
 
 class Client:
@@ -27,3 +27,21 @@ async def test_openrouter_maps_transport_error_to_safe_provider_error(monkeypatc
     monkeypatch.setattr("app.providers.openrouter.httpx.AsyncClient", Client)
     with pytest.raises(ProviderError, match=r"openrouter provider failure \(429\)"):
         await OpenRouterProvider("key", "model").structured("plan", ObjectiveSpec)
+
+
+def test_openrouter_normalizes_target_objects_in_evidence_refs_without_inventing_routes():
+    payload = {
+        "steps": [
+            {
+                "evidence_refs": [
+                    {"name": "canvas workspace", "selector": "canvas"},
+                    "geometry:https://example.test/:canvas",
+                ]
+            }
+        ]
+    }
+    normalized = _normalize_workflow_evidence_refs(payload)
+    assert normalized["steps"][0]["evidence_refs"] == [
+        "element:canvas workspace",
+        "geometry:https://example.test/:canvas",
+    ]

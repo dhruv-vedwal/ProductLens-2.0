@@ -37,6 +37,21 @@ from app.services.knowledge import product_knowledge_payload
 from .render import GenerationPreconditionError
 
 
+async def _goto_resilient(page, url: str, *, timeout_ms: int = 30_000):
+    """Navigate through slow remote renderers without hiding real page errors."""
+    response = await page.goto(url, wait_until="commit", timeout=timeout_ms)
+    try:
+        await page.wait_for_load_state(
+            "domcontentloaded", timeout=min(timeout_ms, 15_000)
+        )
+    except PlaywrightTimeoutError:
+        # Long-polling/SPAs may never report DOMContentLoaded after the commit;
+        # the committed document is still inspectable and readiness checks will
+        # classify an error page or loading shell explicitly.
+        await page.wait_for_timeout(500)
+    return response
+
+
 def _relevance_graph(context: ProductContext) -> dict[str, object]:
     """Build a compact evidence graph from observed pages and controls."""
     nodes: list[dict[str, object]] = []
@@ -381,7 +396,7 @@ class DiscoverMixin:
             # the canonical requested entry route rather than the last crawl
             # location. This navigation belongs to exploration, never capture.
             if _canonical_url(page.url) != _canonical_url(url):
-                await page.goto(url, wait_until="domcontentloaded")
+                await _goto_resilient(page, url)
                 await page.wait_for_timeout(350)
             decision, probes = await probe_viewport_candidates(
                 page, context.elements, objective, context.page_knowledge
@@ -546,7 +561,7 @@ class DiscoverMixin:
                             timeout=30,
                         )
                         await asyncio.wait_for(
-                            page.goto(url, wait_until="domcontentloaded", timeout=30_000),
+                            _goto_resilient(page, url, timeout_ms=30_000),
                             timeout=35,
                         )
                         captcha_events: list[dict[str, str]] = []
@@ -724,7 +739,7 @@ class DiscoverMixin:
                     context = await browser.new_context(viewport={"width": 1440, "height": 900})
                     try:
                         page = await context.new_page()
-                        await page.goto(url, wait_until="domcontentloaded")
+                        await _goto_resilient(page, url)
                         authenticated = await self.credential_service.authenticate_if_required(
                             page, credential_reference
                         )
@@ -781,6 +796,24 @@ class DiscoverMixin:
                     await browser.close()
         if authenticated or (credential_reference and product.authentication_state == "unknown"):
             product = product.model_copy(update={"authentication_state": "authenticated"})
+        # Keep explicitly requested isolated-demo mutations intact even when a
+        # provider returns the conservative read-only interpretation.  This is
+        # derived from the request grammar and applies to every product; it is
+        # not a site-specific allowance.  The executor still requires a
+        # certified workflow and verifies the resulting state before delivery.
+        deterministic_objective = _objective_spec(objective)
+        if product.objective is not None and deterministic_objective.permitted_mutations:
+            product = product.model_copy(
+                update={
+                    "objective": product.objective.model_copy(
+                        update={
+                            "safe_action_policy": deterministic_objective.safe_action_policy,
+                            "permitted_mutations": deterministic_objective.permitted_mutations,
+                            "safe_actions_only": deterministic_objective.safe_actions_only,
+                        }
+                    )
+                }
+            )
         if product.objective is not None and allow_isolated_record_creation:
             product = product.model_copy(
                 update={

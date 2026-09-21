@@ -579,7 +579,7 @@ class DemoJobService:
                 narration_created=False,
                 explained_intervals=secure_transition_intervals(presentation_props),
             )
-            coverage = inspect_coverage(plan, trace)
+            coverage = inspect_coverage(plan, trace, strict_interaction_evidence=True)
             artifacts.write_json("qa/coverage-report.json", coverage)
             story = json.loads((artifacts.qa / "story-report.json").read_text(encoding="utf-8"))
             artifacts.write_json("qa/video-report.json", video)
@@ -731,7 +731,16 @@ class DemoJobService:
                 status="FAILED",
                 error_code=error_code,
             )
-            logger.error("demo_job_stage_failed", stage=stage, error_type=type(error).__name__)
+            logger.error(
+                "demo_job_stage_failed",
+                stage=stage,
+                error_type=type(error).__name__,
+                # Keep the owning precondition visible in supervised runs;
+                # the message is already redacted by the stage contract and
+                # is essential for repairing a resumable artifact without
+                # replaying browser actions.
+                error=str(error)[:1000],
+            )
             self._persist_failed_browser_session(run_id)
             retry_id = self._schedule_automatic_repair(
                 run_id, stage, payload=payload, error=error
